@@ -95,9 +95,9 @@ local function sidecar_spawn(spawned)
 end
 
 describe('agent.sidecar_env', function()
-  it('carries only the approval deadline when nothing else is configured', function()
+  it('carries the approval deadline and the big-change root when nothing else is set', function()
     config.setup({})
-    eq({ NVIME_APPROVAL_TIMEOUT_MS = '60000' }, agent.sidecar_env())
+    eq({ NVIME_APPROVAL_TIMEOUT_MS = '60000', NVIME_BIG_ROOT = agent.big_root() }, agent.sidecar_env())
   end)
 
   it('carries the configured claude path, model and approval deadline', function()
@@ -107,10 +107,17 @@ describe('agent.sidecar_env', function()
     })
     eq({
       NVIME_APPROVAL_TIMEOUT_MS = '5000',
+      NVIME_BIG_ROOT = agent.big_root(),
       NVIME_CLAUDE_PATH = '/opt/homebrew/bin/claude',
       NVIME_MODEL = 'claude-opus-5',
     }, agent.sidecar_env())
     config.setup({})
+  end)
+
+  it('puts big-change worktrees outside every repo, under stdpath data', function()
+    local root = agent.big_root()
+    ok(vim.startswith(root, vim.fs.normalize(vim.fn.stdpath('data'))), root)
+    ok(root:match('/nvime/big$') ~= nil, root)
   end)
 end)
 

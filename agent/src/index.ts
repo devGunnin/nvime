@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getSessionMessages, listSessions, query } from '@anthropic-ai/claude-agent-sdk';
+import { BigService } from './big.js';
+import { BigStore, defaultBigRoot } from './bigstore.js';
 import { ChatService } from './chat.js';
 import { parseContextBlocks } from './context.js';
 import { EditService, parseScope } from './edit.js';
@@ -66,14 +68,28 @@ function main(): void {
           approvalTimeoutMs: readApprovalTimeout(process.env.NVIME_APPROVAL_TIMEOUT_MS),
         });
 
+  const bigStore = new BigStore(process.env.NVIME_BIG_ROOT ?? defaultBigRoot(process.env));
+  const big =
+    claudePath === null
+      ? null
+      : new BigService({
+          sdk: { query },
+          store: bigStore,
+          claudePath,
+          env: process.env,
+          emit: (event, params) => write({ event, params }),
+          model: process.env.NVIME_MODEL,
+        });
+
   const dispatcher = new Dispatcher(write);
-  registerHandlers(dispatcher, { chat, edit }, claudePath, store.path);
+  registerHandlers(dispatcher, { chat, edit, big }, claudePath, store.path);
   readStdin(dispatcher);
 }
 
 interface Services {
   chat: ChatService | null;
   edit: EditService | null;
+  big: BigService | null;
 }
 
 /**
@@ -130,7 +146,7 @@ function registerHandlers(
   claudePath: string | null,
   storePath: string,
 ): void {
-  const { chat, edit } = services;
+  const { chat, edit, big } = services;
   let claudeVersion: string | null = null;
 
   dispatcher.register('ping', async () => {
@@ -143,7 +159,7 @@ function registerHandlers(
       claudePath,
       claudeVersion,
       authOk: chat?.authOk ?? null,
-      activeRuns: (chat?.activeRuns ?? 0) + (edit?.activeRuns ?? 0),
+      activeRuns: (chat?.activeRuns ?? 0) + (edit?.activeRuns ?? 0) + (big?.activeRuns ?? 0),
       storePath,
       strippedEnv: strippedNames(process.env),
     };
@@ -208,7 +224,82 @@ function registerHandlers(
     ),
   }));
 
-  // Seam for later phases: `big.*` (P3) registers here.
+  registerBigHandlers(dispatcher, big);
+}
+
+/**
+ * Big Change mode. Every method names the project root and, past `create`, the
+ * session it acts on; the sidecar holds no "current" big change, so two open
+ * editors cannot disagree about which one a keystroke meant.
+ */
+function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): void {
+  dispatcher.register('big.create', async (_id, params) => ({
+    session: present(big).create(requireAbsolutePath(params, 'root'), requireString(params, 'title')),
+  }));
+
+  dispatcher.register('big.list', async (_id, params) => ({
+    sessions: present(big).list(requireAbsolutePath(params, 'root')),
+  }));
+
+  dispatcher.register('big.open', async (_id, params) => ({
+    session: present(big).open(requireAbsolutePath(params, 'root'), requireString(params, 'sessionId')),
+  }));
+
+  dispatcher.register('big.diff', async (_id, params) => ({
+    diff: present(big).diff(requireAbsolutePath(params, 'root'), requireString(params, 'sessionId')),
+  }));
+
+  dispatcher.register('big.intake', async (id, params) => ({
+    session: await present(big).intake(id, {
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+      message: requireString(params, 'message'),
+    }),
+  }));
+
+  dispatcher.register('big.approve', async (_id, params) => ({
+    session: await present(big).approve(requireAbsolutePath(params, 'root'), requireString(params, 'sessionId')),
+  }));
+
+  dispatcher.register('big.build', async (id, params) => ({
+    session: await present(big).build(id, {
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+    }),
+  }));
+
+  dispatcher.register('big.capture', async (id, params) => ({
+    session: await present(big).capture(id, {
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+    }),
+  }));
+
+  dispatcher.register('big.revise', async (id, params) => ({
+    session: await present(big).revise(id, {
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+      blockId: requireString(params, 'blockId'),
+      comment: requireString(params, 'comment'),
+    }),
+  }));
+
+  dispatcher.register('big.toggle', async (_id, params) => ({
+    session: present(big).toggleBlock(
+      requireAbsolutePath(params, 'root'),
+      requireString(params, 'sessionId'),
+      requireString(params, 'blockId'),
+      requireBoolean(params, 'resolved'),
+    ),
+  }));
+
+  dispatcher.register('big.discard', async (_id, params) =>
+    present(big).discard(requireAbsolutePath(params, 'root'), requireString(params, 'sessionId')),
+  );
+
+  dispatcher.register('big.cancel', async (_id, params) => ({
+    cancelled: present(big).cancel(requireTarget(params)),
+  }));
 }
 
 async function readClaudeVersion(claudePath: string): Promise<string | null> {

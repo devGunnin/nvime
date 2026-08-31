@@ -27,6 +27,7 @@ function M.all(opts)
     { scope = 'global', mode = 'n', lhs = keymaps.edit, desc = 'nvime: edit this file' },
     { scope = 'global', mode = 'x', lhs = keymaps.edit, desc = 'nvime: edit the selection' },
     { scope = 'global', mode = 'n', lhs = keymaps.changeset, desc = 'nvime: review the changeset' },
+    { scope = 'global', mode = 'n', lhs = keymaps.big, desc = 'nvime: open a big change' },
     { scope = 'panel-chat', mode = 'n', lhs = '<C-r>', desc = 'nvime: pick a session' },
     { scope = 'panel-chat', mode = 'n', lhs = '<C-c>', desc = 'nvime: stop the running turn' },
     { scope = 'panel-chat', mode = 'n', lhs = 'q', desc = 'nvime: close the chat panel' },
@@ -36,6 +37,18 @@ function M.all(opts)
     { scope = 'panel-changeset', mode = 'n', lhs = 'r', desc = 'nvime: revert this hunk' },
     { scope = 'panel-changeset', mode = 'n', lhs = 'd', desc = 'nvime: toggle the unified diff' },
     { scope = 'panel-changeset', mode = 'n', lhs = 'q', desc = 'nvime: close the changeset' },
+    { scope = 'panel-big', mode = 'n', lhs = '<C-r>', desc = 'nvime: pick a big change' },
+    { scope = 'panel-big', mode = 'n', lhs = '<C-t>', desc = 'nvime: open the review threads' },
+    { scope = 'panel-big', mode = 'n', lhs = '<C-c>', desc = 'nvime: stop the big change' },
+    { scope = 'panel-big', mode = 'n', lhs = 'q', desc = 'nvime: close the big change panel' },
+    { scope = 'threads', mode = 'n', lhs = ']t', desc = 'nvime: next thread' },
+    { scope = 'threads', mode = 'n', lhs = '[t', desc = 'nvime: previous thread' },
+    { scope = 'threads', mode = 'n', lhs = 'a', desc = 'nvime: answer this thread' },
+    { scope = 'threads', mode = 'n', lhs = 'r', desc = 'nvime: request changes' },
+    { scope = 'threads', mode = 'n', lhs = 'X', desc = 'nvime: re-open or clear a trivial thread' },
+    { scope = 'threads', mode = 'n', lhs = 'M', desc = 'nvime: merge' },
+    { scope = 'threads', mode = 'n', lhs = '<CR>', desc = 'nvime: open this file in the worktree' },
+    { scope = 'threads', mode = 'n', lhs = 'q', desc = 'nvime: close the review' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<CR>', desc = 'nvime: send the prompt' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<C-r>', desc = 'nvime: pick a session' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<C-c>', desc = 'nvime: stop the running turn' },
@@ -99,6 +112,9 @@ function M.apply(opts)
   vim.keymap.set('n', opts.keymaps.changeset, function()
     require('nvime.changeset').open()
   end, { silent = true, desc = 'nvime: review the changeset' })
+  vim.keymap.set('n', opts.keymaps.big, function()
+    require('nvime.big').open()
+  end, { silent = true, desc = 'nvime: open a big change' })
   -- The selection has to be read before leaving visual mode, so each of these
   -- captures it first and drops back to normal mode afterwards.
   local function from_selection(fn)

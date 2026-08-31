@@ -65,6 +65,11 @@ local function groups(p)
     NvimeError = { fg = p.error },
     NvimeSession = { fg = p.session },
     NvimeSelected = { fg = p.accent, bold = true },
+    -- Big change review: the chip a thread carries in the list.
+    NvimeThreadDefend = { fg = p.error, bold = true },
+    NvimeThreadClear = { fg = p.session, bold = true },
+    NvimeThreadAuto = { fg = p.dim },
+    NvimeThreadOpen = { fg = p.accent, bold = true },
     -- Live edit: a fresh hunk, then the dimmer group it fades through.
     NvimeEditAdd = { bg = p.add_bg },
     NvimeEditChange = { bg = p.change_bg },

@@ -180,3 +180,37 @@ export function classifyTool(
   if (isWithin(realRoot, resolved.path)) return { kind: 'allow', path: resolved.path };
   return { kind: 'ask', reason: 'writes outside the project root', path: resolved.path };
 }
+
+/**
+ * Big-change builds. The worktree IS the sandbox: it is detached, disposable
+ * and outside the user's tree, so the agent works inside it unattended and the
+ * review gate — not a permission prompt — is where a human looks at the result.
+ *
+ * The differences from `classifyTool`, and why:
+ *   * Shell runs without asking. A build has to be able to run the tests.
+ *   * Nothing ASKS. A build outlives the editor by design, so a prompt could
+ *     be raised with nobody there to answer it; the fail-safe answer with no
+ *     human present is no, and denying says so immediately.
+ *
+ * The boundary is honest about its limit: a write is confined because nvime
+ * resolves the path and refuses, but a shell command is not confinable — `cd`
+ * costs nothing. Inside the worktree is where the agent is TOLD to work and
+ * where its file tools are held; for shell it is advice, not enforcement.
+ */
+export function classifyBuildTool(
+  toolName: string,
+  input: Record<string, unknown>,
+  realWorktree: string,
+): ToolDecision {
+  if ((READ_ONLY_TOOLS as readonly string[]).includes(toolName)) return { kind: 'allow' };
+  if ((SHELL_TOOLS as readonly string[]).includes(toolName)) return { kind: 'allow' };
+  const key = FILE_PATH_KEYS[toolName];
+  if (key === undefined) return { kind: 'deny', reason: `nvime has no policy for the ${toolName} tool` };
+  const raw = readPath(input, key);
+  if (raw === null) return { kind: 'deny', reason: `${toolName} named no ${key}` };
+  if (!isAbsolute(raw)) return { kind: 'deny', reason: `${toolName} needs an absolute ${key}` };
+  const resolved = tryRealPathOf(raw);
+  if (!resolved.ok) return { kind: 'deny', reason: resolved.reason };
+  if (isWithin(realWorktree, resolved.path)) return { kind: 'allow', path: resolved.path };
+  return { kind: 'deny', reason: 'a big change may only write inside its own worktree' };
+}

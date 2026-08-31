@@ -14,6 +14,7 @@ local defaults = {
     send_selection = '<leader>ns',
     edit = '<leader>ne',
     changeset = '<leader>nd',
+    big = '<leader>nB',
   },
   edit = {
     -- How long a fresh hunk stays brightly highlighted before it dims.
@@ -68,6 +69,7 @@ local function validate(opts)
   check_type(opts.keymaps.send_selection, 'string', 'keymaps.send_selection')
   check_type(opts.keymaps.edit, 'string', 'keymaps.edit')
   check_type(opts.keymaps.changeset, 'string', 'keymaps.changeset')
+  check_type(opts.keymaps.big, 'string', 'keymaps.big')
   check_type(opts.edit.fade_ms, 'number', 'edit.fade_ms')
   if opts.edit.fade_ms < 100 then
     fail('edit.fade_ms must be at least 100')

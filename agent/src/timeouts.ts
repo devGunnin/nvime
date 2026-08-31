@@ -8,5 +8,11 @@
 /** Bounds `readClaudeVersion`, the only slow step a `ping` can be waiting on. */
 export const CLAUDE_VERSION_PROBE_TIMEOUT_MS = 10_000;
 
+/**
+ * Bounds one git call. Generous: `worktree add` on a large repo checks out a
+ * whole tree, and a capture diffs it again.
+ */
+export const GIT_TIMEOUT_MS = 120_000;
+
 /** How long a shutdown waits for in-flight requests to answer before exiting. */
 export const DRAIN_TIMEOUT_MS = CLAUDE_VERSION_PROBE_TIMEOUT_MS + 2000;
