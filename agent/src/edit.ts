@@ -1,5 +1,5 @@
 import { relative } from 'node:path';
-import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { HookInput, HookJSONOutput, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { ApprovalGate, DEFAULT_APPROVAL_TIMEOUT_MS } from './approvals.js';
 import type { SdkBindings } from './chat.js';
 import { composePrompt, type ContextBlock } from './context.js';
@@ -323,6 +323,12 @@ export class EditService {
       disallowedTools: [...EDIT_DENIED_TOOLS],
       canUseTool: (toolName, input, callbackOptions) =>
         this.#canUseTool(run, toolName, input, callbackOptions.toolUseID),
+      // The callback alone is not enough: in `default` mode the CLI's own
+      // safe-command classifier approves some shell calls without ever asking,
+      // and a decision nvime never saw is a decision it did not make. This hook
+      // runs first and forces the ask, so `canUseTool` really does see every
+      // tool the policy will not auto-allow. Programmatic, not from settings.
+      hooks: { PreToolUse: [{ hooks: [(input) => this.#preToolUse(run, input)] }] },
       // Same reasoning as chat: `'project'` would load the edited repo's
       // .claude/settings.json, whose hooks run shell commands and whose
       // apiKeyHelper/env re-add the credentials env.ts stripped — none of it
@@ -330,6 +336,26 @@ export class EditService {
       settingSources: [],
       ...(resume === undefined ? {} : { resume }),
       ...(this.#model === undefined ? {} : { model: this.#model }),
+    };
+  }
+
+  /**
+   * Forces the permission prompt for anything the policy will not auto-allow,
+   * ahead of every shortcut the CLI has for skipping one. Deferring (an empty
+   * result) leaves the normal path alone, which is what an allowed tool wants.
+   */
+  async #preToolUse(run: Run, input: HookInput): Promise<HookJSONOutput> {
+    if (input.hook_event_name !== 'PreToolUse') return { continue: true };
+    const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
+    const decision = classifyTool(input.tool_name, toolInput, run.realRoot);
+    if (decision.kind === 'allow') return { continue: true };
+    return {
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: decision.kind,
+        permissionDecisionReason: decision.reason,
+      },
     };
   }
 

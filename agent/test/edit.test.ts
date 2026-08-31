@@ -141,6 +141,44 @@ describe('EditService: the SDK options contract', () => {
     }
   });
 
+  it('forces the ask ahead of the CLI, which auto-approves some shell calls', async () => {
+    const h = harness([{ yield: frames.init() }, { yield: frames.success('done') }]);
+    await h.service.start(1, { root: '/work/proj', prompt: 'go', scope: { kind: 'project' } });
+    const hook = h.calls[0]?.options.hooks?.PreToolUse?.[0]?.hooks?.[0];
+    assert.ok(hook !== undefined, 'the pre-tool hook must be installed');
+    const ask = (toolName: string, input: Record<string, unknown>) =>
+      hook(
+        {
+          hook_event_name: 'PreToolUse',
+          tool_name: toolName,
+          tool_input: input,
+          tool_use_id: 't1',
+        } as unknown as Parameters<typeof hook>[0],
+        't1',
+        { signal: new AbortController().signal },
+      );
+
+    const shell = await ask('Bash', { command: 'echo hi' });
+    assert.equal(
+      (shell as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision,
+      'ask',
+      'a shell call the CLI thinks is harmless must still reach the editor',
+    );
+
+    const outside = await ask('Write', { file_path: '/etc/passwd' });
+    assert.equal(
+      (outside as { hookSpecificOutput?: { permissionDecision?: string } }).hookSpecificOutput?.permissionDecision,
+      'ask',
+    );
+
+    const inRoot = await ask('Edit', { file_path: '/work/proj/a.ts' });
+    assert.equal(
+      (inRoot as { hookSpecificOutput?: unknown }).hookSpecificOutput,
+      undefined,
+      'an allowed write is left to the normal path',
+    );
+  });
+
   it('runs with no filesystem settings and a permission mode that still asks', async () => {
     const h = harness([{ yield: frames.init() }, { yield: frames.success('done') }]);
     await h.service.start(1, { root: '/work/proj', prompt: 'go', scope: { kind: 'project' } });

@@ -26,8 +26,9 @@ corporate networks — but together they can route a prompt and your OAuth
 credential through whatever man-in-the-middle you have configured. That is an
 accepted tradeoff, not an oversight.
 
-This is Phase 1: **Chat**. Edit mode (P2) and Big Change with the comprehension
-gate (P3/P4) bolt onto the same RPC seam.
+Two capabilities so far: **Chat** (read-only conversation) and **Edit** (you
+point, it changes, and you watch it happen). Big Change with the comprehension
+gate (P3/P4) bolts onto the same RPC seam.
 
 ## Requirements
 
@@ -58,7 +59,9 @@ sidecar to `agent/dist/index.js`; the plugin runs that file with `node`.
 |---|---|
 | `:Nvime` | capabilities and wiring status |
 | `:Nvime chat` | open the chat panel |
-| `:Nvime cancel` | stop the running turn |
+| `:Nvime edit` | instruct claude about the current file |
+| `:Nvime diff` | review the changeset |
+| `:Nvime cancel` | stop whichever run is going |
 | `:checkhealth nvime` | node, claude, sidecar, keymaps |
 
 Keymaps (off until `keymaps.enabled = true`):
@@ -67,11 +70,16 @@ Keymaps (off until `keymaps.enabled = true`):
 |---|---|---|
 | `<leader>nc` | normal | open chat |
 | `<leader>ns` | visual | send the selection with its file and line range |
+| `<leader>ne` | normal | instruct claude about this file |
+| `<leader>ne` | visual | instruct claude about the selection |
+| `<leader>nd` | normal | review the changeset |
 | `<CR>` | prompt, normal | send |
 | `<C-s>` | prompt, insert | send (so `<CR>` still inserts a newline) |
-| `<C-r>` | panel | session picker |
+| `<C-r>` | chat panel | session picker |
 | `<C-c>` | panel | stop the running turn |
 | `q` | scrollback | close |
+| `y` / `n` | approval float | allow once / deny |
+| `<CR>` / `r` / `d` | changeset | open the file · revert the hunk · unified diff |
 
 Every mapping is a leaf: none is a prefix of another, so nothing ever stalls for
 `timeoutlen`. `tests/lua/keymaps_spec.lua` enforces it and `:checkhealth` reports it.
@@ -93,7 +101,52 @@ session file without overwriting each other.
 `WebSearch`; file mutation and shell are denied through SDK options, not prompt
 text. Editing arrives in P2 behind its own gate.
 
-Chat loads **no** `.claude/settings.json` — not the repo's, not yours. Project
+### Edit
+
+`<leader>ne` (or `:Nvime edit`) opens the edit panel scoped to the current file;
+from visual mode it scopes to the selection. Type the instruction, `<CR>`. The
+prompt stays armed afterwards, so a follow-up continues the same conversation —
+and a follow-up is deliberately not pinned to the original file, so "now do the
+same for the other queue" works.
+
+**Live application.** Every file the agent changes is pushed to the editor as
+its exact before/after the moment the tool finishes. If a buffer holds that
+file, only the changed hunks are rewritten through the buffer API: your cursor
+and scroll position stay put, the changed lines light up and fade after ~1.5s,
+and the buffer is left unmodified and in step with disk — no `:e`, no reload
+prompt, and no W11/W12 warning later. A file nothing has open is simply current
+when you next open it; the panel says it changed.
+
+**One undo block per run, per buffer.** A single `u` reverts everything one run
+did to that buffer. Honestly: `u` reverts the *buffer*. Disk keeps the agent's
+version until you `:w` the reverted buffer.
+
+**Your unsaved work is never clobbered.** If the buffer holds edits the agent
+did not see, nvime refuses to touch it and reports a conflict instead. The
+change is still on disk and still in the changeset — review and revert it from
+`<leader>nd`, or save/discard your edits and re-run.
+
+**Trust is scoped.** Writes under the project root run unattended. A write
+anywhere else, and any shell command, stops and asks — a float with `y`/`n`,
+never a modal, and the editor stays usable while it waits. An unanswered ask
+is denied, as is one whose run you cancelled. The policy lives in the sidecar's
+`canUseTool` callback plus a programmatic `PreToolUse` hook, never in prompt
+text: the hook is there because the CLI's own safe-command classifier would
+otherwise approve some shell calls without asking anyone.
+
+Read-only tools (`Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`) are always
+allowed and are *not* confined to the project root — edit mode scopes what can
+be changed, not what can be read.
+
+**Changeset.** `<leader>nd` lists every file the run touched with its hunks.
+`<CR>` jumps to a hunk, `d` toggles a plain unified diff, and `r` reverts one
+hunk through the same live-application path. A hunk whose lines you have since
+hand-edited refuses to revert rather than writing something neither side asked
+for; a hunk that only moved (because you reverted something above it) still
+reverts correctly. Files the agent created are recorded but not revertible —
+delete them yourself.
+
+Chat and edit both load **no** `.claude/settings.json` — not the repo's, not yours. Project
 settings carry `hooks` (shell commands the model's first `Read` would fire) and
 `apiKeyHelper`/`env` (which put back the credentials nvime just stripped), and
 none of that is gated by the tool lists. Opening an unfamiliar repo must not be
@@ -113,6 +166,13 @@ require('nvime').setup({
     enabled = false,
     chat = '<leader>nc',
     send_selection = '<leader>ns',
+    edit = '<leader>ne',
+    changeset = '<leader>nd',
+  },
+  edit = {
+    fade_ms = 1500,              -- how long a fresh hunk stays lit
+    nofade = false,              -- keep the highlight until the next change
+    approval_timeout_ms = 60000, -- unanswered asks are denied after this
   },
   agent = {
     node = 'node',              -- node binary
@@ -150,8 +210,14 @@ payload, so there is one completion path rather than a separate done event.
 Events (`chat.started`, `chat.delta`, `chat.tool`) carry no `id` field of their
 own — they carry the originating request's id in `params.id`.
 
-P1 methods: `chat.send`, `chat.list`, `chat.history`, `chat.cancel`, `ping`,
-`shutdown`. `edit.*` (P2) and `big.*` (P3) register alongside them.
+Methods: `chat.send`, `chat.list`, `chat.history`, `chat.cancel`,
+`edit.start`, `edit.cancel`, `edit.answer`, `edit.list_changes`, `ping`,
+`shutdown`. `big.*` (P3) registers alongside them.
+
+Edit events: `edit.started`, `edit.delta`, `edit.tool`, `edit.applied` (the
+recorded mutation, with before/after snapshots), `edit.approval` and
+`edit.approval_settled`. The sidecar owns the change record — the changeset
+view re-reads it rather than keeping a second copy that could drift.
 
 Nothing on the Lua side blocks: no `vim.wait` on agent work, no `vim.fn.input`
 or `confirm`, no synchronous process calls. `:checkhealth` is the sole
@@ -175,11 +241,15 @@ luacheck lua plugin tests
 ```
 
 `agent/test/` covers the sidecar (framing, env stripping — including a scan of
-the installed SDK bundle — the session store under concurrent writers, and the
-chat service against a mocked SDK). `tests/lua/` covers the plugin (markdown
-rendering, RPC framing, dispatch and deadlines, sidecar lifecycle, chat wiring,
-health reporting, keymap leaf-only-ness, panel streaming and lifecycle, the
-picker, config validation, context expansion).
+the installed SDK bundle — the session store under concurrent writers, the chat
+and edit services against a mocked SDK, the root boundary including `..` and
+symlink escapes, and the approval gate's deny-by-default exits). `tests/lua/`
+covers the plugin (markdown rendering, RPC framing, dispatch and deadlines,
+sidecar lifecycle, chat and edit wiring, live buffer application with cursor
+preservation, undo grouping and hunk highlights, changeset revert round-trips
+and their conflict refusals, the approval float, health reporting, keymap
+leaf-only-ness, panel streaming and lifecycle, the picker, config validation,
+context expansion).
 
 ## Layout
 
@@ -189,7 +259,12 @@ lua/nvime/
   init.lua            setup(), dashboard
   config.lua          defaults + validation
   chat.lua            the chat capability
-  panel.lua           scrollback + prompt, streaming render
+  edit.lua            the edit capability
+  apply.lua           live buffer application, undo grouping, hunk highlights
+  diffs.lua           pure line diffs and the buffer edits they imply
+  changeset.lua       the review view and per-hunk revert
+  approval.lua        the y/n float for a gated tool
+  panel.lua           named panels: scrollback + optional prompt
   markdown.lua        pure markdown classifier
   rpc.lua             ndjson client over vim.system
   agent.lua           sidecar lifecycle
@@ -202,7 +277,12 @@ agent/src/
   index.ts            stdio loop, method registration
   rpc.ts              dispatcher
   protocol.ts         frames + line splitting
-  chat.ts             the SDK boundary
+  chat.ts             the SDK boundary for chat
+  edit.ts             the SDK boundary for edit, and the change record
+  policy.ts           what edit mode allows, asks about, and denies
+  approvals.ts        parked asks, denied on timeout or cancel
+  snapshot.ts         file before/after, including binary and oversize
+  stream.ts           reading the SDK message stream
   sessions.ts         which sessions are nvime's
   context.ts          context blocks -> prompt
   env.ts              subscription-only environment
