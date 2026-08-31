@@ -1,7 +1,11 @@
---- The chat surface: a scrollback buffer plus a separate prompt buffer in a
+--- The panel engine: a scrollback buffer plus an optional prompt buffer in a
 --- vertical split. Streaming text lands line by line — completed lines are
 --- committed once and never rewritten, only the volatile tail line is redrawn
 --- as deltas arrive, so a long reply stays O(total) rather than O(lines^2).
+---
+--- Panels are instances keyed by name (`chat`, `edit`, `changeset`), so more
+--- than one surface can be open at a time. `M.open` reuses the live panel of
+--- that name rather than stacking splits.
 local markdown = require('nvime.markdown')
 
 local M = {}
@@ -10,7 +14,11 @@ local NS = vim.api.nvim_create_namespace('nvime.panel')
 local SPINNER = { '·', '‥', '…', '‥' }
 local SPINNER_MS = 140
 
-local panel = nil
+local Panel = {}
+Panel.__index = Panel
+
+--- Live panels by name. A closed panel is removed, never left as a husk.
+local panels = {}
 
 local function write_lines(buf, first, last, lines)
   vim.bo[buf].modifiable = true
@@ -32,9 +40,13 @@ local function line_count(buf)
   return vim.api.nvim_buf_line_count(buf)
 end
 
+local function win_valid(win)
+  return win ~= nil and vim.api.nvim_win_is_valid(win)
+end
+
 --- Follows the tail unless the reader has scrolled up to look at something.
 local function follow(self)
-  if self.win == nil or not vim.api.nvim_win_is_valid(self.win) then
+  if not win_valid(self.win) then
     return
   end
   local last = line_count(self.buf)
@@ -101,11 +113,11 @@ local function commit(self, text, info)
 end
 
 local function set_winbar(self)
-  if self.win == nil or not vim.api.nvim_win_is_valid(self.win) then
+  if not win_valid(self.win) then
     return
   end
   local left = self.spinner == nil and '' or (SPINNER[self.spinner_frame] .. ' ')
-  vim.wo[self.win].winbar = '%#NvimeSession#' .. left .. (self.status or 'nvime chat')
+  vim.wo[self.win].winbar = '%#NvimeSession#' .. left .. (self.status_text or self.title)
 end
 
 --- Reclaims a leftover buffer of the same name (the user wiped half a panel);
@@ -141,28 +153,30 @@ local function take_prompt(self)
   return text
 end
 
-local function open_windows(self, opts)
-  vim.cmd(opts.position == 'left' and 'topleft vsplit' or 'botright vsplit')
+local function tune_window(win)
+  vim.wo[win].number = false
+  vim.wo[win].relativenumber = false
+  vim.wo[win].signcolumn = 'no'
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true
+end
+
+local function open_windows(self)
+  vim.cmd(self.position == 'left' and 'topleft vsplit' or 'botright vsplit')
   self.win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(self.win, self.buf)
-  vim.api.nvim_win_set_width(self.win, opts.width)
-  vim.wo[self.win].number = false
-  vim.wo[self.win].relativenumber = false
-  vim.wo[self.win].signcolumn = 'no'
-  vim.wo[self.win].wrap = true
-  vim.wo[self.win].linebreak = true
+  vim.api.nvim_win_set_width(self.win, self.width)
+  tune_window(self.win)
 
+  if self.prompt_buf == nil then
+    return
+  end
   vim.cmd('belowright split')
   self.prompt_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(self.prompt_win, self.prompt_buf)
-  vim.api.nvim_win_set_height(self.prompt_win, opts.prompt_height)
-  vim.wo[self.prompt_win].number = false
-  vim.wo[self.prompt_win].relativenumber = false
-  vim.wo[self.prompt_win].winbar = '%#NvimeDim#prompt · <CR> send (i_<C-s>) · <C-r> sessions · <C-c> stop'
-end
-
-local function win_valid(win)
-  return win ~= nil and vim.api.nvim_win_is_valid(win)
+  vim.api.nvim_win_set_height(self.prompt_win, self.prompt_height)
+  tune_window(self.prompt_win)
+  vim.wo[self.prompt_win].winbar = '%#NvimeDim#' .. self.prompt_hint
 end
 
 --- Rebuilds the layout when the user closed one split with `:q`. Both windows
@@ -171,8 +185,8 @@ end
 --- open after this loop; `stale` tracks it so it can be closed once
 --- `open_windows` has given the tab a sibling, instead of being left behind
 --- showing the same buffer a second time.
-local function ensure_windows(self, opts)
-  if win_valid(self.win) and win_valid(self.prompt_win) then
+local function ensure_windows(self)
+  if win_valid(self.win) and (self.prompt_buf == nil or win_valid(self.prompt_win)) then
     return
   end
   local stale = nil
@@ -182,102 +196,183 @@ local function ensure_windows(self, opts)
     end
   end
   self.win, self.prompt_win = nil, nil
-  open_windows(self, opts)
+  open_windows(self)
   if win_valid(stale) then
     pcall(vim.api.nvim_win_close, stale, true)
   end
 end
 
---- Opens the panel (or focuses it when already open).
---- @param opts table width, prompt_height, position, on_submit, on_cancel, on_history, on_close
+local DEFAULT_PROMPT_HINT = 'prompt · <CR> send (i_<C-s>) · <C-c> stop'
+
+--- Opens the panel named `opts.name`, or focuses it when already open.
+--- @param opts table name, width, position, title; prompt_height/prompt_hint/
+---   on_submit for a panel with a prompt; keys (mode, lhs, fn, desc, where);
+---   on_close, and `prompt = false` for a read-only surface.
+--- @return table the panel handle
 function M.open(opts)
   assert(type(opts) == 'table', 'panel.open needs an options table')
-  assert(type(opts.on_submit) == 'function', 'panel.open needs an on_submit callback')
-  if M.is_open() then
-    ensure_windows(panel, opts)
-    set_winbar(panel)
-    vim.api.nvim_set_current_win(panel.prompt_win)
-    return panel
+  assert(type(opts.name) == 'string' and opts.name ~= '', 'panel.open needs a name')
+  local wants_prompt = opts.prompt ~= false
+  assert(not wants_prompt or type(opts.on_submit) == 'function', 'a prompt panel needs on_submit')
+
+  local live = M.get(opts.name)
+  if live ~= nil then
+    ensure_windows(live)
+    set_winbar(live)
+    live:focus()
+    return live
   end
 
-  local self = {
-    buf = make_buffer('nvime://chat', 'markdown'),
-    prompt_buf = make_buffer('nvime://prompt', 'markdown'),
-    status = nil,
+  local self = setmetatable({
+    name = opts.name,
+    title = opts.title or ('nvime ' .. opts.name),
+    width = opts.width or 80,
+    position = opts.position or 'right',
+    prompt_height = opts.prompt_height or 3,
+    prompt_hint = opts.prompt_hint or DEFAULT_PROMPT_HINT,
+    buf = make_buffer('nvime://' .. opts.name, opts.filetype or 'markdown'),
+    prompt_buf = nil,
+    status_text = nil,
     written = false,
     spinner = nil,
     spinner_frame = 1,
     stream = nil,
     on_close = opts.on_close,
-  }
+  }, Panel)
+  if wants_prompt then
+    self.prompt_buf = make_buffer('nvime://' .. opts.name .. '-prompt', 'markdown')
+  end
   vim.bo[self.buf].modifiable = false
-  open_windows(self, opts)
+  open_windows(self)
 
-  local function submit()
-    local text = take_prompt(self)
-    if text ~= '' then
-      opts.on_submit(text)
+  if wants_prompt then
+    local function submit()
+      local text = take_prompt(self)
+      if text ~= '' then
+        opts.on_submit(text)
+      end
+    end
+    -- <CR> sends from normal mode only; in insert it still inserts a newline,
+    -- so a multi-line prompt stays possible. <C-s> is the insert-mode send.
+    bind(self.prompt_buf, 'n', '<CR>', submit, 'nvime: send the prompt')
+    bind(self.prompt_buf, 'i', '<C-s>', submit, 'nvime: send the prompt')
+  end
+  for _, key in ipairs(opts.keys or {}) do
+    for _, buf in ipairs(self:_key_buffers(key.where)) do
+      bind(buf, key.mode, key.lhs, key.fn, key.desc)
     end
   end
-  -- <CR> sends from normal mode only; in insert it still inserts a newline, so
-  -- a multi-line prompt stays possible. <C-s> is the insert-mode send.
-  bind(self.prompt_buf, 'n', '<CR>', submit, 'nvime: send the prompt')
-  bind(self.prompt_buf, 'i', '<C-s>', submit, 'nvime: send the prompt')
-  for _, buf in ipairs({ self.buf, self.prompt_buf }) do
-    bind(buf, 'n', '<C-r>', opts.on_history, 'nvime: pick a session')
-    bind(buf, 'n', '<C-c>', opts.on_cancel, 'nvime: stop the running turn')
-  end
-  bind(self.buf, 'n', 'q', M.close, 'nvime: close the chat panel')
+  bind(self.buf, 'n', 'q', function()
+    self:close()
+  end, 'nvime: close the panel')
 
-  panel = self
+  panels[opts.name] = self
   set_winbar(self)
-  vim.api.nvim_set_current_win(self.prompt_win)
+  self:focus()
   return self
 end
 
---- True while the panel's buffers live. Windows may be missing — `M.open`
---- redraws them — but a half-wiped panel is dead and must be rebuilt.
-function M.is_open()
-  return panel ~= nil and vim.api.nvim_buf_is_valid(panel.buf) and vim.api.nvim_buf_is_valid(panel.prompt_buf)
+--- @param where string|nil 'scrollback' (default), 'prompt', or 'both'
+function Panel:_key_buffers(where)
+  if where == 'prompt' then
+    return self.prompt_buf == nil and {} or { self.prompt_buf }
+  end
+  if where == 'both' and self.prompt_buf ~= nil then
+    return { self.buf, self.prompt_buf }
+  end
+  return { self.buf }
 end
 
-function M.close()
-  if panel == nil then
+--- The live panel named `name`, or nil. A half-wiped panel is dead: its
+--- buffers are gone, so it is dropped here rather than handed out broken.
+--- @param name string
+--- @return table|nil
+function M.get(name)
+  local self = panels[name]
+  if self == nil then
+    return nil
+  end
+  local alive = vim.api.nvim_buf_is_valid(self.buf)
+    and (self.prompt_buf == nil or vim.api.nvim_buf_is_valid(self.prompt_buf))
+  if alive then
+    return self
+  end
+  panels[name] = nil
+  return nil
+end
+
+--- @param name string
+--- @return boolean
+function M.is_open(name)
+  return M.get(name) ~= nil
+end
+
+--- Closes the panel named `name` if it is open. Safe to call repeatedly.
+function M.close(name)
+  local self = panels[name]
+  if self ~= nil then
+    self:close()
+  end
+  panels[name] = nil
+end
+
+function Panel:focus()
+  local win = win_valid(self.prompt_win) and self.prompt_win or self.win
+  if win_valid(win) then
+    vim.api.nvim_set_current_win(win)
+  end
+end
+
+function Panel:close()
+  if panels[self.name] ~= self then
     return
   end
+  panels[self.name] = nil
   -- The owner may still have a turn running; tell it before the surface goes.
-  if panel.on_close ~= nil then
-    panel.on_close()
+  if self.on_close ~= nil then
+    self.on_close()
   end
-  M.stop_activity()
-  for _, win in ipairs({ panel.prompt_win, panel.win }) do
-    if win ~= nil and vim.api.nvim_win_is_valid(win) then
+  self:stop_activity()
+  for _, win in ipairs({ self.prompt_win, self.win }) do
+    if win_valid(win) then
       pcall(vim.api.nvim_win_close, win, true)
     end
   end
-  for _, buf in ipairs({ panel.prompt_buf, panel.buf }) do
-    if vim.api.nvim_buf_is_valid(buf) then
+  for _, buf in ipairs({ self.prompt_buf, self.buf }) do
+    if buf ~= nil and vim.api.nvim_buf_is_valid(buf) then
       pcall(vim.api.nvim_buf_delete, buf, { force = true })
     end
   end
-  panel = nil
 end
 
 --- @param text string
 --- @param hl string|nil highlight group for the whole line
-function M.append(text, hl)
-  if not M.is_open() then
-    return
-  end
+function Panel:append(text, hl)
   for _, line in ipairs(vim.split(text, '\n', { plain = true })) do
     local spans = hl == nil and {} or { { 0, #line, hl } }
-    commit(panel, line, { spans = spans })
+    commit(self, line, { spans = spans })
   end
-  follow(panel)
+  follow(self)
 end
 
-function M.blank()
-  M.append('', nil)
+function Panel:blank()
+  self:append('', nil)
+end
+
+--- Replaces the whole scrollback. Used by surfaces that re-render a list
+--- rather than stream (the changeset view), never mid-stream.
+--- @param lines string[]
+function Panel:replace(lines)
+  assert(self.stream == nil, 'panel:replace cannot run while a stream is open')
+  vim.api.nvim_buf_clear_namespace(self.buf, NS, 0, -1)
+  write_lines(self.buf, 0, -1, #lines == 0 and { '' } or lines)
+  self.written = #lines > 0
+end
+
+--- @param row integer 0-based scrollback row
+--- @param hl string highlight group applied to the whole row
+function Panel:highlight_row(row, hl)
+  apply_spans(self.buf, row, { { 0, #(vim.api.nvim_buf_get_lines(self.buf, row, row + 1, false)[1] or ''), hl } })
 end
 
 --- @return table markdown render context: carried fence state + open fence rows
@@ -309,25 +404,22 @@ local function commit_md(self, ctx, text)
 end
 
 --- Renders a complete markdown message (a resumed turn, or a one-shot reply).
-function M.append_markdown(text)
-  if not M.is_open() then
-    return
-  end
+function Panel:append_markdown(text)
   local ctx = new_ctx()
   for _, line in ipairs(vim.split(text, '\n', { plain = true })) do
-    commit_md(panel, ctx, line)
+    commit_md(self, ctx, line)
   end
-  close_fence(panel, ctx)
-  follow(panel)
+  close_fence(self, ctx)
+  follow(self)
 end
 
 --- Opens a streaming assistant message. Deltas append to it until `finish_stream`.
-function M.begin_stream()
-  if not M.is_open() then
-    return
+--- @param speaker string|nil header line; nil for a stream with no header
+function Panel:begin_stream(speaker)
+  if speaker ~= nil then
+    self:append(speaker, 'NvimeAgent')
   end
-  M.append('claude', 'NvimeAgent')
-  panel.stream = { pending = '', ctx = new_ctx(), tail_row = nil, swallow_newline = false }
+  self.stream = { pending = '', ctx = new_ctx(), tail_row = nil, swallow_newline = false }
 end
 
 --- Rewrites the volatile tail line; completed lines above it are never touched.
@@ -345,12 +437,20 @@ local function draw_tail(self, text)
   apply_spans(self.buf, row, markdown.scan(text, probe).spans)
 end
 
---- @param text string one streamed delta, which may span line boundaries
-function M.push_delta(text)
-  if not M.is_open() or panel.stream == nil then
+--- Drops the volatile tail line so the next write commits a final one.
+local function clear_tail(self)
+  if self.stream.tail_row == nil then
     return
   end
-  local self = panel
+  write_lines(self.buf, self.stream.tail_row, self.stream.tail_row + 1, {})
+  self.stream.tail_row = nil
+end
+
+--- @param text string one streamed delta, which may span line boundaries
+function Panel:push_delta(text)
+  if self.stream == nil then
+    return
+  end
   self.stream.pending = self.stream.pending .. text
   if self.stream.swallow_newline and vim.startswith(self.stream.pending, '\n') then
     -- An interjection already ended that line; do not emit a blank one for it.
@@ -361,11 +461,7 @@ function M.push_delta(text)
   while newline ~= nil do
     local line = self.stream.pending:sub(1, newline - 1)
     self.stream.pending = self.stream.pending:sub(newline + 1)
-    if self.stream.tail_row ~= nil then
-      -- The tail line is now final: rewrite it in place and commit it.
-      write_lines(self.buf, self.stream.tail_row, self.stream.tail_row + 1, {})
-      self.stream.tail_row = nil
-    end
+    clear_tail(self)
     commit_md(self, self.stream.ctx, line)
     newline = self.stream.pending:find('\n', 1, true)
   end
@@ -376,61 +472,47 @@ function M.push_delta(text)
 end
 
 --- Flushes any partial line and closes the streaming message.
-function M.finish_stream()
-  if not M.is_open() or panel.stream == nil then
+function Panel:finish_stream()
+  if self.stream == nil then
     return
   end
-  local self = panel
-  if self.stream.tail_row ~= nil then
-    write_lines(self.buf, self.stream.tail_row, self.stream.tail_row + 1, {})
-    self.stream.tail_row = nil
-  end
+  clear_tail(self)
   if self.stream.pending ~= '' then
     commit_md(self, self.stream.ctx, self.stream.pending)
   end
   close_fence(self, self.stream.ctx)
   self.stream = nil
-  M.blank()
+  self:blank()
 end
 
 --- Inserts a line into a message that is still streaming (a tool one-liner).
 --- The partial tail is committed first so ordering stays truthful.
-function M.interject(text, hl)
-  if not M.is_open() then
-    return
-  end
-  local stream = panel.stream
+function Panel:interject(text, hl)
+  local stream = self.stream
   if stream ~= nil then
-    if stream.tail_row ~= nil then
-      write_lines(panel.buf, stream.tail_row, stream.tail_row + 1, {})
-      stream.tail_row = nil
-    end
+    clear_tail(self)
     if stream.pending ~= '' then
-      commit_md(panel, stream.ctx, stream.pending)
+      commit_md(self, stream.ctx, stream.pending)
       stream.pending = ''
       stream.swallow_newline = true
     end
   end
-  M.append(text, hl)
+  self:append(text, hl)
 end
 
-function M.status(text)
-  if not M.is_open() then
-    return
-  end
-  panel.status = text
-  set_winbar(panel)
+function Panel:status(text)
+  self.status_text = text
+  set_winbar(self)
 end
 
-function M.start_activity()
-  if not M.is_open() or panel.spinner ~= nil then
+function Panel:start_activity()
+  if self.spinner ~= nil then
     return
   end
-  local self = panel
   self.spinner = vim.uv.new_timer()
   self.spinner:start(0, SPINNER_MS, function()
     vim.schedule(function()
-      if panel ~= self or self.spinner == nil then
+      if panels[self.name] ~= self or self.spinner == nil then
         return
       end
       self.spinner_frame = self.spinner_frame % #SPINNER + 1
@@ -439,21 +521,17 @@ function M.start_activity()
   end)
 end
 
-function M.stop_activity()
-  if panel == nil or panel.spinner == nil then
+function Panel:stop_activity()
+  if self.spinner == nil then
     return
   end
-  panel.spinner:stop()
-  panel.spinner:close()
-  panel.spinner = nil
-  set_winbar(panel)
-end
-
---- Test and health hook: the live panel handle, or nil.
-function M.current()
-  return panel
+  self.spinner:stop()
+  self.spinner:close()
+  self.spinner = nil
+  set_winbar(self)
 end
 
 M.NS = NS
+M.Panel = Panel
 
 return M

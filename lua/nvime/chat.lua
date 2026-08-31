@@ -9,6 +9,21 @@ local picker = require('nvime.picker')
 
 local M = {}
 
+local PANEL = 'chat'
+
+--- Writes to a closed panel are dropped, not errors: a late reply must not
+--- blow up just because the user closed the surface it was headed for.
+local NOOP = setmetatable({}, {
+  __index = function()
+    return function() end
+  end,
+})
+
+--- The chat surface, or the no-op stand-in when the panel is closed.
+local function surface()
+  return panel.get(PANEL) or NOOP
+end
+
 local state = {
   root = nil,
   session_id = nil,
@@ -29,19 +44,19 @@ local function short(session_id)
 end
 
 local function refresh_status(suffix)
-  panel.status(short(state.session_id) .. (suffix and (' · ' .. suffix) or ''))
+  surface():status(short(state.session_id) .. (suffix and (' · ' .. suffix) or ''))
 end
 
 --- Writes a failure into the panel. Deliberately does NOT end a running turn:
 --- a late reply to an unrelated request must not truncate the live stream.
 local function show_error(err)
-  panel.interject('! ' .. (err.message or 'the agent failed'), 'NvimeError')
+  surface():interject('! ' .. (err.message or 'the agent failed'), 'NvimeError')
   if err.detail ~= nil and err.detail ~= '' then
     for _, line in ipairs(vim.split(err.detail, '\n', { plain = true, trimempty = true })) do
-      panel.append('  ' .. line, 'NvimeDim')
+      surface():append('  ' .. line, 'NvimeDim')
     end
   end
-  panel.blank()
+  surface():blank()
 end
 
 local function on_event(name, params)
@@ -52,9 +67,9 @@ local function on_event(name, params)
     state.session_id = params.sessionId
     refresh_status(params.model)
   elseif name == 'chat.delta' then
-    panel.push_delta(params.text)
+    surface():push_delta(params.text)
   elseif name == 'chat.tool' then
-    panel.interject('  ' .. (params.summary or params.tool), 'NvimeDim')
+    surface():interject('  ' .. (params.summary or params.tool), 'NvimeDim')
   elseif name == 'rpc.error' then
     show_error(params.error or { message = 'the sidecar rejected a frame' })
   end
@@ -101,17 +116,17 @@ local function load_history(session_id)
   agent.request('chat.history', { root = state.root, sessionId = session_id, limit = 40 }, function(err, result)
     if err ~= nil then
       -- A missing transcript is not fatal: the session still resumes.
-      panel.append('  could not load the earlier turns: ' .. (err.message or '?'), 'NvimeDim')
+      surface():append('  could not load the earlier turns: ' .. (err.message or '?'), 'NvimeDim')
       finish_restore()
       return
     end
     for _, turn in ipairs(result.turns or {}) do
-      panel.append(turn.role == 'user' and 'you' or 'claude', turn.role == 'user' and 'NvimeUser' or 'NvimeAgent')
-      panel.append_markdown(turn.text)
-      panel.blank()
+      surface():append(turn.role == 'user' and 'you' or 'claude', turn.role == 'user' and 'NvimeUser' or 'NvimeAgent')
+      surface():append_markdown(turn.text)
+      surface():blank()
     end
-    panel.append('— resumed —', 'NvimeDim')
-    panel.blank()
+    surface():append('— resumed —', 'NvimeDim')
+    surface():blank()
     finish_restore()
   end)
 end
@@ -140,18 +155,23 @@ end
 function M.open()
   local opts = config.get()
   subscribe_once()
-  local existed = panel.is_open()
+  local existed = panel.is_open(PANEL)
   if not existed then
     state.root = context.project_root()
   end
   panel.open({
+    name = PANEL,
+    title = 'nvime chat',
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
+    prompt_hint = 'prompt · <CR> send (i_<C-s>) · <C-r> sessions · <C-c> stop',
     on_submit = M.send,
-    on_cancel = M.cancel,
-    on_history = M.pick_session,
     on_close = on_panel_close,
+    keys = {
+      { mode = 'n', lhs = '<C-r>', fn = M.pick_session, desc = 'nvime: pick a session', where = 'both' },
+      { mode = 'n', lhs = '<C-c>', fn = M.cancel, desc = 'nvime: stop the running turn', where = 'both' },
+    },
   })
   if not existed then
     state.restored = false
@@ -180,14 +200,14 @@ function M.send(text, extra)
     table.insert(blocks, 1, extra)
   end
 
-  panel.append('you', 'NvimeUser')
-  panel.append_markdown(text)
+  surface():append('you', 'NvimeUser')
+  surface():append_markdown(text)
   for _, warning in ipairs(warnings) do
-    panel.append('  ' .. warning, 'NvimeError')
+    surface():append('  ' .. warning, 'NvimeError')
   end
-  panel.blank()
-  panel.begin_stream()
-  panel.start_activity()
+  surface():blank()
+  surface():begin_stream('claude')
+  surface():start_activity()
 
   agent.request('chat.send', {
     root = state.root,
@@ -196,8 +216,8 @@ function M.send(text, extra)
     sessionId = state.session_id,
   }, function(err, result)
     state.request_id = nil
-    panel.stop_activity()
-    panel.finish_stream()
+    surface():stop_activity()
+    surface():finish_stream()
     if err ~= nil then
       show_error(err)
       return
@@ -272,8 +292,8 @@ function M.pick_session()
       on_choice = function(session_id)
         state.session_id = session_id
         refresh_status('switched')
-        panel.append('— switched to ' .. short(session_id) .. ' —', 'NvimeDim')
-        panel.blank()
+        surface():append('— switched to ' .. short(session_id) .. ' —', 'NvimeDim')
+        surface():blank()
         load_history(session_id)
       end,
     })

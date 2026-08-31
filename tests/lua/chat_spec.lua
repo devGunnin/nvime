@@ -64,7 +64,7 @@ end
 
 --- Opens chat with `dir/a.lua` as the current buffer and a clean fake sidecar.
 local function open_on(dir)
-  panel.close()
+  panel.close('chat')
   fake.requests = {}
   fake.deferred = {}
   fake.replies = { ['chat.list'] = { err = nil, result = { current = nil, sessions = {} } } }
@@ -79,7 +79,7 @@ end
 --- Like `open_on`, but `chat.list`/`chat.history` answer only when the test
 --- calls `fake.answer` — the race `M.send` racing `M.open`'s restore needs.
 local function open_on_deferred(dir)
-  panel.close()
+  panel.close('chat')
   fake.requests = {}
   fake.deferred = {}
   fake.replies = {
@@ -104,7 +104,7 @@ local function sent(method)
 end
 
 local function scrollback()
-  return vim.api.nvim_buf_get_lines(panel.current().buf, 0, -1, false)
+  return vim.api.nvim_buf_get_lines(panel.get('chat').buf, 0, -1, false)
 end
 
 --- Runs `fn` from a cwd that is not the project, the case finding 1 lived in.
@@ -126,7 +126,7 @@ describe('chat.open', function()
       eq(dir, chat.state().root)
       eq(dir, sent('chat.list').params.root, 'and sends that root, not the cwd')
     end)
-    panel.close()
+    panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)
 
@@ -143,7 +143,7 @@ describe('chat.open', function()
       end, fake.requests)
       eq(1, #lists, 'and the session is not restored a second time')
     end)
-    panel.close()
+    panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)
 end)
@@ -161,7 +161,7 @@ describe('chat.send', function()
       eq(dir .. '/a.lua', request.params.context[1].path)
       ok(request.opts.no_deadline, 'a streaming turn carries no deadline')
     end)
-    panel.close()
+    panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)
 
@@ -175,7 +175,7 @@ describe('chat.send', function()
       end),
       'the warning reaches the scrollback'
     )
-    panel.close()
+    panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)
 
@@ -187,7 +187,7 @@ describe('chat.send', function()
     eq(1, #vim.tbl_filter(function(request)
       return request.method == 'chat.send'
     end, fake.requests))
-    panel.close()
+    panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)
 end)
@@ -225,7 +225,7 @@ describe('sending before restore lands', function()
       ok(new_turn_row ~= nil, 'the new turn was rendered')
       ok(resumed_row < new_turn_row, 'the resumed transcript lands before the new turn, never spliced into it')
     end)
-    panel.close()
+    panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)
 
@@ -234,7 +234,7 @@ describe('sending before restore lands', function()
     open_on(dir) -- fake.replies resolves chat.list synchronously
     chat.send('hello')
     ok(sent('chat.send') ~= nil, 'a normal send is not held up once restored')
-    panel.close()
+    panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)
 end)
@@ -252,7 +252,7 @@ describe('chat events', function()
     local rendered = table.concat(scrollback(), '\n')
     ok(rendered:find('mine', 1, true) ~= nil, 'the running turn streams')
     ok(rendered:find('someone else', 1, true) == nil, 'a stale id must not')
-    panel.close()
+    panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)
 
@@ -268,7 +268,7 @@ describe('chat events', function()
       'the failure is rendered, not swallowed'
     )
     ok(chat.state().request_id ~= nil, 'and an unrelated failure does not truncate the stream')
-    panel.close()
+    panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)
 end)
@@ -281,7 +281,7 @@ describe('closing the panel', function()
     local id = chat.state().request_id
     ok(id ~= nil)
 
-    panel.close()
+    panel.close('chat')
     local cancel = sent('chat.cancel')
     ok(cancel ~= nil, 'the subscription pays for a turn nobody sees')
     eq(id, cancel.params.target)
@@ -291,7 +291,7 @@ describe('closing the panel', function()
   it('says nothing when there is no turn running', function()
     local dir = sandbox()
     open_on(dir)
-    panel.close()
+    panel.close('chat')
     eq(nil, sent('chat.cancel'))
     vim.fn.delete(dir, 'rf')
   end)
