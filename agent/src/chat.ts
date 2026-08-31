@@ -7,7 +7,7 @@ import type {
   SDKSessionInfo,
   SessionMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import { composePrompt, type ContextBlock } from './context.js';
+import { composePrompt, stripContextSections, type ContextBlock } from './context.js';
 import { subscriptionEnv, type Env } from './env.js';
 import { ProtocolError } from './protocol.js';
 import { SessionStore } from './sessions.js';
@@ -28,6 +28,9 @@ export const CHAT_DENIED_TOOLS = [
   'Agent',
   'SlashCommand',
 ] as const;
+
+/** How deep `list` scans the SDK's sessions; a full page means truncation. */
+export const LIST_SCAN_LIMIT = 200;
 
 /** Seam for P2/P3: `edit.*` and `big.*` build their own options here. */
 
@@ -127,9 +130,15 @@ export class ChatService {
   }
 
   async list(root: string, limit: number): Promise<{ current: string | null; sessions: SessionSummary[] }> {
-    const live = await this.#sdk.listSessions({ dir: root, limit: 200 });
+    const live = await this.#sdk.listSessions({ dir: root, limit: LIST_SCAN_LIMIT });
     const byId = new Map(live.map((info) => [info.sessionId, info]));
-    this.#store.retain(root, new Set(byId.keys()));
+    // Only a complete, non-empty listing proves a session is gone. An empty one
+    // is no information (moved store, different HOME, a read that failed inside
+    // the SDK) and a full one is truncated — evicting on either would throw the
+    // resume pointer away for good.
+    if (live.length > 0 && live.length < LIST_SCAN_LIMIT) {
+      this.#store.retain(root, new Set(byId.keys()));
+    }
     const entry = this.#store.get(root);
     const sessions = entry.known
       .map((id) => byId.get(id))
@@ -146,7 +155,9 @@ export class ChatService {
     const turns: Array<{ role: 'user' | 'assistant'; text: string }> = [];
     for (const message of messages) {
       if (message.type !== 'user' && message.type !== 'assistant') continue;
-      const text = extractText(message.message);
+      const raw = extractText(message.message);
+      // A user turn was stored with its attachments inlined; replay the prompt.
+      const text = message.type === 'user' ? stripContextSections(raw).trim() : raw;
       if (text !== '') turns.push({ role: message.type, text });
     }
     return turns;
@@ -217,7 +228,8 @@ export class ChatService {
   #buildOptions(root: string, resume: string | undefined, abort: AbortController): Options {
     return {
       cwd: root,
-      env: this.#env,
+      // A copy per run: the SDK mutates the env object it is handed.
+      env: { ...this.#env },
       pathToClaudeCodeExecutable: this.#claudePath,
       abortController: abort,
       includePartialMessages: true,
@@ -225,9 +237,12 @@ export class ChatService {
       tools: [...CHAT_TOOLS],
       allowedTools: [...CHAT_TOOLS],
       disallowedTools: [...CHAT_DENIED_TOOLS],
-      // Project settings bring the repo's CLAUDE.md; the tool lists above still
-      // bind, so a permissive settings file cannot widen chat past read-only.
-      settingSources: ['project'],
+      // No filesystem settings. `'project'` would load the opened repo's
+      // .claude/settings.json — whose `hooks` run shell commands and whose
+      // `apiKeyHelper`/`env` re-add the credential env.ts just stripped, none
+      // of them gated by the tool lists. Read-only cannot be voidable by the
+      // repo being read. Cost: no CLAUDE.md.
+      settingSources: [],
       ...(resume === undefined ? {} : { resume }),
       ...(this.#model === undefined ? {} : { model: this.#model }),
     };

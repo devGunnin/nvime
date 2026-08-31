@@ -85,6 +85,21 @@ export function composePrompt(prompt: string, blocks: readonly ContextBlock[], c
   return `${sections.join('\n\n')}\n\n${prompt}`;
 }
 
+/** One leading `<context …>` section, exactly as `renderBlock` writes it. */
+const CONTEXT_SECTION = /^<context [^>\n]*>\n[\s\S]*?\n<\/context>\n\n/;
+
+/**
+ * The bare prompt behind a stored transcript message. A resumed turn must not
+ * replay a 150 KB attachment into the panel as something the user typed.
+ * Anchored and non-greedy, so file text that itself contains `</context>` can
+ * cost a little extra trimming but never eats the prompt.
+ */
+export function stripContextSections(text: string): string {
+  let rest = text;
+  while (CONTEXT_SECTION.test(rest)) rest = rest.replace(CONTEXT_SECTION, '');
+  return rest;
+}
+
 function renderBlock(block: ContextBlock, cwd: string): string {
   const shown = relative(cwd, block.path) || block.path;
   switch (block.type) {

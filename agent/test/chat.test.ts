@@ -3,11 +3,17 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import type { Options, SDKMessage, SDKSessionInfo } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  Options,
+  SDKMessage,
+  SDKSessionInfo,
+  SessionMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import {
   CHAT_DENIED_TOOLS,
   CHAT_TOOLS,
   ChatService,
+  LIST_SCAN_LIMIT,
   type SdkBindings,
 } from '../src/chat.js';
 import { ProtocolError } from '../src/protocol.js';
@@ -147,6 +153,34 @@ describe('ChatService.send', () => {
     }
     assert.equal(options.permissionMode, 'dontAsk');
     assert.equal(options.cwd, ROOT);
+  });
+
+  it('loads no filesystem settings, so the opened repo cannot widen the run', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath);
+    await h.service.send(1, { root: ROOT, prompt: 'hi', context: [] });
+    const sources = h.calls[0]?.options?.settingSources;
+    assert.deepEqual(
+      sources,
+      [],
+      "'project' would load the repo's .claude/settings.json — hooks run shell, " +
+        'apiKeyHelper and env re-add credentials, and none of it is gated by the tool lists',
+    );
+  });
+
+  it('hands the SDK a fresh env each run, since the SDK mutates what it is given', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath);
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    const first = h.calls[0]?.options?.env as Record<string, string | undefined> | undefined;
+    assert.ok(first !== undefined);
+    // What the real SDK does to the object it is handed.
+    first.CLAUDE_CODE_ENTRYPOINT = 'sdk-ts';
+    delete first.PATH;
+
+    await h.service.send(2, { root: ROOT, prompt: 'b', context: [] });
+    const second = h.calls[1]?.options?.env;
+    assert.notEqual(second, first, 'not the same object twice');
+    assert.equal(second?.CLAUDE_CODE_ENTRYPOINT, undefined, 'the addition did not carry over');
+    assert.equal(second?.PATH, '/usr/bin', 'nor did the deletion');
   });
 
   it('never forwards an API key to the SDK subprocess', async () => {
@@ -314,11 +348,78 @@ describe('ChatService.list', () => {
     assert.deepEqual(listed.sessions, [{ sessionId: SESSION, title: 'say ping', lastModified: 42 }]);
   });
 
-  it('forgets sessions the SDK has deleted', async () => {
+  it('forgets a session the SDK dropped from a complete listing', async () => {
+    const other = 'cccccccc-dddd-eeee-ffff-000000000000';
+    const live = [{ sessionId: other, summary: 'Other', lastModified: 7 }] as unknown as SDKSessionInfo[];
+    const h = harness([frames.init(), frames.success('ok')], storePath, { listSessions: async () => live });
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    const listed = await h.service.list(ROOT, 25);
+    assert.equal(listed.current, null, 'a dead current pointer is cleared');
+    assert.deepEqual(h.store.get(ROOT).known, [], 'and the id is dropped from the store');
+  });
+
+  it('keeps the resume pointer when the listing comes back empty', async () => {
     const h = harness([frames.init(), frames.success('ok')], storePath, { listSessions: async () => [] });
     await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
     const listed = await h.service.list(ROOT, 25);
-    assert.deepEqual(listed, { current: null, sessions: [] });
+    assert.equal(listed.current, SESSION, 'an empty listing is no information, not proof of deletion');
+    assert.deepEqual(listed.sessions, [], 'but nothing is offered that the SDK did not confirm');
+    assert.deepEqual(h.store.get(ROOT).known, [SESSION]);
+  });
+
+  it('keeps sessions that fell off the end of a truncated listing', async () => {
+    const live = Array.from({ length: LIST_SCAN_LIMIT }, (_unused, i) => ({
+      sessionId: `filler-${i}`,
+      summary: 'filler',
+      lastModified: i,
+    })) as unknown as SDKSessionInfo[];
+    const h = harness([frames.init(), frames.success('ok')], storePath, { listSessions: async () => live });
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    const listed = await h.service.list(ROOT, 25);
+    assert.equal(listed.current, SESSION, 'a full page is truncated, so absence proves nothing');
+    assert.deepEqual(h.store.get(ROOT).known, [SESSION]);
+  });
+});
+
+describe('ChatService.history', () => {
+  let dir = '';
+  let storePath = '';
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'nvime-history-'));
+    storePath = join(dir, 'sessions.json');
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('replays the prompt a user typed, not the files it carried', async () => {
+    const stored = [
+      {
+        type: 'user',
+        message: {
+          content: [
+            {
+              type: 'text',
+              text: '<context file="a.lua">\nlocal secret = 1\n</context>\n\nexplain @a.lua',
+            },
+          ],
+        },
+      },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'it is a one' }] } },
+    ] as unknown as SessionMessage[];
+    const h = harness([], storePath, { getSessionMessages: async () => stored });
+
+    const turns = await h.service.history(ROOT, SESSION, 40);
+    assert.deepEqual(turns, [
+      { role: 'user', text: 'explain @a.lua' },
+      { role: 'assistant', text: 'it is a one' },
+    ]);
+  });
+
+  it('replays a turn that carried no attachments unchanged', async () => {
+    const stored = [
+      { type: 'user', message: { content: [{ type: 'text', text: 'say ping' }] } },
+    ] as unknown as SessionMessage[];
+    const h = harness([], storePath, { getSessionMessages: async () => stored });
+    assert.deepEqual(await h.service.history(ROOT, SESSION, 40), [{ role: 'user', text: 'say ping' }]);
   });
 });
 
