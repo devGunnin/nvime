@@ -53,12 +53,21 @@ local function preflight()
   return nil
 end
 
+--- Where big-change sessions and their worktrees live. Under stdpath('data'),
+--- so a build worktree is never inside the repo it was built from.
+function M.big_root()
+  return vim.fs.normalize(vim.fn.stdpath('data') .. '/nvime/big')
+end
+
 --- The settings the sidecar reads from its environment. `vim.system` merges
 --- this over the inherited environment, so only what nvime configures appears.
 --- `:checkhealth` probes with this too, so it cannot contradict a working chat.
 function M.sidecar_env()
   local opts = config.get()
-  local env = { NVIME_APPROVAL_TIMEOUT_MS = tostring(opts.edit.approval_timeout_ms) }
+  local env = {
+    NVIME_APPROVAL_TIMEOUT_MS = tostring(opts.edit.approval_timeout_ms),
+    NVIME_BIG_ROOT = M.big_root(),
+  }
   if opts.agent.claude ~= nil then
     env.NVIME_CLAUDE_PATH = opts.agent.claude
   end

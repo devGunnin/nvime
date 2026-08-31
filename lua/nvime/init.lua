@@ -1,5 +1,6 @@
---- nvime: a Claude-native Neovim plugin. Chat and Edit ship; Big Change is next.
+--- nvime: a Claude-native Neovim plugin. Chat, Edit and Big Change ship.
 local agent = require('nvime.agent')
+local big = require('nvime.big')
 local changeset = require('nvime.changeset')
 local chat = require('nvime.chat')
 local config = require('nvime.config')
@@ -9,11 +10,11 @@ local palette = require('nvime.palette')
 
 local M = {}
 
---- Capabilities the dashboard lists. P3/P4 add `big`.
+--- Capabilities the dashboard lists. P4 arms the review gate.
 local CAPABILITIES = {
   { name = 'chat', status = 'ready', summary = 'read-only conversation with session resume' },
   { name = 'edit', status = 'ready', summary = 'point-and-change, applied live in the buffer' },
-  { name = 'big', status = 'planned (P3/P4)', summary = 'worktree builds behind the comprehension gate' },
+  { name = 'big', status = 'ready', summary = 'spec, worktree build, triaged review threads' },
 }
 
 --- @param user table|nil
@@ -36,6 +37,7 @@ M.send_selection = chat.send_selection
 M.edit = edit.instruct
 M.edit_selection = edit.instruct_selection
 M.changeset = changeset.open
+M.big = big.open
 
 --- `:Nvime cancel`: stops whichever run is live rather than complaining twice.
 function M.cancel()
@@ -46,6 +48,10 @@ function M.cancel()
   end
   if edit.is_running() then
     edit.cancel()
+    stopped = true
+  end
+  if big.is_running() then
+    big.cancel()
     stopped = true
   end
   if not stopped then
@@ -66,6 +72,7 @@ function M.dashboard()
   lines[#lines + 1] = ''
   lines[#lines + 1] = '  :Nvime chat      open the chat panel'
   lines[#lines + 1] = '  :Nvime edit      instruct claude about this file'
+  lines[#lines + 1] = '  :Nvime big       start or resume a big change'
   lines[#lines + 1] = '  :Nvime diff      review the changeset'
   lines[#lines + 1] = '  :Nvime cancel    stop the running turn'
   lines[#lines + 1] = '  :checkhealth nvime'

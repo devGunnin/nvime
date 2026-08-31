@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { classifyTool, isWithin, realPathOf } from '../src/policy.js';
+import { classifyBuildTool, classifyTool, isWithin, realPathOf } from '../src/policy.js';
 
 describe('policy: the project-root boundary', () => {
   let dir = '';
@@ -193,5 +193,66 @@ describe('policy: tools other than file writes', () => {
   it('asks about a tool it has no policy for, rather than letting it through', () => {
     const decision = classifyTool('SomeFutureTool', {}, root);
     assert.equal(decision.kind, 'ask');
+  });
+});
+
+describe('policy: the big-change build boundary', () => {
+  let dir = '';
+  let worktree = '';
+  let outside = '';
+
+  beforeEach(() => {
+    dir = realPathOf(mkdtempSync(join(tmpdir(), 'nvime-build-')));
+    worktree = join(dir, 'wt');
+    outside = join(dir, 'home');
+    mkdirSync(join(worktree, 'src'), { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(worktree, 'src', 'a.ts'), 'export const a = 1;\n');
+  });
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const write = (path: string) => classifyBuildTool('Write', { file_path: path }, worktree);
+
+  it('lets the build write anywhere inside its own worktree, unattended', () => {
+    for (const target of [join(worktree, 'src', 'a.ts'), join(worktree, 'new', 'file.ts')]) {
+      assert.deepEqual(write(target), { kind: 'allow', path: target }, target);
+    }
+  });
+
+  it('runs shell without asking, because a build has to run the tests', () => {
+    for (const tool of ['Bash', 'BashOutput', 'KillShell']) {
+      assert.deepEqual(classifyBuildTool(tool, { command: 'npm test' }, worktree), { kind: 'allow' }, tool);
+    }
+  });
+
+  it('denies a write outside the worktree rather than asking a user who may be gone', () => {
+    const decision = write(join(outside, '.bashrc'));
+    assert.equal(decision.kind, 'deny');
+    assert.match(decision.kind === 'deny' ? decision.reason : '', /only write inside its own worktree/);
+  });
+
+  it('denies a write through a symlink that leaves the worktree', () => {
+    symlinkSync(outside, join(worktree, 'escape'));
+    assert.equal(write(join(worktree, 'escape', 'x.txt')).kind, 'deny');
+    // Concatenated, not `join`ed: `join` would collapse `..` before the policy
+    // ever sees it, which is exactly the bug being guarded against.
+    assert.equal(write(`${worktree}/escape/../taken.txt`).kind, 'deny');
+  });
+
+  it('denies a relative path and a tool it has no policy for', () => {
+    assert.equal(classifyBuildTool('Write', { file_path: 'relative.txt' }, worktree).kind, 'deny');
+    assert.equal(classifyBuildTool('Write', {}, worktree).kind, 'deny');
+    assert.equal(classifyBuildTool('SomeFutureTool', {}, worktree).kind, 'deny');
+  });
+
+  it('never asks: nothing is watching a build that outlives the editor', () => {
+    const decisions = [
+      classifyBuildTool('Read', {}, worktree),
+      classifyBuildTool('Bash', { command: 'rm -rf /' }, worktree),
+      write(join(outside, 'x')),
+      classifyBuildTool('Unknown', {}, worktree),
+    ];
+    assert.ok(decisions.every((decision) => decision.kind !== 'ask'));
   });
 });

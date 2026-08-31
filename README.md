@@ -26,9 +26,10 @@ corporate networks — but together they can route a prompt and your OAuth
 credential through whatever man-in-the-middle you have configured. That is an
 accepted tradeoff, not an oversight.
 
-Two capabilities so far: **Chat** (read-only conversation) and **Edit** (you
-point, it changes, and you watch it happen). Big Change with the comprehension
-gate (P3/P4) bolts onto the same RPC seam.
+Three capabilities: **Chat** (read-only conversation), **Edit** (you point, it
+changes, and you watch it happen) and **Big Change** (claude interrogates the
+request into a spec, builds it alone in a git worktree, and hands you back a
+triaged review). The comprehension gate that clears a review thread is P4.
 
 ## Requirements
 
@@ -60,6 +61,7 @@ sidecar to `agent/dist/index.js`; the plugin runs that file with `node`.
 | `:Nvime` | capabilities and wiring status |
 | `:Nvime chat` | open the chat panel |
 | `:Nvime edit` | instruct claude about the current file |
+| `:Nvime big` | start or resume a big change |
 | `:Nvime diff` | review the changeset |
 | `:Nvime cancel` | stop whichever run is going |
 | `:checkhealth nvime` | node, claude, sidecar, keymaps |
@@ -73,6 +75,7 @@ Keymaps (off until `keymaps.enabled = true`):
 | `<leader>ne` | normal | instruct claude about this file |
 | `<leader>ne` | visual | instruct claude about the selection |
 | `<leader>nd` | normal | review the changeset |
+| `<leader>nB` | normal | open a big change |
 | `<CR>` | prompt, normal | send |
 | `<C-s>` | prompt, insert | send (so `<CR>` still inserts a newline) |
 | `<C-r>` | chat panel | session picker |
@@ -80,6 +83,10 @@ Keymaps (off until `keymaps.enabled = true`):
 | `q` | scrollback | close |
 | `y` / `n` | approval float | allow once / deny |
 | `<CR>` / `r` / `d` | changeset | open the file · revert the hunk · unified diff |
+| `<C-t>` | big panel | open the review threads |
+| `]t` / `[t` | review | next · previous thread |
+| `a` / `r` / `X` | review | answer (P4) · request changes · re-open a trivial thread |
+| `M` | review | merge (P4) |
 
 Every mapping is a leaf: none is a prefix of another, so nothing ever stalls for
 `timeoutlen`. `tests/lua/keymaps_spec.lua` enforces it and `:checkhealth` reports it.
@@ -99,7 +106,7 @@ session file without overwriting each other.
 
 **Chat is read-only.** It gets `Read`, `Glob`, `Grep`, `WebFetch` and
 `WebSearch`; file mutation and shell are denied through SDK options, not prompt
-text. Editing arrives in P2 behind its own gate.
+text.
 
 ### Edit
 
@@ -204,6 +211,68 @@ none of that is gated by the tool lists. Opening an unfamiliar repo must not be
 a decision to trust it, so the guarantee is not made voidable by the code being
 read. The cost is that chat does not see the repo's `CLAUDE.md`.
 
+### Big Change
+
+`:Nvime big` (or `<leader>nB`) opens a panel and a conversation, not a form.
+
+**Intake.** Describe the change; claude reads the repo and asks until it is not
+guessing, then plays back a spec — goal, scope, approach, acceptance criteria,
+and what is deliberately out of scope. The spec comes back as schema-enforced
+structured output, so nvime never scrapes it out of prose; if the turn answers
+with something unusable, the prose is shown as the next question and **no spec
+is invented**, because a fabricated spec is one you would approve without
+noticing. Answer, revise, or type `approve`.
+
+**Build.** Approving records the repo's HEAD and adds a **detached worktree**
+under `stdpath('data')/nvime/big/<repo>/<session>/wt` — outside your tree, so
+nothing you are editing moves and no branch you might be on is touched. The
+build agent works there with full mutation rights inside the worktree, runs
+whatever tests the project has, and is told not to commit. Progress streams into
+the panel; `<C-c>` stops it. Every git call is async.
+
+**Triage.** On completion nvime runs `git add -A -N` (so files the build created
+are diffable without a commit) and captures `git diff <base>` against the base
+commit — which also catches a build that committed anyway. A read-only triage
+turn groups the hunks into threads and rates each substantial or trivial. **Every
+hunk lands in exactly one thread**: unknown ids are dropped, a hunk claimed twice
+goes to its first claimant, and anything triage forgot becomes an open
+`unsorted` thread. If the triage turn fails or answers with garbage, it falls
+back to one substantial thread per file and says so in the panel — the hunks are
+never dropped.
+
+**Threads.** `<C-t>` opens the review in its own tab: the thread list on the
+left, that thread's hunks on the right. Trivia auto-resolves but stays in the
+list with an `auto` chip and `X` re-opens it, so you always know everything that
+changed. `]t`/`[t` walk the list; `<CR>` opens the worktree's copy of the file.
+`r` sends a comment back to the build agent, which revises the worktree in the
+same session; the diff is re-captured and re-triaged, and threads whose content
+is byte-identical keep the verdict they had — anything new comes back open.
+
+`a` (answer) and `M` (merge) are the comprehension gate, and they land in P4.
+They say so rather than pretending to grade.
+
+**State honesty.** Every transition is recorded with its timestamp, and the
+record is reconciled against the disk on every read. A build that outlived
+Neovim comes back as `building (detached — sidecar gone)` with `resume` and
+`discard` as its two exits — never as "built". If the worktree is gone the
+session drops back to `drafting` with the spec intact; if the captured diff is
+gone it drops back to `building`. Nothing claims a review is ready without a
+diff to review.
+
+#### What a big-change build does not confine
+
+Inside its worktree the build runs unattended, and that includes `Bash` —
+a build has to be able to run your tests. **Shell is not confinable**: `cd`
+costs nothing, so the worktree boundary is enforced for file tools (the path is
+symlink-resolved and a write outside is refused) and is only advisory for shell.
+The read-only exfiltration edge described for edit mode applies here too, and
+without an approval prompt in the way.
+
+Nothing asks. A build is meant to outlive the editor, so a permission prompt
+could be raised with nobody there to answer it; the fail-safe answer when no one
+is watching is no, and the build is refused immediately and told why. The
+review, not a prompt, is where a human looks at the result.
+
 ## Configuration
 
 ```lua
@@ -219,6 +288,7 @@ require('nvime').setup({
     send_selection = '<leader>ns',
     edit = '<leader>ne',
     changeset = '<leader>nd',
+    big = '<leader>nB',
   },
   edit = {
     fade_ms = 1500,              -- how long a fresh hunk stays lit
@@ -262,13 +332,21 @@ Events (`chat.started`, `chat.delta`, `chat.tool`) carry no `id` field of their
 own — they carry the originating request's id in `params.id`.
 
 Methods: `chat.send`, `chat.list`, `chat.history`, `chat.cancel`,
-`edit.start`, `edit.cancel`, `edit.answer`, `edit.list_changes`, `ping`,
-`shutdown`. `big.*` (P3) registers alongside them.
+`edit.start`, `edit.cancel`, `edit.answer`, `edit.list_changes`, `big.create`,
+`big.list`, `big.open`, `big.diff`, `big.intake`, `big.approve`, `big.build`,
+`big.capture`, `big.revise`, `big.toggle`, `big.discard`, `big.cancel`, `ping`,
+`shutdown`.
 
 Edit events: `edit.started`, `edit.delta`, `edit.tool`, `edit.applied` (the
 recorded mutation, with before/after snapshots), `edit.approval` and
 `edit.approval_settled`. The sidecar owns the change record — the changeset
 view re-reads it rather than keeping a second copy that could drift.
+
+Big-change events: `big.started`, `big.delta`, `big.tool`, `big.state`,
+`big.denied` (a tool the worktree boundary refused) and `big.notice` (triage
+fell back). The session record on disk is the source of truth for where a big
+change is; the plugin caches none of it, and `big.diff` hands the editor the
+captured diff with an index into it rather than every hunk body a second time.
 
 Nothing on the Lua side blocks: no `vim.wait` on agent work, no `vim.fn.input`
 or `confirm`, no synchronous process calls. `:checkhealth` is the sole
@@ -300,7 +378,13 @@ sidecar lifecycle, chat and edit wiring, live buffer application with cursor
 preservation, undo grouping and hunk highlights, changeset revert round-trips
 and their conflict refusals, the approval float, health reporting, keymap
 leaf-only-ness, panel streaming and lifecycle, the picker, config validation,
-context expansion).
+context expansion, the big-change intake flow and session states, and the review
+thread list, chips, hunk slicing and request-changes plumbing).
+
+The big-change sidecar tests run against a real scratch git repo: the worktree
+is really added, the build agent is mocked at the SDK boundary but its writes
+are real, and the diff capture and triage fallback run over what it actually
+wrote.
 
 ## Layout
 
@@ -314,6 +398,9 @@ lua/nvime/
   apply.lua           live buffer application, undo grouping, hunk highlights
   diffs.lua           pure line diffs and the buffer edits they imply
   changeset.lua       the review view and per-hunk revert
+  big.lua             big change: intake, approval, build, session states
+  threads.lua         the review thread list and its hunk pane
+  compose.lua         a float for one piece of free text (a review comment)
   approval.lua        the y/n float for a gated tool
   panel.lua           named panels: scrollback + optional prompt
   markdown.lua        pure markdown classifier
@@ -330,7 +417,13 @@ agent/src/
   protocol.ts         frames + line splitting
   chat.ts             the SDK boundary for chat
   edit.ts             the SDK boundary for edit, and the change record
-  policy.ts           what edit mode allows, asks about, and denies
+  policy.ts           what edit and big-change builds allow, ask about, deny
+  big.ts              the SDK boundary for big change: intake, build, triage
+  bigstore.ts         big-change sessions on disk, and their reconciliation
+  bigprompts.ts       the three big-change prompts and their output schemas
+  unidiff.ts          unified diff -> files and hunks, with content signatures
+  triage.ts           hunks -> review threads, and carrying verdicts forward
+  git.ts              every git call big change makes
   approvals.ts        parked asks, denied on timeout or cancel
   snapshot.ts         file before/after, including binary and oversize
   stream.ts           reading the SDK message stream
