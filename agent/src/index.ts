@@ -3,12 +3,14 @@ import { promisify } from 'node:util';
 import { getSessionMessages, listSessions, query } from '@anthropic-ai/claude-agent-sdk';
 import { ChatService } from './chat.js';
 import { parseContextBlocks } from './context.js';
+import { EditService, parseScope } from './edit.js';
 import { resolveClaudeExecutable, strippedNames } from './env.js';
 import {
   optionalPositiveInt,
   optionalString,
   requireAbsolutePath,
   requireArray,
+  requireBoolean,
   requireString,
 } from './params.js';
 import { LineSplitter, ProtocolError, encodeFrame, type OutgoingFrame } from './protocol.js';
@@ -52,19 +54,45 @@ function main(): void {
           model: process.env.NVIME_MODEL,
         });
 
+  const edit =
+    claudePath === null
+      ? null
+      : new EditService({
+          sdk: { query },
+          claudePath,
+          env: process.env,
+          emit: (event, params) => write({ event, params }),
+          model: process.env.NVIME_MODEL,
+        });
+
   const dispatcher = new Dispatcher(write);
-  registerHandlers(dispatcher, chat, claudePath, store.path);
+  registerHandlers(dispatcher, { chat, edit }, claudePath, store.path);
   readStdin(dispatcher);
 }
 
-function requireChat(chat: ChatService | null): ChatService {
-  if (chat === null) {
+interface Services {
+  chat: ChatService | null;
+  edit: EditService | null;
+}
+
+/** Every capability needs the CLI; without it the answer is one clear error. */
+function present<T>(service: T | null): T {
+  if (service === null) {
     throw new ProtocolError(
       'claude_not_found',
       'the claude CLI was not found on PATH — install Claude Code and sign in',
     );
   }
-  return chat;
+  return service;
+}
+
+/** The request id a `*.cancel` names. Not a params string: ids are integers. */
+function requireTarget(params: Record<string, unknown>): number {
+  const target = params.target;
+  if (typeof target !== 'number' || !Number.isSafeInteger(target)) {
+    throw new ProtocolError('bad_request', 'params.target must be the request id to cancel');
+  }
+  return target;
 }
 
 /**
@@ -83,10 +111,11 @@ async function drainThenExit(dispatcher: Dispatcher): Promise<never> {
 
 function registerHandlers(
   dispatcher: Dispatcher,
-  chat: ChatService | null,
+  services: Services,
   claudePath: string | null,
   storePath: string,
 ): void {
+  const { chat, edit } = services;
   let claudeVersion: string | null = null;
 
   dispatcher.register('ping', async () => {
@@ -99,7 +128,7 @@ function registerHandlers(
       claudePath,
       claudeVersion,
       authOk: chat?.authOk ?? null,
-      activeRuns: chat?.activeRuns ?? 0,
+      activeRuns: (chat?.activeRuns ?? 0) + (edit?.activeRuns ?? 0),
       storePath,
       strippedEnv: strippedNames(process.env),
     };
@@ -112,7 +141,7 @@ function registerHandlers(
   });
 
   dispatcher.register('chat.send', async (id, params) =>
-    requireChat(chat).send(id, {
+    present(chat).send(id, {
       root: requireAbsolutePath(params, 'root'),
       prompt: requireString(params, 'prompt'),
       context: parseContextBlocks(requireArray(params, 'context')),
@@ -121,29 +150,50 @@ function registerHandlers(
   );
 
   dispatcher.register('chat.list', async (_id, params) =>
-    requireChat(chat).list(
+    present(chat).list(
       requireAbsolutePath(params, 'root'),
       optionalPositiveInt(params, 'limit', 200) ?? 25,
     ),
   );
 
   dispatcher.register('chat.history', async (_id, params) => ({
-    turns: await requireChat(chat).history(
+    turns: await present(chat).history(
       requireAbsolutePath(params, 'root'),
       requireString(params, 'sessionId'),
       optionalPositiveInt(params, 'limit', 500) ?? 100,
     ),
   }));
 
-  dispatcher.register('chat.cancel', async (_id, params) => {
-    const target = params.target;
-    if (typeof target !== 'number' || !Number.isSafeInteger(target)) {
-      throw new ProtocolError('bad_request', 'params.target must be the request id to cancel');
-    }
-    return { cancelled: requireChat(chat).cancel(target) };
-  });
+  dispatcher.register('chat.cancel', async (_id, params) => ({
+    cancelled: present(chat).cancel(requireTarget(params)),
+  }));
 
-  // Seam for later phases: `edit.*` (P2) and `big.*` (P3) register here.
+  dispatcher.register('edit.start', async (id, params) =>
+    present(edit).start(id, {
+      root: requireAbsolutePath(params, 'root'),
+      prompt: requireString(params, 'prompt'),
+      scope: parseScope(params.scope),
+      sessionId: optionalString(params, 'sessionId'),
+    }),
+  );
+
+  dispatcher.register('edit.cancel', async (_id, params) => ({
+    cancelled: present(edit).cancel(requireTarget(params)),
+  }));
+
+  dispatcher.register('edit.answer', async (_id, params) => ({
+    answered: present(edit).answer(requireString(params, 'approvalId'), requireBoolean(params, 'allow')),
+  }));
+
+  dispatcher.register('edit.list_changes', async (_id, params) => ({
+    changes: present(edit).listChanges(
+      requireAbsolutePath(params, 'root'),
+      optionalString(params, 'runId'),
+      optionalPositiveInt(params, 'limit', 500),
+    ),
+  }));
+
+  // Seam for later phases: `big.*` (P3) registers here.
 }
 
 async function readClaudeVersion(claudePath: string): Promise<string | null> {
