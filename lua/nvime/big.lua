@@ -111,7 +111,6 @@ local function render_next_step()
     triaging = 'sorting the diff into threads',
     reviewing = '<C-t> opens the review threads',
     mergeable = '<C-t> opens the review threads',
-    discarded = 'this big change was discarded',
   }
   local hint = hints[session.display]
   if hint ~= nil then

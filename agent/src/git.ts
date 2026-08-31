@@ -70,6 +70,10 @@ export async function readHead(repoRoot: string): Promise<RepoHead> {
  * move, or lock, any branch the user might be sitting on.
  */
 export async function addWorktree(repoRoot: string, dir: string, commit: string): Promise<void> {
+  // A worktree directory deleted from underneath git stays registered, and the
+  // add then fails on a path nothing is using. Pruning first makes re-approving
+  // a session whose worktree was removed by hand work instead of wedging it.
+  await git(repoRoot, ['worktree', 'prune']);
   await git(repoRoot, ['worktree', 'add', '--detach', dir, commit]);
 }
 

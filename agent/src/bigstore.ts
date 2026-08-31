@@ -26,10 +26,12 @@ export interface BigSpec {
 }
 
 /**
- * Where a session is. `mergeable` is NOT one of these: it is `reviewing` with
- * nothing open, derived at read time so the two can never disagree.
+ * Where a session is. Two states deliberately absent: `mergeable` is
+ * `reviewing` with nothing open, derived at read time so the two cannot
+ * disagree; and there is no `discarded`, because discarding deletes the record
+ * rather than leaving a tombstone that every reader has to special-case.
  */
-export type BigState = 'drafting' | 'building' | 'triaging' | 'reviewing' | 'discarded';
+export type BigState = 'drafting' | 'building' | 'triaging' | 'reviewing';
 
 export interface BigTransition {
   state: BigState;
@@ -284,9 +286,7 @@ export interface Reconciled {
  *   * building, nothing live → still building, but nobody is driving it.
  */
 export function reconcile(session: BigSession, reality: Reality): Reconciled {
-  if (session.state === 'drafting' || session.state === 'discarded') {
-    return { changed: false, detached: false };
-  }
+  if (session.state === 'drafting') return { changed: false, detached: false };
   if (!reality.worktreeExists) {
     transition(session, 'drafting', 'the build worktree is gone — approve again to rebuild');
     session.worktree = null;

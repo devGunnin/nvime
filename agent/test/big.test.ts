@@ -226,6 +226,16 @@ describe('big worktree lifecycle', () => {
     assert.equal(existsSync(path), false);
     assert.equal(store.read(repo, view.id), null);
   });
+
+  it('re-approves a session whose worktree directory was deleted by hand', async () => {
+    const first = await approved();
+    // Still registered with git, and the add would fail on the stale entry.
+    rmSync(first.worktree?.path ?? '', { recursive: true, force: true });
+    assert.equal(service.open(repo, first.id).display, 'drafting');
+    const second = await service.approve(repo, first.id);
+    assert.equal(second.display, 'building');
+    assert.ok(second.worktree !== null && existsSync(join(second.worktree.path, 'tool.py')));
+  });
 });
 
 describe('big build and triage', () => {

@@ -386,17 +386,21 @@ function M.reload(session)
     view.on_update(session)
   end
   agent.request('big.diff', { root = view.root, sessionId = session.id }, function(err, result)
-    if err ~= nil or result.diff == nil then
+    -- Shape-checked, not assumed: a sidecar built from another revision answers
+    -- with something else, and that has to read as a named failure rather than
+    -- a type error thrown out of a scheduled callback.
+    local diff = type(result) == 'table' and result.diff or nil
+    if err ~= nil or type(diff) ~= 'table' or type(diff.text) ~= 'string' then
       view.diff_lines, view.hunks = {}, {}
       draw()
-      if err ~= nil then
-        notify(err.message or 'could not load the captured diff', vim.log.levels.WARN)
-      end
+      local reason = err ~= nil and (err.message or 'the sidecar refused')
+        or 'the sidecar answered big.diff with an unexpected shape — rebuild it'
+      notify('could not load the captured diff: ' .. reason, vim.log.levels.WARN)
       return
     end
-    view.diff_lines = vim.split(result.diff.text, '\n', { plain = true })
+    view.diff_lines = vim.split(diff.text, '\n', { plain = true })
     view.hunks = {}
-    for _, hunk in ipairs(result.diff.hunks or {}) do
+    for _, hunk in ipairs(diff.hunks or {}) do
       view.hunks[hunk.id] = hunk
     end
     draw()

@@ -376,7 +376,6 @@ export class BigService {
 
   /** Applies the disk's version of events to the record before acting on it. */
   #reconcileOrThrow(session: BigSession): void {
-    if (session.state === 'discarded') throw new ProtocolError('bad_request', 'this big change was discarded');
     const result = reconcile(session, this.#realityOf(session));
     if (result.changed) this.#store.save(session);
   }
