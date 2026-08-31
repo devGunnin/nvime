@@ -167,17 +167,25 @@ end
 
 --- Rebuilds the layout when the user closed one split with `:q`. Both windows
 --- are redrawn together so the two halves cannot end up in unrelated places.
+--- nvim refuses to close a tab's last window, so a lone survivor can still be
+--- open after this loop; `stale` tracks it so it can be closed once
+--- `open_windows` has given the tab a sibling, instead of being left behind
+--- showing the same buffer a second time.
 local function ensure_windows(self, opts)
   if win_valid(self.win) and win_valid(self.prompt_win) then
     return
   end
+  local stale = nil
   for _, win in ipairs({ self.prompt_win, self.win }) do
-    if win_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
+    if win_valid(win) and not pcall(vim.api.nvim_win_close, win, true) then
+      stale = win
     end
   end
   self.win, self.prompt_win = nil, nil
   open_windows(self, opts)
+  if win_valid(stale) then
+    pcall(vim.api.nvim_win_close, stale, true)
+  end
 end
 
 --- Opens the panel (or focuses it when already open).

@@ -78,6 +78,25 @@ describe('panel', function()
     panel.close()
   end)
 
+  it('reopens without doubling a buffer when the survivor is the tab last window', function()
+    local first = open()
+    vim.api.nvim_win_close(first.win, true)
+    -- Close every other window in the tab so the prompt split becomes the
+    -- last one — nvim refuses to close a tab's only window.
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if win ~= first.prompt_win and vim.api.nvim_win_is_valid(win) then
+        pcall(vim.api.nvim_win_close, win, true)
+      end
+    end
+    eq(1, #vim.api.nvim_tabpage_list_wins(0), 'the prompt split really is the last window')
+
+    local second = panel.open(panel_opts())
+    eq(2, #vim.api.nvim_tabpage_list_wins(0), 'no stale window is left showing the old buffer twice')
+    ok(vim.api.nvim_win_is_valid(second.win))
+    ok(vim.api.nvim_win_is_valid(second.prompt_win))
+    panel.close()
+  end)
+
   it('rebuilds from scratch when a buffer was wiped out from under it', function()
     local first = open()
     vim.api.nvim_buf_delete(first.prompt_buf, { force = true })
