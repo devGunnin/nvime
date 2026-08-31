@@ -17,6 +17,7 @@ import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { BIG_AUTO_ALLOWED, BigService, buildWriteBoundary, type SessionView } from '../src/big.js';
 import { BigStore } from '../src/bigstore.js';
 import { ProtocolError } from '../src/protocol.js';
+import { TRIVIA_ACK_TITLE } from '../src/triage.js';
 
 const SESSION = '11111111-2222-3333-4444-555555555555';
 
@@ -653,7 +654,12 @@ describe('big state honesty', () => {
     const approvedView = await approved();
     scriptBuild([{ title: 'docs', substantial: false }]);
     const view = await service.build(2, { root: repo, id: approvedView.id });
-    assert.equal(view.display, 'mergeable');
+    // The trivia auto-resolves, but a change with nothing to defend is not a
+    // reviewed change: the acknowledgment thread is what is left open.
+    assert.equal(view.display, 'reviewing');
+    const ack = view.blocks[view.blocks.length - 1];
+    assert.equal(ack?.title, TRIVIA_ACK_TITLE);
+    assert.equal(service.toggleBlock(repo, view.id, ack?.id ?? '', true).display, 'mergeable');
     assert.equal(service.toggleBlock(repo, view.id, 'b1', false).display, 'reviewing');
   });
 
@@ -959,7 +965,10 @@ describe('the comprehension gate', () => {
     await service.answer(4, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'with no args it still parses normally' }] });
     const second = calls[calls.length - 1]?.prompt ?? '';
     assert.match(second, /the follow-up they had to address: what happens with no args at all\?/);
-    assert.match(second, /earlier answer: it adds a flag/, 'the grader sees the round it already judged');
+    // The grader's own session is resumed, so it already holds the round it
+    // judged; re-sending it is what makes the context grow every round.
+    assert.ok(!second.includes('earlier answer: it adds a flag'), second);
+    assert.equal(calls[calls.length - 1]?.options.resume, SESSION);
     assert.equal(service.open(repo, view.id).blocks[0]?.state, 'resolved');
   });
 
@@ -1128,6 +1137,83 @@ describe('the comprehension gate', () => {
     );
   });
 
+  it('keeps a thread the reader re-opened while the grading turn was running', async () => {
+    const created = service.create(repo, 'mixed', 'medium');
+    turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ok', spec: SPEC })] });
+    await service.intake(1, { root: repo, id: created.id, message: 'go' });
+    await service.approve(repo, created.id);
+    turns.push({
+      act: async (options) => {
+        writeFileSync(join(String(options.cwd), 'tool.py'), 'def main():\n    print("v1")\n');
+        writeFileSync(join(String(options.cwd), 'notes.md'), 'a note\n');
+      },
+      frames: [frames.init(), frames.result('built')],
+    });
+    turns.push({
+      frames: triageByFile([
+        { title: 'logic', files: ['tool.py'], substantial: true },
+        { title: 'notes', files: ['notes.md'], substantial: false },
+      ]),
+    });
+    const view = await service.build(2, { root: repo, id: created.id });
+    const logic = view.blocks.find((block) => block.substantial)?.id ?? '';
+    const notes = view.blocks.find((block) => !block.substantial)?.id ?? '';
+    assert.equal(view.blocks.find((block) => block.id === notes)?.state, 'resolved', 'trivia auto-resolved');
+
+    // `X` on the trivia thread while the grading turn is in flight: the reader
+    // refusing the triage, which is the one thing that key is for. A grade
+    // written back onto the record as it was BEFORE the turn erases it.
+    turns.push({
+      act: async () => {
+        service.toggleBlock(repo, created.id, notes, false);
+      },
+      frames: [
+        frames.init(),
+        frames.result('graded', { grades: [{ threadId: logic, grade: 90, verdict: 'ok', hint: '', followup: '' }] }),
+      ],
+    });
+    const graded = await service.answer(3, {
+      root: repo,
+      id: created.id,
+      answers: [{ blockId: logic, text: 'it prints v1 rather than hi' }],
+    });
+
+    assert.equal(graded.blocks.find((block) => block.id === logic)?.state, 'resolved', 'the answer still cleared it');
+    assert.equal(
+      graded.blocks.find((block) => block.id === notes)?.state,
+      'open',
+      'the re-open made during the turn survives it',
+    );
+    assert.notEqual(graded.display, 'mergeable', 'and the merge stays locked on it');
+    assert.equal(service.open(repo, created.id).blocks.find((block) => block.id === notes)?.state, 'open');
+  });
+
+  it('does not re-send the change and the rounds it already graded on a resumed session', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    const prompts: string[] = [];
+    for (let round = 1; round <= 5; round += 1) {
+      scriptGrades([{ threadId: thread, grade: round === 5 ? 90 : 50 }]);
+      await service.answer(round + 2, {
+        root: repo,
+        id: view.id,
+        answers: [{ blockId: thread, text: `round ${round}: it prints v1 rather than hi` }],
+      });
+      prompts.push(calls[calls.length - 1]?.prompt ?? '');
+    }
+    const first = prompts[0] ?? '';
+    const second = prompts[1] ?? '';
+    const fifth = prompts[4] ?? '';
+
+    assert.ok(first.includes('print("v1")'), 'the first round hands the grader the hunks');
+    assert.ok(!fifth.includes('print("v1")'), 'a resumed grader already holds them');
+    assert.ok(!fifth.includes('round 1:'), 'and already holds the rounds it graded');
+    assert.ok(fifth.includes('round 5:'), 'only the new answer is new');
+    assert.ok(fifth.length <= second.length + 40, `rounds must not grow: ${second.length} -> ${fifth.length}`);
+    assert.ok(fifth.length * 2 < first.length, `and must be far smaller than round 1: ${first.length}`);
+    assert.equal(service.open(repo, view.id).blocks[0]?.state, 'resolved');
+  });
+
   it('carries a defended thread forward across a revision, and re-opens changed content', async () => {
     const view = await reviewing();
     const thread = view.blocks[0]?.id ?? '';
@@ -1222,8 +1308,10 @@ describe('the local merge', () => {
     await service.merge(4, { root: repo, id: view.id });
     const again = await service.merge(5, { root: repo, id: view.id });
     assert.equal(again.merged, false);
-    // The base moved too — it moved because the first merge landed there.
-    assert.deepEqual(again.refusals.map((refusal) => refusal.code), ['already-merged', 'base-moved']);
+    // The base moved too — it moved because the first merge landed there, and
+    // that is named as what it is rather than as somebody else's commit.
+    assert.deepEqual(again.refusals.map((refusal) => refusal.code), ['already-merged', 'merged-elsewhere']);
+    assert.match(again.refusals[1]?.message ?? '', /already landed as/);
   });
 
   it('answers what stands in the way without changing anything', async () => {
@@ -1249,6 +1337,60 @@ describe('the local merge', () => {
     assert.equal(result.merged, true);
     assert.equal(existsSync(droppedPath), false);
     assert.equal(service.open(repo, second.id).display, 'merged', 'and the record stays merged, not reset');
+  });
+
+  it('will not land a change nobody had to defend until the reader acknowledges it', async () => {
+    const approvedView = await approved();
+    const base = gitIn(repo, 'rev-parse', 'main');
+    scriptBuild([{ title: 'docs', substantial: false }]);
+    const view = await service.build(2, { root: repo, id: approvedView.id });
+    assert.equal(view.counts.substantial, 0, 'a triage turn that rated everything trivial');
+
+    const refused = await service.merge(4, { root: repo, id: view.id });
+    assert.equal(refused.merged, false);
+    assert.deepEqual(refused.refusals.map((refusal) => refusal.code), ['threads-open']);
+    assert.equal(gitIn(repo, 'rev-parse', 'main'), base, 'and nothing landed');
+
+    const ack = view.blocks[view.blocks.length - 1];
+    assert.equal(ack?.title, TRIVIA_ACK_TITLE);
+    service.toggleBlock(repo, view.id, ack?.id ?? '', true);
+    assert.equal((await service.merge(5, { root: repo, id: view.id })).merged, true);
+  });
+
+  it('reports a merge that landed but could not be recorded as landed, never as failed', async () => {
+    const view = await cleared();
+    const realSave = store.save.bind(store);
+    // The record write is the only step after the commit is on their branch.
+    store.save = (session) => {
+      if (session.state === 'merged') throw new Error('ENOSPC: no space left on device');
+      realSave(session);
+    };
+    const result = await service
+      .merge(4, { root: repo, id: view.id })
+      .finally(() => {
+        store.save = realSave;
+      });
+
+    assert.equal(result.merged, true, 'the commit is on their branch and nothing here can un-land it');
+    assert.equal(gitIn(repo, 'log', '-1', '--format=%s'), 'version flag');
+    assert.equal(result.session.display, 'merged');
+    assert.ok(
+      events.some(
+        (entry) =>
+          entry.event === 'big.notice' && /LANDED as .*could not record it/.test(String(entry.params.text)),
+      ),
+      JSON.stringify(events.filter((entry) => entry.event === 'big.notice')),
+    );
+    assert.equal(store.read(repo, view.id)?.state, 'reviewing', 'the record really did not survive');
+
+    // The next attempt finds its own commit already there. It must never read
+    // as "your base moved" and offer to rebase onto their own landed change.
+    const again = await service.merge(5, { root: repo, id: view.id });
+    assert.equal(again.merged, false);
+    assert.deepEqual(again.refusals.map((refusal) => refusal.code), ['merged-elsewhere']);
+    assert.equal(again.session.display, 'merged', 'and the record is brought up to it');
+    assert.equal(again.session.merge?.commit, gitIn(repo, 'rev-parse', 'main'));
+    assert.equal(service.open(repo, view.id).display, 'merged', 'the repair is on disk');
   });
 
   it('refuses everything that would move a merged change', async () => {

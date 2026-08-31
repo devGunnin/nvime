@@ -47,7 +47,16 @@ import {
   removeClone,
   resolveRef,
 } from './git.js';
-import { branchNameFor, checkMerge, landDiff, type MergeFacts, type MergeRefusal } from './merge.js';
+import {
+  branchCandidates,
+  branchNameFor,
+  checkMerge,
+  landDiff,
+  landedAlready,
+  type LandResult,
+  type MergeFacts,
+  type MergeRefusal,
+} from './merge.js';
 import { classifyBuildTool, READ_ONLY_TOOLS, realPathOf } from './policy.js';
 import { ProtocolError } from './protocol.js';
 import { readUsage, textDelta, toolCalls, type RunUsage } from './stream.js';
@@ -58,6 +67,7 @@ import {
   normalizeBlocks,
   parseTriageOutput,
   TRIAGE_SCHEMA,
+  withTrivialAck,
   type RawBlock,
   type TriageBlock,
   type TriageCounts,
@@ -416,53 +426,92 @@ export class BigService {
     if (session.state !== 'reviewing') {
       throw new ProtocolError('bad_request', `this big change is ${session.state}, not ready to defend`);
     }
-    const diffText = this.#store.readVerifiedDiff(session);
-    if (diffText === null) {
-      throw new ProtocolError('bad_request', 'the captured diff is not the one these threads describe — re-triage it');
-    }
     const answers = normalizeAnswers(params.answers);
-    const items = buildGradeItems(session, answers, parseUnifiedDiff(diffText));
 
     return this.#run(requestId, session, 'grading', async () => {
-      const grades = await this.#gradeRound(requestId, session, items, threshold);
-      for (const item of items) {
-        const block = session.blocks.find((entry) => entry.id === item.threadId);
-        if (block === undefined) continue;
-        block.rounds.push(roundFor(item.threadId, item.answer, grades));
-        const grade = grades.kind === 'graded' ? grades.byThread.get(item.threadId) : undefined;
-        if (grade !== undefined && clears(grade, threshold)) block.state = 'resolved';
+      // Read INSIDE the claim, exactly as `merge` does: the record above was
+      // read before this run held the session.
+      const held = this.#store.require(params.root, params.id);
+      const diffText = this.#store.readVerifiedDiff(held);
+      if (diffText === null) {
+        throw new ProtocolError(
+          'bad_request',
+          'the captured diff is not the one these threads describe — re-triage it',
+        );
       }
-      this.#store.save(session);
-      return this.#view(session);
+      const items = buildGradeItems(held, answers, parseUnifiedDiff(diffText));
+      const round = await this.#gradeRound(requestId, held, items, threshold);
+      return this.#recordRound(requestId, params, items, round, threshold);
     });
+  }
+
+  /**
+   * Writes a finished round onto the record as it stands NOW, re-read rather
+   * than reused. A grading turn runs for tens of seconds, and anything written
+   * while it ran — the reader's `X` reopening another thread, which is a
+   * refusal of the triage and the one thing this gate exists to respect — is on
+   * disk and must survive this save.
+   */
+  #recordRound(
+    requestId: number,
+    params: { root: string; id: string },
+    items: readonly GradeItem[],
+    round: RoundResult,
+    threshold: number,
+  ): SessionView {
+    const session = this.#store.require(params.root, params.id);
+    if (round.gradeSessionId !== null) session.gradeSessionId = round.gradeSessionId;
+    for (const item of items) {
+      const block = session.blocks.find((entry) => entry.id === item.threadId);
+      if (block === undefined) {
+        this.#emit('big.notice', {
+          id: requestId,
+          text: `'${item.title}' is no longer part of this change — its answer was not recorded`,
+        });
+        continue;
+      }
+      block.rounds.push(roundFor(item.threadId, item.answer, round.grades));
+      const grade = round.grades.kind === 'graded' ? round.grades.byThread.get(item.threadId) : undefined;
+      if (grade !== undefined && clears(grade, threshold)) block.state = 'resolved';
+    }
+    this.#store.save(session);
+    return this.#view(session);
   }
 
   /**
    * One grading turn for the whole round. Read-only, in the build clone so the
    * grader can check a claim against the code, and resumed across rounds so a
    * follow-up remembers what it already asked.
+   *
+   * Returns the grader's session rather than writing it: the record this round
+   * lands on is re-read afterwards, and mutating the copy read before the turn
+   * is exactly the clobber `#recordRound` exists to avoid.
    */
   async #gradeRound(
     requestId: number,
     session: BigSession,
     items: readonly GradeItem[],
     threshold: number,
-  ): Promise<RoundGrades> {
+  ): Promise<RoundResult> {
+    const resumed = session.gradeSessionId !== null;
     try {
       const result = await this.#turn(requestId, {
-        prompt: composeGradePrompt(session.spec, threshold, items),
+        prompt: composeGradePrompt(session.spec, threshold, items, resumed),
         cwd: session.worktree?.path ?? session.repoRoot,
         phase: 'grade',
         resume: session.gradeSessionId,
         schema: GRADE_SCHEMA,
       });
-      session.gradeSessionId = result.sessionId;
       const byThread = parseGradeOutput(result.structured);
-      if (byThread !== null) return { kind: 'graded', byThread };
-      return this.#ungraded(requestId, 'the grading turn did not return grades');
+      const grades: RoundGrades =
+        byThread === null
+          ? this.#ungraded(requestId, 'the grading turn did not return grades')
+          : { kind: 'graded', byThread };
+      return { grades, gradeSessionId: result.sessionId };
     } catch (cause) {
       if (cause instanceof ProtocolError && cause.code === 'cancelled') throw cause;
-      return this.#ungraded(requestId, cause instanceof Error ? cause.message : String(cause));
+      const reason = cause instanceof Error ? cause.message : String(cause);
+      return { grades: this.#ungraded(requestId, reason), gradeSessionId: null };
     }
   }
 
@@ -521,7 +570,10 @@ export class BigService {
       // the merge is made on is this, never what the editor asked with.
       const held = this.#store.require(params.root, params.id);
       const refusals = await checkMerge(held, this.#mergeFacts(held, countBlocks(held.blocks)));
-      if (refusals.length > 0) return { session: this.#view(held), merged: false, refusals };
+      if (refusals.length > 0) {
+        await this.#repairLandedRecord(requestId, held, refusals);
+        return { session: this.#view(held), merged: false, refusals };
+      }
 
       const base = requireBase(held);
       const baseBranch = base.branch;
@@ -538,12 +590,73 @@ export class BigService {
         indexFile: join(this.#store.dirFor(held.repoRoot, held.id), 'merge-index'),
       });
 
-      held.merge = { branch: landed.branch, commit: landed.commit, baseBranch, at: Date.now() };
-      transition(held, 'merged', `${landed.commit.slice(0, 8)} on ${baseBranch}`);
-      this.#store.save(held);
-      if (params.cleanup === true) await this.#cleanupClone(held);
-      return { session: this.#view(held), merged: true, refusals: [] };
+      return this.#afterLanding(requestId, held, landed, baseBranch, params.cleanup === true);
     });
+  }
+
+  /**
+   * Bookkeeping AFTER the commit is on the operator's branch. Nothing here can
+   * un-land it, so nothing here may read as a failed merge: a record write that
+   * throws (a full disk, a store removed under a live run) leaves the change
+   * landed, and the reader is told exactly that. The record is repaired on the
+   * next merge attempt, which finds the commit and says so.
+   */
+  async #afterLanding(
+    requestId: number,
+    session: BigSession,
+    landed: LandResult,
+    baseBranch: string,
+    cleanup: boolean,
+  ): Promise<{ session: SessionView; merged: boolean; refusals: MergeRefusal[] }> {
+    const at = `${landed.commit.slice(0, 8)} on ${baseBranch}`;
+    session.merge = { branch: landed.branch, commit: landed.commit, baseBranch, at: Date.now() };
+    transition(session, 'merged', at);
+    try {
+      this.#store.save(session);
+    } catch (cause) {
+      this.#emit('big.notice', {
+        id: requestId,
+        text: `the change LANDED as ${at}, but nvime could not record it: ${messageOf(cause)}`,
+      });
+      return { session: this.#view(session), merged: true, refusals: [] };
+    }
+    if (cleanup) {
+      try {
+        await this.#cleanupClone(session);
+      } catch (cause) {
+        this.#emit('big.notice', {
+          id: requestId,
+          text: `the change landed as ${at}; the build clone could not be dropped: ${messageOf(cause)}`,
+        });
+      }
+    }
+    return { session: this.#view(session), merged: true, refusals: [] };
+  }
+
+  /**
+   * Brings a record up to a merge that already happened. `merged-elsewhere`
+   * means the commit is on their branch under this session's own branch — the
+   * post-land record write did not survive — so the commit is the fact and the
+   * record is corrected to it.
+   */
+  async #repairLandedRecord(
+    requestId: number,
+    session: BigSession,
+    refusals: readonly MergeRefusal[],
+  ): Promise<void> {
+    if (session.state === 'merged') return;
+    if (!refusals.some((refusal) => refusal.code === 'merged-elsewhere')) return;
+    const base = session.base;
+    if (base === null || base.branch === null) return;
+    const landed = await landedAlready(session, base.branch, base.commit);
+    if (landed === null) return;
+    session.merge = { branch: landed.branch, commit: landed.commit, baseBranch: base.branch, at: Date.now() };
+    transition(session, 'merged', `${landed.commit.slice(0, 8)} on ${base.branch} — recorded after the fact`);
+    try {
+      this.#store.save(session);
+    } catch (cause) {
+      this.#emit('big.notice', { id: requestId, text: `could not record the landed change: ${messageOf(cause)}` });
+    }
   }
 
   /**
@@ -617,10 +730,10 @@ export class BigService {
 
   /** A branch name nothing already holds, so landing cannot clobber a ref. */
   async #freeBranchName(session: BigSession): Promise<string> {
-    const preferred = branchNameFor(session.title, session.id);
-    for (const candidate of [preferred, `${preferred}-${session.id}`]) {
+    for (const candidate of branchCandidates(session.title, session.id)) {
       if ((await resolveRef(session.repoRoot, `refs/heads/${candidate}`)) === null) return candidate;
     }
+    const preferred = branchNameFor(session.title, session.id);
     throw new ProtocolError('bad_request', `${preferred} already exists — delete or rename it first`);
   }
 
@@ -804,7 +917,8 @@ export class BigService {
     const unshownIds = new Set(parsed.hunks.filter((hunk) => !rendered.shownIds.has(hunk.id)).map((hunk) => hunk.id));
     const raw = await this.#triageBlocks(requestId, session, parsed, rendered);
     const armed = gateArmed(session.difficulty);
-    const blocks = carryForward(previous, normalizeBlocks(raw, parsed, unshownIds, armed));
+    const sorted = carryForward(previous, normalizeBlocks(raw, parsed, unshownIds, armed));
+    const blocks = withTrivialAck(sorted, parsed.hunks.length, armed);
     transition(session, 'reviewing', `${blocks.length} thread(s) from ${parsed.hunks.length} hunk(s)`);
     this.#store.commitCapture(session, { id: diffId, bytes, blocks });
     return this.#view(session);
@@ -1029,8 +1143,13 @@ export function buildWriteBoundary(build: boolean, worktreeRoot: string | undefi
   return realPathOf(worktreeRoot);
 }
 
+/** A session's in-process key. `\0` cannot occur in a path, so it cannot collide. */
 function keyOf(session: BigSession): string {
-  return `${session.repoRoot} ${session.id}`;
+  return `${session.repoRoot}\0${session.id}`;
+}
+
+function messageOf(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
 /**
@@ -1047,6 +1166,13 @@ function requireBase(session: BigSession): BigBase {
 type RoundGrades =
   | { kind: 'graded'; byThread: ReadonlyMap<string, GateGrade> }
   | { kind: 'ungraded'; reason: string };
+
+/** What one grading turn produced, before any of it reaches the record. */
+interface RoundResult {
+  grades: RoundGrades;
+  /** The grader's SDK session; null when the turn never got one, and then kept. */
+  gradeSessionId: string | null;
+}
 
 /** One thread's round: the grade it got, or the honest reason it has none. */
 function roundFor(threadId: string, answer: string, grades: RoundGrades): GateRound {

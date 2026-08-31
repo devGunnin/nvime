@@ -206,6 +206,43 @@ function assertCoversExactlyOnce(blocks: readonly TriageBlock[], diff: ParsedDif
   }
 }
 
+export const TRIVIA_ACK_TITLE = 'everything was rated trivial — open the diff and confirm';
+
+/**
+ * The acknowledgment a change nobody has to defend still needs.
+ *
+ * A triage turn that rates every thread trivial produces a session that is
+ * mergeable the moment it is triaged, `0/0 defended`, with no answer ever
+ * typed — and the diff that turn read was written by the build agent, so a
+ * comment aimed at it disarms the whole gate. So an all-trivia change gets one
+ * more thread, open, which the reader clears with `X` after looking at the diff
+ * themselves. It carries no hunks, so it never hides one; it has no signature,
+ * so a re-capture always asks again; and there is no setting that removes it —
+ * `vibe` is the only difficulty that runs no gate at all, and it is chosen per
+ * change rather than being a way to skip this one.
+ */
+export function withTrivialAck(blocks: TriageBlock[], hunkCount: number, armed: boolean): TriageBlock[] {
+  if (!armed || hunkCount === 0) return blocks;
+  if (blocks.some((block) => block.substantial)) return blocks;
+  return [
+    ...blocks,
+    {
+      id: `b${blocks.length + 1}`,
+      title: TRIVIA_ACK_TITLE,
+      files: [],
+      hunkIds: [],
+      // Not substantial: there is no hunk here to defend, and the gate grades
+      // answers about hunks. What it wants is the reader's own eyes on the diff.
+      substantial: false,
+      rationale: 'triage found nothing a reader must understand, so nothing was graded — read the diff and clear this',
+      state: 'open',
+      reopened: false,
+      signatures: [],
+      rounds: [],
+    },
+  ];
+}
+
 /** What one prior thread contributes to a re-captured one. */
 interface PriorEntry {
   state: BlockState;

@@ -157,30 +157,58 @@ export interface GradeItem {
   answer: string;
 }
 
-/** One grading turn for a whole round: every thread answered, graded together. */
-export function composeGradePrompt(spec: BigSpec | null, threshold: number, items: readonly GradeItem[]): string {
+/**
+ * One grading turn for a whole round: every thread answered, graded together.
+ *
+ * `resumed` says the grader's own SDK session is being continued, so it already
+ * holds the diff and the verdicts of every thread it has seen. Re-sending them
+ * would grow the context by the whole change on every round, and the ceiling
+ * is reached as an ungraded round nobody can explain. A thread being graded for
+ * the FIRST time still gets the full rendering, resumed or not — that context
+ * is new to the grader whatever round it arrives in.
+ */
+export function composeGradePrompt(
+  spec: BigSpec | null,
+  threshold: number,
+  items: readonly GradeItem[],
+  resumed = false,
+): string {
   if (items.length === 0) throw new Error('a grading turn needs at least one answered thread');
-  const intent = spec === null ? '' : `\nWhat the change as a whole was meant to do:\n${spec.goal}\n`;
-  const bar = `\nThe pass mark for this session is ${threshold} out of 100. Grade against it honestly: do not`
-    + ' round an answer up to spare them another round, and do not hold back a passing answer.\n';
-  return `${GRADE_INSTRUCTION}\n${intent}${bar}\n${items.map(renderGradeItem).join('\n')}`;
+  const intent = resumed || spec === null ? '' : `\nWhat the change as a whole was meant to do:\n${spec.goal}\n`;
+  const bar = resumed
+    ? ''
+    : `\nThe pass mark for this session is ${threshold} out of 100. Grade against it honestly: do not` +
+      ' round an answer up to spare them another round, and do not hold back a passing answer.\n';
+  const head = resumed ? RESUMED_INSTRUCTION : GRADE_INSTRUCTION;
+  return `${head}\n${intent}${bar}\n${items.map((item) => renderGradeItem(item, resumed)).join('\n')}`;
 }
 
-function renderGradeItem(item: GradeItem): string {
-  const parts = [
-    `=== thread ${item.threadId}: ${item.title} ===`,
-    item.rationale === '' ? '' : `why it was grouped this way: ${item.rationale}`,
-    'the change under review:',
-    item.diff,
-  ];
-  for (const round of item.history) {
-    if (round.result === null) continue;
-    parts.push(`earlier answer: ${round.answer}`);
-    parts.push(`you scored it ${round.result.grade} and said: ${round.result.verdict}`);
+const RESUMED_INSTRUCTION = [
+  'The next round of answers, on the same threads and the same rubric as before. The change, the earlier',
+  'answers and the grades you gave them are already in this conversation; only what is new is repeated below.',
+  'Return exactly one entry per thread id below, copied exactly.',
+].join('\n');
+
+/**
+ * A thread as the grader is shown it. On a resumed session a thread it has
+ * already graded is named rather than re-rendered: it has the hunks and its own
+ * verdicts in context, and repeating them is what makes the round grow.
+ */
+function renderGradeItem(item: GradeItem, resumed: boolean): string {
+  const known = resumed && item.history.length > 0;
+  const parts = [`=== thread ${item.threadId}: ${item.title} ===`];
+  if (!known) {
+    if (item.rationale !== '') parts.push(`why it was grouped this way: ${item.rationale}`);
+    parts.push('the change under review:', item.diff);
+    for (const round of item.history) {
+      if (round.result === null) continue;
+      parts.push(`earlier answer: ${round.answer}`);
+      parts.push(`you scored it ${round.result.grade} and said: ${round.result.verdict}`);
+    }
   }
   if (item.followup !== '') parts.push(`the follow-up they had to address: ${item.followup}`);
   parts.push(`their answer now:\n${item.answer}`);
-  return parts.filter((part) => part !== '').join('\n') + '\n';
+  return parts.join('\n') + '\n';
 }
 
 /**

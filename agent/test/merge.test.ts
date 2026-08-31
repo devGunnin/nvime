@@ -312,6 +312,145 @@ describe('landing the reviewed diff', () => {
     assert.equal(run(repo, 'status', '--porcelain'), '', 'and so is their tree');
   });
 
+  it('refuses when the checkout left the base branch for another one at the same commit', async () => {
+    // `git merge` moves whatever HEAD points at, not `baseBranch`. A second
+    // branch at the same tip is the ordinary way to be off the base while every
+    // ref this merge reads still says exactly what it said at the check.
+    const request = landRequest();
+    run(repo, 'checkout', '-q', '-b', 'side');
+    const before = snapshot();
+
+    await assert.rejects(
+      () => landDiff(request),
+      (error: unknown) => {
+        assert.ok(error instanceof ProtocolError);
+        assert.match(error.message, /left main while the merge was being prepared/);
+        assert.match(error.detail ?? '', /rolled back: the repository is exactly as it was/);
+        return true;
+      },
+    );
+    assert.deepEqual(snapshot(), before, 'their other branch, their HEAD and their tree are untouched');
+  });
+
+  it('refuses on a detached HEAD sitting at the base commit', async () => {
+    const request = landRequest();
+    run(repo, 'checkout', '-q', '--detach');
+    const before = snapshot();
+
+    await assert.rejects(
+      () => landDiff(request),
+      (error: unknown) => {
+        assert.ok(error instanceof ProtocolError);
+        assert.match(error.detail ?? '', /a detached HEAD/);
+        return true;
+      },
+    );
+    assert.deepEqual(snapshot(), before);
+  });
+
+  it('does not report a tree the operator had already edited as a failed rollback', async () => {
+    // The apply happens in the private index and succeeds; `merge --ff-only`
+    // then refuses because their edit is in the way. Nothing was rolled back
+    // because nothing happened — and their own edit must not be raised under
+    // the one alarm that is supposed to mean nvime broke something.
+    writeFileSync(join(repo, 'tool.py'), 'def main():\n    print("mine, half-finished")\n');
+    const before = snapshot();
+    await assert.rejects(
+      () => landDiff(landRequest()),
+      (error: unknown) => {
+        assert.ok(error instanceof ProtocolError);
+        assert.equal(error.code, 'bad_request', 'a verified rollback is not an agent error');
+        assert.match(error.detail ?? '', /rolled back: the repository is exactly as it was/);
+        assert.ok(!(error.detail ?? '').includes('ROLLBACK:'), error.detail ?? '');
+        return true;
+      },
+    );
+    assert.deepEqual(snapshot(), before, 'and their half-finished edit is still there');
+  });
+});
+
+describe('the private index of a merge', () => {
+  it('clears the lock a killed `git apply` leaves behind, instead of wedging every later merge', async () => {
+    // What a SIGKILL of the `apply --cached` child leaves: git creates
+    // `<index>.lock` beside the index and only removes it on a clean exit.
+    const indexFile = join(root, 'merge-index');
+    writeFileSync(`${indexFile}.lock`, '');
+    const landed = await landDiff(landRequest({ indexFile }));
+
+    assert.equal(run(repo, 'rev-parse', 'main'), landed.commit, 'the merge still lands');
+    assert.equal(existsSync(`${indexFile}.lock`), false, 'and leaves no lock of its own behind');
+    assert.equal(existsSync(indexFile), false);
+  });
+
+  it('leaves no lock behind when the land fails either', async () => {
+    const indexFile = join(root, 'merge-index');
+    const conflicting = patch().replace('    print("hi")', '    print("something else entirely")');
+    await assert.rejects(() => landDiff(landRequest({ indexFile, patchPath: patchFile(conflicting) })), ProtocolError);
+    assert.equal(existsSync(`${indexFile}.lock`), false);
+    assert.equal(existsSync(indexFile), false);
+  });
+
+  it('refuses an index path inside the repository, which the lock cleanup would reach into', async () => {
+    await assert.rejects(
+      () => landDiff(landRequest({ indexFile: join(repo, '.git', 'index') })),
+      (error: unknown) => error instanceof ProtocolError && /outside the repository/.test(error.message),
+    );
+    assert.equal(run(repo, 'rev-parse', 'main'), baseCommit, 'and lands nothing');
+  });
+});
+
+describe('a merge whose record write did not survive', () => {
+  /** The branch a real land for `session()` would have created. */
+  const OWN_BRANCH = branchNameFor('add a version flag', 'abc123');
+
+  it('recognises its own landed change instead of calling it a base that moved', async () => {
+    const landed = await landDiff(landRequest({ branch: OWN_BRANCH }));
+    // The record the merge would have written is exactly what is missing here:
+    // the session still says `reviewing` on the base the build started from.
+    const stale = session({ base: { commit: baseCommit, branch: 'main' } });
+    const refusals = await checkMerge(stale, {
+      diff: parseUnifiedDiff(patch()),
+      counts: { total: 1, open: 0, substantial: 1, defended: 1 },
+      heldElsewhere: false,
+    });
+    assert.deepEqual(refusals.map((refusal) => refusal.code), ['merged-elsewhere']);
+    assert.match(refusals[0]?.message ?? '', new RegExp(landed.commit.slice(0, 8)));
+  });
+
+  it('still calls somebody else\'s commit a base that moved', async () => {
+    writeFileSync(join(repo, 'other.txt'), 'someone else\n');
+    run(repo, 'add', '-A');
+    run(repo, 'commit', '-qm', 'meanwhile');
+    const refusals = await checkMerge(session(), {
+      diff: parseUnifiedDiff(patch()),
+      counts: { total: 1, open: 0, substantial: 1, defended: 1 },
+      heldElsewhere: false,
+    });
+    assert.deepEqual(refusals.map((refusal) => refusal.code), ['base-moved']);
+  });
+
+  it('does not mistake an older session\'s branch of the same name for this change', async () => {
+    // Same slug, landed long ago on a different base: it IS an ancestor of
+    // main, so only the parent check tells the two apart.
+    run(repo, 'checkout', '-q', '-b', OWN_BRANCH);
+    writeFileSync(join(repo, 'unrelated.txt'), 'an older change\n');
+    run(repo, 'add', '-A');
+    run(repo, 'commit', '-qm', 'an older change of the same name');
+    writeFileSync(join(repo, 'unrelated.txt'), 'and again\n');
+    run(repo, 'commit', '-qam', 'so it does not sit on the base either');
+    run(repo, 'checkout', '-q', 'main');
+    run(repo, 'merge', '-q', '--ff-only', OWN_BRANCH);
+
+    const refusals = await checkMerge(session(), {
+      diff: parseUnifiedDiff(patch()),
+      counts: { total: 1, open: 0, substantial: 1, defended: 1 },
+      heldElsewhere: false,
+    });
+    assert.deepEqual(refusals.map((refusal) => refusal.code), ['base-moved']);
+  });
+});
+
+describe('landing the reviewed diff, continued', () => {
   it('resolves a patch whose own context has changed, through the 3-way fallback', async () => {
     // The reviewed change rewrites line 2. The base has since rewritten line 5,
     // which is inside the patch's context — plain `git apply` refuses on it, and

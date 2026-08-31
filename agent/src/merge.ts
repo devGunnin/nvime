@@ -1,6 +1,7 @@
-import { rmSync } from 'node:fs';
+import { rmSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { BigSession } from './bigstore.js';
-import { git, readHead, resolveRef, trackedChanges } from './git.js';
+import { git, readHead, resolveRef, trackedChanges, type RepoHead } from './git.js';
 import { ProtocolError } from './protocol.js';
 import type { TriageCounts } from './triage.js';
 import type { ParsedDiff } from './unidiff.js';
@@ -37,6 +38,7 @@ export type MergeRefusalCode =
   | 'no-base-branch'
   | 'base-gone'
   | 'base-moved'
+  | 'merged-elsewhere'
   | 'dirty-tree'
   | 'not-on-base'
   | 'held-elsewhere';
@@ -115,12 +117,13 @@ export async function checkMerge(session: BigSession, facts: MergeFacts): Promis
     push('no-base-branch', 'this change was built from a detached HEAD, so there is no branch to merge into');
     return refusals;
   }
-  refusals.push(...(await checkRepoState(session.repoRoot, base.branch, base.commit)));
+  refusals.push(...(await checkRepoState(session, base.branch, base.commit)));
   return refusals;
 }
 
 /** The operator's repository right now: the branch, where it is, and its tree. */
-async function checkRepoState(repoRoot: string, baseBranch: string, baseCommit: string): Promise<MergeRefusal[]> {
+async function checkRepoState(session: BigSession, baseBranch: string, baseCommit: string): Promise<MergeRefusal[]> {
+  const repoRoot = session.repoRoot;
   const refusals: MergeRefusal[] = [];
   const head = await readHead(repoRoot);
   if (head.branch !== baseBranch) {
@@ -131,10 +134,7 @@ async function checkRepoState(repoRoot: string, baseBranch: string, baseCommit: 
   if (now === null) {
     refusals.push({ code: 'base-gone', message: `${baseBranch} no longer exists` });
   } else if (now !== baseCommit) {
-    refusals.push({
-      code: 'base-moved',
-      message: `${baseBranch} has moved since the build started (${baseCommit.slice(0, 8)} → ${now.slice(0, 8)})`,
-    });
+    refusals.push(await movedOrLanded(session, baseBranch, baseCommit, now));
   }
   const dirty = await trackedChanges(repoRoot);
   if (dirty.length > 0) {
@@ -161,6 +161,71 @@ export function branchNameFor(title: string, sessionId: string): string {
 }
 
 /**
+ * The branch names a session's land may have used, in the order it tries them.
+ * One list, so "where would this have landed" and "where did it land" cannot
+ * drift apart.
+ */
+export function branchCandidates(title: string, sessionId: string): string[] {
+  const preferred = branchNameFor(title, sessionId);
+  return [preferred, `${preferred}-${sessionId}`];
+}
+
+/**
+ * Why the base branch is not where the build left it. A base that moved
+ * because THIS change landed on it is not the base moving out from under the
+ * reader — it is a merge whose record write did not survive — and telling them
+ * to rebase onto their own just-landed change is the worst answer available.
+ */
+async function movedOrLanded(
+  session: BigSession,
+  baseBranch: string,
+  baseCommit: string,
+  now: string,
+): Promise<MergeRefusal> {
+  const landed = await landedAlready(session, baseBranch, baseCommit);
+  if (landed !== null) {
+    return {
+      code: 'merged-elsewhere',
+      message: `this change already landed as ${landed.commit.slice(0, 8)} on ${baseBranch}`,
+    };
+  }
+  return {
+    code: 'base-moved',
+    message: `${baseBranch} has moved since the build started (${baseCommit.slice(0, 8)} → ${now.slice(0, 8)})`,
+  };
+}
+
+/**
+ * The reviewed change already on the base branch, under a branch this session's
+ * land created. Both halves are required: the ref must sit directly on the
+ * recorded base (`commit-tree -p <baseCommit>`, so it is this build's commit and
+ * not an old session's branch of the same name), and the base branch must
+ * contain it. Only asked when the base has moved, so the ordinary path pays
+ * nothing for it.
+ */
+export async function landedAlready(
+  session: BigSession,
+  baseBranch: string,
+  baseCommit: string,
+): Promise<LandResult | null> {
+  for (const branch of branchCandidates(session.title, session.id)) {
+    const commit = await resolveRef(session.repoRoot, `refs/heads/${branch}`);
+    if (commit === null) continue;
+    if ((await resolveRef(session.repoRoot, `${commit}^`)) !== baseCommit) continue;
+    if (!(await contains(session.repoRoot, baseBranch, commit))) continue;
+    return { commit, branch };
+  }
+  return null;
+}
+
+/** Whether `branch` already holds `commit`. Counted rather than exit-coded:
+ *  `merge-base --is-ancestor` reports "no" and "broken repo" the same way. */
+async function contains(repoRoot: string, branch: string, commit: string): Promise<boolean> {
+  const { stdout } = await git(repoRoot, ['rev-list', '--count', `${branch}..${commit}`]);
+  return stdout.trim() === '0';
+}
+
+/**
  * Builds the commit and fast-forwards the base branch into it.
  *
  * On any failure past the point where the branch exists, the branch is deleted
@@ -171,27 +236,90 @@ export function branchNameFor(title: string, sessionId: string): string {
  */
 export async function landDiff(request: LandRequest): Promise<LandResult> {
   const { repoRoot, branch, baseBranch, baseCommit, indexFile } = request;
+  requirePrivateIndex(repoRoot, indexFile);
+  const startedAt = Date.now();
   const ref = `refs/heads/${branch}`;
+  // Read before anything is attempted: the rollback proof compares against
+  // what this attempt FOUND, not against an absolute "clean and on the base".
+  const before: RepoState = { head: await readHead(repoRoot), dirty: await trackedChanges(repoRoot) };
   let commit: string | null = null;
   try {
-    commit = await buildCommit(request);
+    commit = await buildCommit(request, startedAt);
     // Empty old value: creates the ref and fails if anything already holds it,
     // in one atomic step rather than an exists-check and a race.
     await git(repoRoot, ['update-ref', ref, commit, '']);
     await fastForward(repoRoot, branch, baseBranch, baseCommit, commit);
     return { commit, branch };
   } catch (cause) {
-    const rolledBack = await rollback(repoRoot, ref, commit, baseBranch, baseCommit);
-    throw asMergeFailure(cause, rolledBack);
+    throw asMergeFailure(cause, await rollback({ repoRoot, ref, commit, baseBranch, baseCommit, before }));
   } finally {
-    // The private index is scratch: it holds the tree that is now a commit.
+    // The private index is scratch: it holds the tree that is now a commit. Its
+    // lock goes with it — a killed `git apply` leaves one behind, and git then
+    // refuses every later merge of this session with a message that sends the
+    // reader hunting for a stray process in their own repository.
     rmSync(indexFile, { force: true });
+    rmSync(lockOf(indexFile), { force: true });
   }
 }
 
+/** The repository as an attempt found it, so a rollback can prove it undid itself. */
+interface RepoState {
+  head: RepoHead;
+  /** `git status` lines, so a tree that was already dirty is not blamed on us. */
+  dirty: string[];
+}
+
+/**
+ * The private index must live outside the repository. Everything before the
+ * fast-forward is invisible to the operator only because it is written there,
+ * and the lock cleanup above would otherwise delete a lock in THEIR index.
+ */
+function requirePrivateIndex(repoRoot: string, indexFile: string): void {
+  const root = resolve(repoRoot);
+  const index = resolve(indexFile);
+  if (index === root || index.startsWith(`${root}/`)) {
+    throw new ProtocolError('internal', 'the merge index must live outside the repository', index);
+  }
+}
+
+function lockOf(indexFile: string): string {
+  return `${indexFile}.lock`;
+}
+
+/**
+ * Clears a private-index lock left behind by a killed `git apply`.
+ *
+ * Stale by construction and by check: the index is nvime's own scratch file in
+ * its own store, this session's run claim is held, and the lock was already
+ * there when this attempt began. One that appeared SINCE is something else
+ * writing the file, which is a refusal naming the real path — never a silent
+ * removal, and never git's "another git process in this repository".
+ */
+function clearStaleIndexLock(indexFile: string, startedAt: number): void {
+  const lock = lockOf(indexFile);
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(lock).mtimeMs;
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return;
+    throw cause;
+  }
+  if (mtimeMs > startedAt) {
+    throw new ProtocolError(
+      'agent_error',
+      'the private index for this merge is locked by something still running',
+      `${lock} was written after this merge began; nothing but nvime writes it`,
+    );
+  }
+  rmSync(lock, { force: true });
+  process.stderr.write(`nvime: cleared a stale private-index lock at ${lock}\n`);
+}
+
 /** The reviewed diff as a commit on top of `baseCommit`. Touches no ref. */
-async function buildCommit(request: LandRequest): Promise<string> {
+async function buildCommit(request: LandRequest, startedAt: number): Promise<string> {
   const { repoRoot, baseCommit, patchPath, message, indexFile } = request;
+  clearStaleIndexLock(indexFile, startedAt);
   const env = { GIT_INDEX_FILE: indexFile };
   await git(repoRoot, ['read-tree', baseCommit], { env });
   await applyPatch(repoRoot, patchPath, env);
@@ -230,9 +358,14 @@ async function applyPatch(repoRoot: string, patchPath: string, env: Record<strin
 }
 
 /**
- * The last step, and the only one the operator can see. Re-reads the base under
- * the run's lock first: a base that moved while the commit was being built must
- * stop here, with the branch left in place for the reader to merge themselves.
+ * The last step, and the only one the operator can see.
+ *
+ * `git merge` moves whatever HEAD points at — NOT `baseBranch`. So HEAD itself
+ * is re-read under the run's claim, and both halves of it must still hold: the
+ * branch it is ON, and the commit it is AT. Re-reading only the base ref would
+ * let a checkout made since the precondition check (a second branch at the same
+ * tip, a `git checkout --detach`) fast-forward the reviewed change onto the
+ * operator's other ref and rewrite their working tree.
  */
 async function fastForward(
   repoRoot: string,
@@ -241,21 +374,25 @@ async function fastForward(
   baseCommit: string,
   commit: string,
 ): Promise<void> {
-  const now = await resolveRef(repoRoot, baseBranch);
-  if (now !== baseCommit) {
+  const leave = `the reviewed change is on ${branch}; merge it yourself when you have looked at what landed`;
+  const head = await readHead(repoRoot);
+  if (head.branch !== baseBranch) {
     throw new ProtocolError(
       'agent_error',
-      `${baseBranch} moved while the merge was being prepared`,
-      `the reviewed change is on ${branch}; merge it yourself when you have looked at what landed`,
+      `this checkout left ${baseBranch} while the merge was being prepared`,
+      `it is on ${where(head)}; ${leave}`,
     );
   }
+  if (head.commit !== baseCommit) {
+    throw new ProtocolError('agent_error', `${baseBranch} moved while the merge was being prepared`, leave);
+  }
   await git(repoRoot, ['merge', '--ff-only', branch]);
-  const landed = await resolveRef(repoRoot, baseBranch);
-  if (landed !== commit) {
+  const landed = await readHead(repoRoot);
+  if (landed.branch !== baseBranch || landed.commit !== commit) {
     throw new ProtocolError(
       'agent_error',
       `${baseBranch} is not at the merged commit`,
-      `expected ${commit}, found ${landed ?? 'nothing'}`,
+      `expected ${commit.slice(0, 8)} on ${baseBranch}, found ${where(landed)}`,
     );
   }
 }
@@ -266,19 +403,31 @@ interface Rollback {
   detail: string;
 }
 
+interface RollbackRequest {
+  repoRoot: string;
+  ref: string;
+  /** Where this attempt created `ref`, or null when it never got that far. */
+  commit: string | null;
+  baseBranch: string;
+  baseCommit: string;
+  /** The repository as this attempt found it. The rollback is proved against it. */
+  before: RepoState;
+}
+
 /**
- * Undoes whatever the failed attempt managed to do, then PROVES it: the base
- * branch is back where it was and no tracked file changed. A rollback that
- * cannot be verified is reported as such — the one thing worse than a failed
- * merge is a failed merge that claims it cleaned up.
+ * Undoes whatever the failed attempt managed to do, then PROVES it against the
+ * state this attempt started from: the base branch is back where it was, HEAD
+ * is on the same ref at the same commit, and the tracked changes are the ones
+ * that were already there.
+ *
+ * HEAD is checked because the base ref alone cannot see the worst case — a
+ * merge that fast-forwarded some OTHER ref leaves `baseBranch` untouched and a
+ * `git status` that is clean relative to the new HEAD. And the comparison is
+ * against `before` rather than against "clean" so a tree the operator had
+ * already edited is not reported under the loudest alarm this design has.
  */
-async function rollback(
-  repoRoot: string,
-  ref: string,
-  commit: string | null,
-  baseBranch: string,
-  baseCommit: string,
-): Promise<Rollback> {
+async function rollback(request: RollbackRequest): Promise<Rollback> {
+  const { repoRoot, ref, commit, baseBranch, baseCommit, before } = request;
   try {
     // Compare-and-delete: only the ref this attempt created, and only while it
     // still points where this attempt put it.
@@ -287,14 +436,23 @@ async function rollback(
     if (base !== baseCommit) {
       return { ok: false, detail: `${baseBranch} is at ${short(base)}, not the base ${short(baseCommit)}` };
     }
+    const head = await readHead(repoRoot);
+    if (head.branch !== before.head.branch || head.commit !== before.head.commit) {
+      return { ok: false, detail: `HEAD is ${where(head)}, not ${where(before.head)} where this attempt found it` };
+    }
     const dirty = await trackedChanges(repoRoot);
-    if (dirty.length > 0) {
-      return { ok: false, detail: `${dirty.length} tracked file(s) are modified: ${dirty.slice(0, 5).join(', ')}` };
+    if (!sameLines(dirty, before.dirty)) {
+      const now = dirty.length === 0 ? 'nothing' : dirty.slice(0, 5).join(', ');
+      return { ok: false, detail: `tracked changes are not what they were: now ${now}, was ${before.dirty.length}` };
     }
     return { ok: true, detail: 'the repository is exactly as it was' };
   } catch (cause) {
     return { ok: false, detail: `the rollback check itself failed: ${detailOf(cause)}` };
   }
+}
+
+function sameLines(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && [...a].sort().join('\n') === [...b].sort().join('\n');
 }
 
 async function deleteIfOurs(repoRoot: string, ref: string, commit: string): Promise<void> {
@@ -323,4 +481,10 @@ function detailOf(cause: unknown): string {
 
 function short(commit: string | null): string {
   return commit === null ? 'nothing' : commit.slice(0, 8);
+}
+
+/** Where a HEAD is, in one phrase: the ref it is on and the commit it is at. */
+function where(head: RepoHead): string {
+  const on = head.branch === null ? 'a detached HEAD' : head.branch;
+  return `${on} at ${short(head.commit)}`;
 }
