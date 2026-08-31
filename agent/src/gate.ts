@@ -151,12 +151,3 @@ export function pendingFollowup(rounds: readonly GateRound[]): string | null {
   if (last === undefined || last.result === null) return null;
   return last.result.followup === '' ? null : last.result.followup;
 }
-
-/** The most recent score for a thread, or null when it has never been graded. */
-export function lastGrade(rounds: readonly GateRound[]): number | null {
-  for (let index = rounds.length - 1; index >= 0; index -= 1) {
-    const result = rounds[index]?.result;
-    if (result != null) return result.grade;
-  }
-  return null;
-}

@@ -5,7 +5,6 @@ import {
   DEFAULT_DIFFICULTY,
   gateArmed,
   isDifficulty,
-  lastGrade,
   parseGradeOutput,
   pendingFollowup,
   thresholdFor,
@@ -113,9 +112,4 @@ describe('reading a thread history', () => {
     assert.equal(pendingFollowup([graded(30, 'why?'), ungraded]), null, 'an ungraded round asks nothing');
   });
 
-  it('reports the most recent score, skipping ungraded rounds', () => {
-    assert.equal(lastGrade([graded(30), ungraded]), 30);
-    assert.equal(lastGrade([ungraded]), null);
-    assert.equal(lastGrade([]), null);
-  });
 });

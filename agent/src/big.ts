@@ -516,30 +516,33 @@ export class BigService {
     this.#refuseIfHeldElsewhere(session);
 
     return this.#run(requestId, session, 'merging', async () => {
-      // Inside the lock: the check the merge is actually made on. Nothing the
-      // editor asked with, and nothing computed before the claim was held.
-      const refusals = await checkMerge(session, this.#mergeFacts(session, countBlocks(session.blocks)));
-      if (refusals.length > 0) return { session: this.#view(session), merged: false, refusals };
+      // Re-read INSIDE the claim: the record above was read before this run
+      // held the session, so another editor could have moved it since. What
+      // the merge is made on is this, never what the editor asked with.
+      const held = this.#store.require(params.root, params.id);
+      const refusals = await checkMerge(held, this.#mergeFacts(held, countBlocks(held.blocks)));
+      if (refusals.length > 0) return { session: this.#view(held), merged: false, refusals };
 
-      const base = requireBase(session);
-      if (base.branch === null) throw new ProtocolError('internal', 'checkMerge passed a change with no base branch');
-      const branch = await this.#freeBranchName(session);
-      this.#emit('big.state', { id: requestId, session: session.id, state: 'reviewing', note: `landing on ${branch}` });
+      const base = requireBase(held);
+      const baseBranch = base.branch;
+      if (baseBranch === null) throw new ProtocolError('internal', 'checkMerge passed a change with no base branch');
+      const branch = await this.#freeBranchName(held);
+      this.#emit('big.state', { id: requestId, session: held.id, state: 'reviewing', note: `landing on ${branch}` });
       const landed = await landDiff({
-        repoRoot: session.repoRoot,
+        repoRoot: held.repoRoot,
         branch,
-        baseBranch: base.branch,
+        baseBranch,
         baseCommit: base.commit,
-        patchPath: this.#store.diffPathFor(session.repoRoot, session.id),
-        message: session.title,
-        indexFile: join(this.#store.dirFor(session.repoRoot, session.id), 'merge-index'),
+        patchPath: this.#store.diffPathFor(held.repoRoot, held.id),
+        message: held.title,
+        indexFile: join(this.#store.dirFor(held.repoRoot, held.id), 'merge-index'),
       });
 
-      session.merge = { branch: landed.branch, commit: landed.commit, baseBranch: base.branch, at: Date.now() };
-      transition(session, 'merged', `${landed.commit.slice(0, 8)} on ${base.branch}`);
-      this.#store.save(session);
-      if (params.cleanup === true) await this.#cleanupClone(session);
-      return { session: this.#view(session), merged: true, refusals: [] };
+      held.merge = { branch: landed.branch, commit: landed.commit, baseBranch, at: Date.now() };
+      transition(held, 'merged', `${landed.commit.slice(0, 8)} on ${baseBranch}`);
+      this.#store.save(held);
+      if (params.cleanup === true) await this.#cleanupClone(held);
+      return { session: this.#view(held), merged: true, refusals: [] };
     });
   }
 
@@ -551,16 +554,19 @@ export class BigService {
   async rebase(requestId: number, params: { root: string; id: string }): Promise<SessionView> {
     const session = this.#requireBuildable(params.root, params.id);
     const base = requireBase(session);
+    const branch = base.branch;
     const worktree = session.worktree;
-    if (base.branch === null || worktree === null) {
+    if (branch === null || worktree === null) {
       throw new ProtocolError('bad_request', 'this change has no base branch to rebase onto');
     }
-    const head = await resolveRef(session.repoRoot, base.branch);
-    if (head === null) throw new ProtocolError('bad_request', `${base.branch} no longer exists`);
-    if (head === base.commit) throw new ProtocolError('bad_request', `${base.branch} has not moved`);
+    const head = await resolveRef(session.repoRoot, branch);
+    if (head === null) throw new ProtocolError('bad_request', `${branch} no longer exists`);
+    if (head === base.commit) throw new ProtocolError('bad_request', `${branch} has not moved`);
 
     return this.#run(requestId, session, 'rebasing', async () => {
-      const fetched = await fetchBase(worktree.path, session.repoRoot, base.branch as string);
+      // The fetched commit, not the one read above: the branch may have moved
+      // again, and what the clone is rebased ONTO is what the base becomes.
+      const fetched = await fetchBase(worktree.path, session.repoRoot, branch);
       const { conflicted } = await rebaseCloneOnto(worktree.path, fetched);
       this.#emit('big.state', {
         id: requestId,
@@ -568,8 +574,8 @@ export class BigService {
         state: 'building',
         note: conflicted ? 'the rebase hit conflicts — resolving them' : 're-verifying on the new base',
       });
-      await this.#finishRebase(requestId, session, worktree.path, conflicted, base.branch as string);
-      session.base = { commit: fetched, branch: base.branch };
+      await this.#finishRebase(requestId, session, worktree.path, conflicted, branch);
+      session.base = { commit: fetched, branch };
       this.#store.save(session);
       return this.#captureAndTriage(requestId, session);
     });
@@ -597,6 +603,9 @@ export class BigService {
     });
     session.buildSessionId = result.sessionId;
     session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
+    // Saved before the check below, which can throw: what the turn said is
+    // worth keeping even when the rebase it was resolving had to be undone.
+    this.#store.save(session);
     if (!(await rebaseInProgress(clonePath))) return;
     await abortRebase(clonePath);
     throw new ProtocolError(

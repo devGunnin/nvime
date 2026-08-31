@@ -167,11 +167,24 @@ describe('merge preconditions', () => {
     assert.deepEqual(await codes({}, { diff: null }), ['no-diff']);
   });
 
-  it('refuses a binary change, whose bytes the reviewed diff does not carry', async () => {
+  it('refuses a binary change, naming the files whose bytes the diff does not carry', async () => {
     const binary = parseUnifiedDiff(
-      ['diff --git a/logo.png b/logo.png', 'index 1111111..2222222 100644', 'Binary files a/logo.png and b/logo.png differ', ''].join('\n'),
+      [
+        'diff --git a/logo.png b/logo.png',
+        'index 1111111..2222222 100644',
+        'Binary files a/logo.png and b/logo.png differ',
+        '',
+      ].join('\n'),
     );
-    assert.deepEqual(await codes({}, { diff: binary }), ['binary-change']);
+    const refusals = await checkMerge(session(), {
+      diff: binary,
+      counts: { total: 1, open: 0, substantial: 1, defended: 1 },
+      heldElsewhere: false,
+    });
+    assert.deepEqual(refusals.map((refusal) => refusal.code), ['binary-change']);
+    // A build's own output is the usual cause, so the reader has to be told
+    // WHICH file to gitignore or ask the build to drop.
+    assert.match(refusals[0]?.message ?? '', /logo\.png/);
   });
 
   it('refuses when another editor is driving the change', async () => {

@@ -100,8 +100,14 @@ export async function checkMerge(session: BigSession, facts: MergeFacts): Promis
   }
   if (facts.diff === null) push('no-diff', 'the captured diff is not the one these threads describe');
   else if (facts.diff.hunks.length === 0) push('nothing-to-merge', 'the build changed nothing');
-  else if (facts.diff.files.some((file) => file.binary)) {
-    push('binary-change', 'this change touches a binary file, whose bytes the reviewed diff does not carry');
+  else {
+    // A diff captured without `--binary` describes these files but carries none
+    // of their bytes, so naming them is the only way forward: the reader either
+    // gitignores build output the clone produced, or asks the build to drop it.
+    const binary = facts.diff.files.filter((file) => file.binary).map((file) => file.path);
+    if (binary.length > 0) {
+      push('binary-change', `the reviewed diff does not carry the bytes of ${binary.join(', ')}`);
+    }
   }
 
   const base = session.base;

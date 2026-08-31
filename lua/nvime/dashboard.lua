@@ -40,6 +40,10 @@ function M.session_line(session)
   local progress = ''
   if session.display == 'merged' then
     progress = 'landed'
+  elseif session.difficulty == 'vibe' and (counts.total or 0) > 0 then
+    -- Said outright: `0 open` on a session that runs no gate means nothing was
+    -- defended, not that everything was.
+    progress = string.format('%d thread(s), no gate', counts.total)
   elseif substantial > 0 then
     progress = string.format('%d/%d defended', counts.defended or 0, substantial)
   elseif (counts.total or 0) > 0 then

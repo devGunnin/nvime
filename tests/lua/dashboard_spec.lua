@@ -83,6 +83,14 @@ describe('the dashboard page', function()
     ok(dashboard.session_line(summary({ heldElsewhere = true })):match('reviewing%*') ~= nil)
   end)
 
+  it('says a vibe session ran no gate rather than implying it was defended', function()
+    local line = dashboard.session_line(
+      summary({ difficulty = 'vibe', counts = { total = 4, open = 0, substantial = 3, defended = 3 } })
+    )
+    ok(line:match('4 thread%(s%), no gate') ~= nil, line)
+    ok(line:match('defended') == nil, 'nothing was defended in a session with no gate')
+  end)
+
   it('says so when a change has threads but nothing to defend', function()
     local line = dashboard.session_line(summary({ counts = { total = 4, open = 0, substantial = 0, defended = 0 } }))
     ok(line:match('4 thread%(s%), nothing to defend') ~= nil, line)
