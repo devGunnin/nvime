@@ -46,7 +46,9 @@ end
 
 --- Highlights a completed fenced block with the real grammar for its language.
 --- Best-effort: an unknown or unavailable parser leaves the plain code colour.
-local function highlight_fence(buf, first_row, lines, lang)
+--- `rows[n]` is the buffer row holding `lines[n]`; a tool line interjected mid
+--- fence makes those non-contiguous, so parsed rows are never added to a base.
+local function highlight_fence(buf, rows, lines, lang)
   if lang == nil or #lines == 0 then
     return
   end
@@ -65,13 +67,16 @@ local function highlight_fence(buf, first_row, lines, lang)
   end
   for id, node in query:iter_captures(trees[1]:root(), source, 0, -1) do
     local srow, scol, erow, ecol = node:range()
-    pcall(vim.api.nvim_buf_set_extmark, buf, NS, first_row + srow, scol, {
-      end_row = first_row + erow,
-      end_col = ecol,
-      hl_group = '@' .. query.captures[id],
-      priority = 120,
-      strict = false,
-    })
+    local start_row, end_row = rows[srow + 1], rows[erow + 1]
+    if start_row ~= nil and end_row ~= nil then
+      pcall(vim.api.nvim_buf_set_extmark, buf, NS, start_row, scol, {
+        end_row = end_row,
+        end_col = ecol,
+        hl_group = '@' .. query.captures[id],
+        priority = 120,
+        strict = false,
+      })
+    end
   end
 end
 
@@ -103,7 +108,17 @@ local function set_winbar(self)
   vim.wo[self.win].winbar = '%#NvimeSession#' .. left .. (self.status or 'nvime chat')
 end
 
+--- Reclaims a leftover buffer of the same name (the user wiped half a panel);
+--- `nvim_buf_set_name` refuses a duplicate, which would brick every reopen.
+local function drop_stale(name)
+  local existing = vim.fn.bufnr('^' .. name .. '$')
+  if existing ~= -1 and vim.api.nvim_buf_is_valid(existing) then
+    pcall(vim.api.nvim_buf_delete, existing, { force = true })
+  end
+end
+
 local function make_buffer(name, filetype)
+  drop_stale(name)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_name(buf, name)
   vim.bo[buf].buftype = 'nofile'
@@ -146,12 +161,33 @@ local function open_windows(self, opts)
   vim.wo[self.prompt_win].winbar = '%#NvimeDim#prompt · <CR> send (i_<C-s>) · <C-r> sessions · <C-c> stop'
 end
 
+local function win_valid(win)
+  return win ~= nil and vim.api.nvim_win_is_valid(win)
+end
+
+--- Rebuilds the layout when the user closed one split with `:q`. Both windows
+--- are redrawn together so the two halves cannot end up in unrelated places.
+local function ensure_windows(self, opts)
+  if win_valid(self.win) and win_valid(self.prompt_win) then
+    return
+  end
+  for _, win in ipairs({ self.prompt_win, self.win }) do
+    if win_valid(win) then
+      pcall(vim.api.nvim_win_close, win, true)
+    end
+  end
+  self.win, self.prompt_win = nil, nil
+  open_windows(self, opts)
+end
+
 --- Opens the panel (or focuses it when already open).
---- @param opts table width, prompt_height, position, on_submit, on_cancel, on_history
+--- @param opts table width, prompt_height, position, on_submit, on_cancel, on_history, on_close
 function M.open(opts)
   assert(type(opts) == 'table', 'panel.open needs an options table')
   assert(type(opts.on_submit) == 'function', 'panel.open needs an on_submit callback')
   if M.is_open() then
+    ensure_windows(panel, opts)
+    set_winbar(panel)
     vim.api.nvim_set_current_win(panel.prompt_win)
     return panel
   end
@@ -164,6 +200,7 @@ function M.open(opts)
     spinner = nil,
     spinner_frame = 1,
     stream = nil,
+    on_close = opts.on_close,
   }
   vim.bo[self.buf].modifiable = false
   open_windows(self, opts)
@@ -190,13 +227,19 @@ function M.open(opts)
   return self
 end
 
+--- True while the panel's buffers live. Windows may be missing — `M.open`
+--- redraws them — but a half-wiped panel is dead and must be rebuilt.
 function M.is_open()
-  return panel ~= nil and vim.api.nvim_buf_is_valid(panel.buf)
+  return panel ~= nil and vim.api.nvim_buf_is_valid(panel.buf) and vim.api.nvim_buf_is_valid(panel.prompt_buf)
 end
 
 function M.close()
   if panel == nil then
     return
+  end
+  -- The owner may still have a turn running; tell it before the surface goes.
+  if panel.on_close ~= nil then
+    panel.on_close()
   end
   M.stop_activity()
   for _, win in ipairs({ panel.prompt_win, panel.win }) do
@@ -239,7 +282,7 @@ local function close_fence(self, ctx)
   if fence == nil then
     return
   end
-  highlight_fence(self.buf, fence.first_row, fence.lines, fence.lang)
+  highlight_fence(self.buf, fence.rows, fence.lines, fence.lang)
   ctx.fence = nil
 end
 
@@ -248,9 +291,10 @@ local function commit_md(self, ctx, text)
   local info = markdown.scan(text, ctx.md)
   local row = commit(self, text, info)
   if info.kind == 'fence_open' then
-    ctx.fence = { first_row = row + 1, lang = info.lang, lines = {} }
+    ctx.fence = { lang = info.lang, lines = {}, rows = {} }
   elseif info.kind == 'code' and ctx.fence ~= nil then
     table.insert(ctx.fence.lines, text)
+    table.insert(ctx.fence.rows, row)
   elseif info.kind == 'fence_close' then
     close_fence(self, ctx)
   end

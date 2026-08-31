@@ -54,6 +54,41 @@ describe('panel', function()
     panel.close()
   end)
 
+  it('reopens after the prompt split was closed with :q', function()
+    local first = open()
+    panel.append('earlier turn')
+    vim.api.nvim_win_close(first.prompt_win, true)
+    ok(not vim.api.nvim_win_is_valid(first.prompt_win))
+
+    local second = panel.open(panel_opts())
+    eq(first.buf, second.buf, 'the conversation buffer survives')
+    ok(vim.api.nvim_win_is_valid(second.prompt_win), 'the prompt split is back')
+    ok(vim.api.nvim_win_is_valid(second.win), 'and so is the scrollback')
+    eq({ 'earlier turn' }, lines(), 'with the scrollback intact')
+    panel.close()
+  end)
+
+  it('reopens after the scrollback split was closed, rather than writing off-screen', function()
+    local first = open()
+    vim.api.nvim_win_close(first.win, true)
+    local second = panel.open(panel_opts())
+    ok(vim.api.nvim_win_is_valid(second.win), 'the conversation is displayed again')
+    ok(vim.api.nvim_win_is_valid(second.prompt_win))
+    eq(second.prompt_win, vim.api.nvim_get_current_win(), 'and the prompt takes focus')
+    panel.close()
+  end)
+
+  it('rebuilds from scratch when a buffer was wiped out from under it', function()
+    local first = open()
+    vim.api.nvim_buf_delete(first.prompt_buf, { force = true })
+    ok(not panel.is_open(), 'half a panel is not an open panel')
+    local second = panel.open(panel_opts())
+    ok(panel.is_open())
+    ok(second.buf ~= first.buf, 'a fresh pair of buffers')
+    ok(vim.api.nvim_buf_is_valid(second.prompt_buf))
+    panel.close()
+  end)
+
   it('renders streamed deltas token by token', function()
     open()
     panel.begin_stream()
@@ -133,6 +168,44 @@ describe('panel', function()
     panel.stop_activity()
     eq(nil, self.spinner)
     panel.close()
+  end)
+
+  it('anchors treesitter highlights to the rows the code really landed on', function()
+    ok(pcall(vim.treesitter.get_string_parser, 'local a = 1', 'lua'), 'needs the bundled lua parser')
+    open()
+    panel.begin_stream()
+    panel.push_delta('```lua\nlocal a = 1\n')
+    -- A tool line lands between the two statements, so the fence is not contiguous.
+    panel.interject('  reading src/foo.py', 'NvimeDim')
+    panel.push_delta('local b = 2\n```\n')
+    panel.finish_stream()
+
+    local rendered = lines()
+    eq({ 'claude', '```lua', 'local a = 1', '  reading src/foo.py', 'local b = 2', '```', '' }, rendered)
+    for _, mark in ipairs(marks()) do
+      if mark[4].hl_group == '@keyword' then
+        ok(
+          rendered[mark[2] + 1]:find('local', 1, true) ~= nil,
+          'a keyword highlight landed on ' .. vim.inspect(rendered[mark[2] + 1])
+        )
+      end
+    end
+    panel.close()
+  end)
+
+  it('tells its owner before it tears the surface down', function()
+    local closed = 0
+    local opts = panel_opts()
+    opts.on_close = function()
+      closed = closed + 1
+    end
+    panel.close()
+    config.setup({})
+    panel.open(opts)
+    panel.close()
+    eq(1, closed, 'the owner gets one chance to stop a running turn')
+    panel.close()
+    eq(1, closed, 'and is not told again once the panel is gone')
   end)
 
   it('ignores writes when it is closed', function()
