@@ -1,28 +1,53 @@
 import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { HookInput, HookJSONOutput, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import {
   composeBuildPrompt,
+  composeGradePrompt,
   composeIntakeOpening,
+  composeRebasePrompt,
   composeRevisionPrompt,
   composeTriagePrompt,
   INTAKE_SCHEMA,
   parseIntakeOutput,
+  type GradeItem,
 } from './bigprompts.js';
 import {
   clearCapture,
   reconcile,
   transition,
+  type BigBase,
   type BigSession,
   type BigSpec,
   type BigState,
   type BigStore,
-  type BigWorktree,
   type Reality,
 } from './bigstore.js';
 import type { EmitEvent, SdkBindings } from './chat.js';
 import { subscriptionEnv, type Env } from './env.js';
-import { captureDiff, cloneAt, readHead, removeClone } from './git.js';
+import {
+  clears,
+  gateArmed,
+  GRADE_SCHEMA,
+  parseGradeOutput,
+  pendingFollowup,
+  thresholdFor,
+  type Difficulty,
+  type GateGrade,
+  type GateRound,
+} from './gate.js';
+import {
+  abortRebase,
+  captureDiff,
+  cloneAt,
+  fetchBase,
+  readHead,
+  rebaseCloneOnto,
+  rebaseInProgress,
+  removeClone,
+  resolveRef,
+} from './git.js';
+import { branchNameFor, checkMerge, landDiff, type MergeFacts, type MergeRefusal } from './merge.js';
 import { classifyBuildTool, READ_ONLY_TOOLS, realPathOf } from './policy.js';
 import { ProtocolError } from './protocol.js';
 import { readUsage, textDelta, toolCalls, type RunUsage } from './stream.js';
@@ -37,7 +62,7 @@ import {
   type TriageBlock,
   type TriageCounts,
 } from './triage.js';
-import { parseUnifiedDiff, renderForTriage, type ParsedDiff, type RenderedTriage } from './unidiff.js';
+import { parseUnifiedDiff, renderForTriage, type DiffHunk, type ParsedDiff, type RenderedTriage } from './unidiff.js';
 
 /**
  * Big Change mode: interrogate the request into a spec, build it alone in a
@@ -75,7 +100,13 @@ export const BIG_READ_DENIED = [...BIG_DENIED_TOOLS, 'Bash', 'BashOutput', 'Kill
 /** How much of a diff the triage turn is shown. Past it, triage sees a prefix. */
 export const MAX_TRIAGE_BYTES = 128 * 1024;
 
-type Phase = 'intake' | 'build' | 'triage';
+type Phase = 'intake' | 'build' | 'triage' | 'grade';
+
+/** How much typed defense one thread accepts in one round. */
+export const MAX_ANSWER_CHARS = 8000;
+
+/** The most threads one grading round may cover. Past it, answer in batches. */
+export const MAX_ANSWERS_PER_ROUND = 20;
 
 export interface BigServiceOptions {
   sdk: Pick<SdkBindings, 'query'>;
@@ -91,6 +122,7 @@ export interface SessionSummary {
   id: string;
   title: string;
   display: DisplayState;
+  difficulty: Difficulty;
   detached: boolean;
   heldElsewhere: boolean;
   updatedAt: number;
@@ -162,8 +194,23 @@ export class BigService {
     return this.#running.size;
   }
 
-  create(root: string, title: string): SessionView {
-    return this.#view(this.#store.create(root, title));
+  create(root: string, title: string, difficulty: Difficulty): SessionView {
+    return this.#view(this.#store.create(root, title, difficulty));
+  }
+
+  /**
+   * Changes how hard the gate is. Only while the spec is still being drafted:
+   * afterwards the threshold is what already-cleared threads were cleared at,
+   * and moving it would silently re-rate a review that has already happened.
+   */
+  setDifficulty(root: string, id: string, difficulty: Difficulty): SessionView {
+    const session = this.#store.require(root, id);
+    if (session.state !== 'drafting') {
+      throw new ProtocolError('bad_request', 'the difficulty is fixed once the spec is approved');
+    }
+    session.difficulty = difficulty;
+    this.#store.save(session);
+    return this.#view(session);
   }
 
   list(root: string): SessionSummary[] {
@@ -173,6 +220,7 @@ export class BigService {
         id: view.id,
         title: view.title,
         display: view.display,
+        difficulty: view.difficulty,
         detached: view.detached,
         heldElsewhere: view.heldElsewhere,
         updatedAt: view.updatedAt,
@@ -254,10 +302,9 @@ export class BigService {
       throw new ProtocolError('bad_request', 'this big change already has a build clone');
     }
     const head = await readHead(session.repoRoot);
+    session.base = { commit: head.commit, branch: head.branch };
     session.worktree = {
       path: this.#store.worktreePathFor(session.repoRoot, session.id),
-      baseCommit: head.commit,
-      baseBranch: head.branch,
       createdAt: Date.now(),
       ready: false,
     };
@@ -278,12 +325,13 @@ export class BigService {
     if (spec === null) throw new ProtocolError('bad_request', 'this big change has no approved spec');
     const worktree = session.worktree;
     if (worktree === null) throw new ProtocolError('bad_request', 'this big change has no build clone');
+    const base = requireBase(session);
 
     if (session.state !== 'building') transition(session, 'building', 'rebuilding');
     this.#store.save(session);
 
     return this.#run(requestId, session, 'build', async () => {
-      await this.#ensureClone(requestId, session, worktree);
+      await this.#ensureClone(requestId, session, base);
       const resume = session.buildSessionId;
       const prompt =
         resume === null
@@ -346,18 +394,243 @@ export class BigService {
     });
   }
 
+  /**
+   * The reviewer's `a`: defend one or more open threads, graded in ONE turn.
+   *
+   * Nothing here can clear a thread except a grade at or above the session's
+   * threshold. A turn that fails, or answers unusably, records the answer with
+   * no result and leaves the thread open — the reader is told why rather than
+   * being handed a pass nobody gave them.
+   */
+  async answer(
+    requestId: number,
+    params: { root: string; id: string; answers: ReadonlyArray<{ blockId: string; text: string }> },
+  ): Promise<SessionView> {
+    const session = this.#store.require(params.root, params.id);
+    this.#reconcileOrThrow(session);
+    this.#refuseIfHeldElsewhere(session);
+    const threshold = thresholdFor(session.difficulty);
+    if (threshold === null) {
+      throw new ProtocolError('bad_request', 'this change runs no gate — its difficulty is `vibe`');
+    }
+    if (session.state !== 'reviewing') {
+      throw new ProtocolError('bad_request', `this big change is ${session.state}, not ready to defend`);
+    }
+    const diffText = this.#store.readVerifiedDiff(session);
+    if (diffText === null) {
+      throw new ProtocolError('bad_request', 'the captured diff is not the one these threads describe — re-triage it');
+    }
+    const answers = normalizeAnswers(params.answers);
+    const items = buildGradeItems(session, answers, parseUnifiedDiff(diffText));
+
+    return this.#run(requestId, session, 'grading', async () => {
+      const grades = await this.#gradeRound(requestId, session, items, threshold);
+      for (const item of items) {
+        const block = session.blocks.find((entry) => entry.id === item.threadId);
+        if (block === undefined) continue;
+        block.rounds.push(roundFor(item.threadId, item.answer, grades));
+        const grade = grades.kind === 'graded' ? grades.byThread.get(item.threadId) : undefined;
+        if (grade !== undefined && clears(grade, threshold)) block.state = 'resolved';
+      }
+      this.#store.save(session);
+      return this.#view(session);
+    });
+  }
+
+  /**
+   * One grading turn for the whole round. Read-only, in the build clone so the
+   * grader can check a claim against the code, and resumed across rounds so a
+   * follow-up remembers what it already asked.
+   */
+  async #gradeRound(
+    requestId: number,
+    session: BigSession,
+    items: readonly GradeItem[],
+    threshold: number,
+  ): Promise<RoundGrades> {
+    try {
+      const result = await this.#turn(requestId, {
+        prompt: composeGradePrompt(session.spec, threshold, items),
+        cwd: session.worktree?.path ?? session.repoRoot,
+        phase: 'grade',
+        resume: session.gradeSessionId,
+        schema: GRADE_SCHEMA,
+      });
+      session.gradeSessionId = result.sessionId;
+      const byThread = parseGradeOutput(result.structured);
+      if (byThread !== null) return { kind: 'graded', byThread };
+      return this.#ungraded(requestId, 'the grading turn did not return grades');
+    } catch (cause) {
+      if (cause instanceof ProtocolError && cause.code === 'cancelled') throw cause;
+      return this.#ungraded(requestId, cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  #ungraded(requestId: number, reason: string): RoundGrades {
+    this.#emit('big.notice', { id: requestId, text: `nothing was graded: ${reason}` });
+    return { kind: 'ungraded', reason };
+  }
+
   /** The reviewer's `X`: reopen an auto-resolved thread, or resolve it again. */
   toggleBlock(root: string, id: string, blockId: string, resolved: boolean): SessionView {
     const session = this.#store.require(root, id);
     const block = session.blocks.find((entry) => entry.id === blockId);
     if (block === undefined) throw new ProtocolError('bad_request', `no thread '${blockId}'`);
-    if (block.substantial && resolved) {
+    if (block.substantial && resolved && gateArmed(session.difficulty)) {
       throw new ProtocolError('bad_request', 'a substantial thread is cleared by the review gate, not by hand');
+    }
+    if (session.state === 'merged') {
+      throw new ProtocolError('bad_request', 'this change has already been merged');
     }
     block.state = resolved ? 'resolved' : 'open';
     block.reopened = !resolved;
     this.#store.save(session);
     return this.#view(session);
+  }
+
+  /**
+   * What stands between this change and the operator's branch, right now.
+   * Reads only — the editor draws the gate line from it, and `merge` recomputes
+   * the same thing rather than trusting whatever this last returned.
+   */
+  async mergeCheck(root: string, id: string): Promise<{ session: SessionView; refusals: MergeRefusal[] }> {
+    const session = this.#store.require(root, id);
+    const view = this.#view(session);
+    return { session: view, refusals: await checkMerge(session, this.#mergeFacts(session, view.counts)) };
+  }
+
+  /**
+   * `M`: land the reviewed diff on the base branch, locally.
+   *
+   * The one write nvime makes to the operator's repository. Every precondition
+   * is re-asserted here, under the run lock, whatever the editor believed; a
+   * refusal is an ANSWER (the reasons, listed) rather than an exception, so the
+   * editor can offer the rebase when the base has moved.
+   */
+  async merge(
+    requestId: number,
+    params: { root: string; id: string; cleanup?: boolean },
+  ): Promise<{ session: SessionView; merged: boolean; refusals: MergeRefusal[] }> {
+    const session = this.#store.require(params.root, params.id);
+    this.#reconcileOrThrow(session);
+    this.#refuseIfHeldElsewhere(session);
+
+    return this.#run(requestId, session, 'merging', async () => {
+      // Inside the lock: the check the merge is actually made on. Nothing the
+      // editor asked with, and nothing computed before the claim was held.
+      const refusals = await checkMerge(session, this.#mergeFacts(session, countBlocks(session.blocks)));
+      if (refusals.length > 0) return { session: this.#view(session), merged: false, refusals };
+
+      const base = requireBase(session);
+      if (base.branch === null) throw new ProtocolError('internal', 'checkMerge passed a change with no base branch');
+      const branch = await this.#freeBranchName(session);
+      this.#emit('big.state', { id: requestId, session: session.id, state: 'reviewing', note: `landing on ${branch}` });
+      const landed = await landDiff({
+        repoRoot: session.repoRoot,
+        branch,
+        baseBranch: base.branch,
+        baseCommit: base.commit,
+        patchPath: this.#store.diffPathFor(session.repoRoot, session.id),
+        message: session.title,
+        indexFile: join(this.#store.dirFor(session.repoRoot, session.id), 'merge-index'),
+      });
+
+      session.merge = { branch: landed.branch, commit: landed.commit, baseBranch: base.branch, at: Date.now() };
+      transition(session, 'merged', `${landed.commit.slice(0, 8)} on ${base.branch}`);
+      this.#store.save(session);
+      if (params.cleanup === true) await this.#cleanupClone(session);
+      return { session: this.#view(session), merged: true, refusals: [] };
+    });
+  }
+
+  /**
+   * Moves the build onto a base branch that has advanced since it started, then
+   * re-captures and re-triages. Content the reader already cleared carries
+   * forward by signature; anything the move changed comes back open.
+   */
+  async rebase(requestId: number, params: { root: string; id: string }): Promise<SessionView> {
+    const session = this.#requireBuildable(params.root, params.id);
+    const base = requireBase(session);
+    const worktree = session.worktree;
+    if (base.branch === null || worktree === null) {
+      throw new ProtocolError('bad_request', 'this change has no base branch to rebase onto');
+    }
+    const head = await resolveRef(session.repoRoot, base.branch);
+    if (head === null) throw new ProtocolError('bad_request', `${base.branch} no longer exists`);
+    if (head === base.commit) throw new ProtocolError('bad_request', `${base.branch} has not moved`);
+
+    return this.#run(requestId, session, 'rebasing', async () => {
+      const fetched = await fetchBase(worktree.path, session.repoRoot, base.branch as string);
+      const { conflicted } = await rebaseCloneOnto(worktree.path, fetched);
+      this.#emit('big.state', {
+        id: requestId,
+        session: session.id,
+        state: 'building',
+        note: conflicted ? 'the rebase hit conflicts — resolving them' : 're-verifying on the new base',
+      });
+      await this.#finishRebase(requestId, session, worktree.path, conflicted, base.branch as string);
+      session.base = { commit: fetched, branch: base.branch };
+      this.#store.save(session);
+      return this.#captureAndTriage(requestId, session);
+    });
+  }
+
+  /**
+   * The half of a rebase only a reader of the code can do: resolving conflicts
+   * and fixing what the new base broke. A rebase the agent could not finish is
+   * ABORTED rather than left half-applied — a clone stopped mid-rebase has no
+   * diff to capture, and the old base is a state the reader can still act on.
+   */
+  async #finishRebase(
+    requestId: number,
+    session: BigSession,
+    clonePath: string,
+    conflicted: boolean,
+    baseBranch: string,
+  ): Promise<void> {
+    const result = await this.#turn(requestId, {
+      prompt: composeRebasePrompt(conflicted, baseBranch),
+      cwd: clonePath,
+      phase: 'build',
+      resume: session.buildSessionId,
+      worktreeRoot: clonePath,
+    });
+    session.buildSessionId = result.sessionId;
+    session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
+    if (!(await rebaseInProgress(clonePath))) return;
+    await abortRebase(clonePath);
+    throw new ProtocolError(
+      'agent_error',
+      'the rebase could not be finished, so it was undone',
+      `the build clone is back on ${baseBranch} as it was; the change still reviews against its old base`,
+    );
+  }
+
+  /** A branch name nothing already holds, so landing cannot clobber a ref. */
+  async #freeBranchName(session: BigSession): Promise<string> {
+    const preferred = branchNameFor(session.title, session.id);
+    for (const candidate of [preferred, `${preferred}-${session.id}`]) {
+      if ((await resolveRef(session.repoRoot, `refs/heads/${candidate}`)) === null) return candidate;
+    }
+    throw new ProtocolError('bad_request', `${preferred} already exists — delete or rename it first`);
+  }
+
+  /** Drops the build clone once the change has landed and nobody needs it. */
+  async #cleanupClone(session: BigSession): Promise<void> {
+    if (session.worktree === null) return;
+    await this.#guardedRemoveClone(session, session.worktree.path);
+    session.worktree = null;
+    session.buildSessionId = null;
+    this.#store.save(session);
+  }
+
+  #mergeFacts(session: BigSession, counts: TriageCounts): MergeFacts {
+    const text = this.#store.readVerifiedDiff(session);
+    return {
+      diff: text === null ? null : parseUnifiedDiff(text),
+      counts,
+      heldElsewhere: this.#store.foreignLock(session) !== null,
+    };
   }
 
   /** Throws away the clone and the record. Only ever on an explicit ask. */
@@ -419,7 +692,9 @@ export class BigService {
    * path on purpose: this is a full checkout, and it is bounded by the git
    * timeout rather than by the editor's control deadline.
    */
-  async #ensureClone(requestId: number, session: BigSession, worktree: BigWorktree): Promise<void> {
+  async #ensureClone(requestId: number, session: BigSession, base: BigBase): Promise<void> {
+    const worktree = session.worktree;
+    if (worktree === null) throw new ProtocolError('bad_request', 'this big change has no build clone');
     if (worktree.ready && this.#store.hasWorktree(session)) return;
     this.#emit('big.state', {
       id: requestId,
@@ -431,7 +706,7 @@ export class BigService {
     // on a non-empty destination; there is nothing in it worth keeping.
     await this.#guardedRemoveClone(session, worktree.path);
     mkdirSync(dirname(worktree.path), { recursive: true });
-    await cloneAt(session.repoRoot, worktree.path, worktree.baseCommit);
+    await cloneAt(session.repoRoot, worktree.path, base.commit);
     worktree.ready = true;
     this.#store.save(session);
   }
@@ -491,13 +766,14 @@ export class BigService {
     if (worktree === null || !worktree.ready) {
       throw new ProtocolError('bad_request', 'this big change has nothing built to capture');
     }
+    const base = requireBase(session);
     const previous = session.blocks;
     clearCapture(session);
     transition(session, 'triaging', 'capturing the diff');
     this.#emit('big.state', { id: requestId, session: session.id, state: 'triaging' });
     this.#store.save(session);
 
-    const text = await captureDiff(worktree.path, worktree.baseCommit);
+    const text = await captureDiff(worktree.path, base.commit);
     const diffId = this.#store.stageDiff(session, text);
     const bytes = Buffer.byteLength(text, 'utf8');
     const parsed = parseUnifiedDiff(text);
@@ -518,7 +794,8 @@ export class BigService {
     }
     const unshownIds = new Set(parsed.hunks.filter((hunk) => !rendered.shownIds.has(hunk.id)).map((hunk) => hunk.id));
     const raw = await this.#triageBlocks(requestId, session, parsed, rendered);
-    const blocks = carryForward(previous, normalizeBlocks(raw, parsed, unshownIds));
+    const armed = gateArmed(session.difficulty);
+    const blocks = carryForward(previous, normalizeBlocks(raw, parsed, unshownIds, armed));
     transition(session, 'reviewing', `${blocks.length} thread(s) from ${parsed.hunks.length} hunk(s)`);
     this.#store.commitCapture(session, { id: diffId, bytes, blocks });
     return this.#view(session);
@@ -745,6 +1022,99 @@ export function buildWriteBoundary(build: boolean, worktreeRoot: string | undefi
 
 function keyOf(session: BigSession): string {
   return `${session.repoRoot} ${session.id}`;
+}
+
+/**
+ * The commit the change is built on. Absent only for a record that never got
+ * past drafting, so every caller that has a build has one.
+ */
+function requireBase(session: BigSession): BigBase {
+  const base = session.base;
+  if (base === null) throw new ProtocolError('bad_request', 'this big change has no recorded base commit');
+  return base;
+}
+
+/** The grading turn's answer for a whole round, or why there isn't one. */
+type RoundGrades =
+  | { kind: 'graded'; byThread: ReadonlyMap<string, GateGrade> }
+  | { kind: 'ungraded'; reason: string };
+
+/** One thread's round: the grade it got, or the honest reason it has none. */
+function roundFor(threadId: string, answer: string, grades: RoundGrades): GateRound {
+  const at = Date.now();
+  if (grades.kind === 'ungraded') return { at, answer, result: null, ungraded: grades.reason };
+  const grade = grades.byThread.get(threadId);
+  if (grade === undefined) {
+    return { at, answer, result: null, ungraded: 'the grading turn returned no verdict for this thread' };
+  }
+  return { at, answer, result: grade };
+}
+
+/** The round the editor sent, validated at the boundary before anything runs. */
+function normalizeAnswers(
+  raw: ReadonlyArray<{ blockId: string; text: string }>,
+): Array<{ blockId: string; text: string }> {
+  if (raw.length === 0) throw new ProtocolError('bad_request', 'there is nothing to grade');
+  if (raw.length > MAX_ANSWERS_PER_ROUND) {
+    throw new ProtocolError('bad_request', `at most ${MAX_ANSWERS_PER_ROUND} threads can be graded in one round`);
+  }
+  const seen = new Set<string>();
+  return raw.map((entry) => {
+    const text = entry.text.trim();
+    if (text === '') throw new ProtocolError('bad_request', `the answer for '${entry.blockId}' is empty`);
+    if (text.length > MAX_ANSWER_CHARS) {
+      throw new ProtocolError('bad_request', `an answer may be at most ${MAX_ANSWER_CHARS} characters`);
+    }
+    if (seen.has(entry.blockId)) throw new ProtocolError('bad_request', `'${entry.blockId}' was answered twice`);
+    seen.add(entry.blockId);
+    return { blockId: entry.blockId, text };
+  });
+}
+
+/**
+ * What the grader is shown for each answered thread: the hunks the reader read,
+ * the rounds already spent on it, and the follow-up this answer had to address.
+ *
+ * Refuses a thread that is not open substance — a cleared thread has nothing
+ * left to defend, and grading trivia would let the loop be padded with it.
+ */
+function buildGradeItems(
+  session: BigSession,
+  answers: ReadonlyArray<{ blockId: string; text: string }>,
+  parsed: ParsedDiff,
+): GradeItem[] {
+  const hunks = new Map(parsed.hunks.map((hunk) => [hunk.id, hunk]));
+  return answers.map((entry) => {
+    const block = session.blocks.find((candidate) => candidate.id === entry.blockId);
+    if (block === undefined) throw new ProtocolError('bad_request', `no thread '${entry.blockId}'`);
+    if (block.state !== 'open') throw new ProtocolError('bad_request', `'${block.title}' is already cleared`);
+    if (!block.substantial) throw new ProtocolError('bad_request', `'${block.title}' is trivia — it needs no defense`);
+    return {
+      threadId: block.id,
+      title: block.title,
+      rationale: block.rationale,
+      diff: renderBlockDiff(block, hunks),
+      history: block.rounds,
+      followup: pendingFollowup(block.rounds) ?? '',
+      answer: entry.text,
+    };
+  });
+}
+
+/** A thread's hunks, exactly as the reviewer read them in the pane. */
+function renderBlockDiff(block: TriageBlock, hunks: ReadonlyMap<string, DiffHunk>): string {
+  const parts: string[] = [];
+  for (const id of block.hunkIds) {
+    const hunk = hunks.get(id);
+    if (hunk === undefined) continue;
+    parts.push(`--- ${hunk.file}\n${hunk.header}\n${hunk.lines.join('\n')}`);
+  }
+  if (parts.length === 0) {
+    // The blocks and the diff are written in one record write, so this means a
+    // bug here rather than an ordinary state — never a thread graded on nothing.
+    throw new ProtocolError('internal', `thread '${block.id}' names no hunk in the captured diff`);
+  }
+  return parts.join('\n');
 }
 
 function translate(cause: unknown, abort: AbortController): ProtocolError {

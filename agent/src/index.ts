@@ -7,6 +7,7 @@ import { ChatService } from './chat.js';
 import { parseContextBlocks } from './context.js';
 import { EditService, parseScope } from './edit.js';
 import { resolveClaudeExecutable, strippedNames } from './env.js';
+import { DEFAULT_DIFFICULTY, DIFFICULTIES, isDifficulty, type Difficulty } from './gate.js';
 import {
   optionalPositiveInt,
   optionalString,
@@ -234,7 +235,19 @@ function registerHandlers(
  */
 function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): void {
   dispatcher.register('big.create', async (_id, params) => ({
-    session: present(big).create(requireAbsolutePath(params, 'root'), requireString(params, 'title')),
+    session: present(big).create(
+      requireAbsolutePath(params, 'root'),
+      requireString(params, 'title'),
+      requireDifficulty(params),
+    ),
+  }));
+
+  dispatcher.register('big.difficulty', async (_id, params) => ({
+    session: present(big).setDifficulty(
+      requireAbsolutePath(params, 'root'),
+      requireString(params, 'sessionId'),
+      requireDifficulty(params),
+    ),
   }));
 
   dispatcher.register('big.list', async (_id, params) => ({
@@ -297,9 +310,60 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
     present(big).discard(requireAbsolutePath(params, 'root'), requireString(params, 'sessionId')),
   );
 
+  dispatcher.register('big.answer', async (id, params) => ({
+    session: await present(big).answer(id, {
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+      answers: parseAnswers(params.answers),
+    }),
+  }));
+
+  dispatcher.register('big.mergecheck', async (_id, params) =>
+    present(big).mergeCheck(requireAbsolutePath(params, 'root'), requireString(params, 'sessionId')),
+  );
+
+  dispatcher.register('big.merge', async (id, params) =>
+    present(big).merge(id, {
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+      cleanup: params.cleanup === true,
+    }),
+  );
+
+  dispatcher.register('big.rebase', async (id, params) => ({
+    session: await present(big).rebase(id, {
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+    }),
+  }));
+
   dispatcher.register('big.cancel', async (_id, params) => ({
     cancelled: present(big).cancel(requireTarget(params)),
   }));
+}
+
+/** The gate's difficulty, named by the plugin. Anything else is a bad request. */
+function requireDifficulty(params: Record<string, unknown>): Difficulty {
+  const value = params.difficulty ?? DEFAULT_DIFFICULTY;
+  if (!isDifficulty(value)) {
+    throw new ProtocolError('bad_request', `params.difficulty must be one of: ${DIFFICULTIES.join(', ')}`);
+  }
+  return value;
+}
+
+/** One round of defense, shape-checked before any of it reaches a grader. */
+function parseAnswers(raw: unknown): Array<{ blockId: string; text: string }> {
+  if (!Array.isArray(raw)) throw new ProtocolError('bad_request', 'params.answers must be an array');
+  return raw.map((entry) => {
+    if (typeof entry !== 'object' || entry === null) {
+      throw new ProtocolError('bad_request', 'each answer must be an object');
+    }
+    const record = entry as Record<string, unknown>;
+    return {
+      blockId: requireString(record, 'blockId'),
+      text: requireString(record, 'text'),
+    };
+  });
 }
 
 async function readClaudeVersion(claudePath: string): Promise<string | null> {

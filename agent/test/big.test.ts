@@ -181,7 +181,7 @@ async function useTool(
 
 /** Drafts a session, answers intake once with a ready spec, and approves it. */
 async function approved(): Promise<SessionView> {
-  const created = service.create(repo, 'version flag');
+  const created = service.create(repo, 'version flag', 'medium');
   turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'here it is', spec: SPEC })] });
   await service.intake(1, { root: repo, id: created.id, message: 'add a --version flag' });
   return service.approve(repo, created.id);
@@ -204,7 +204,7 @@ function scriptBuild(
 
 describe('big intake', () => {
   it('records the exchange and keeps the spec the agent played back', async () => {
-    const created = service.create(repo, 'version flag');
+    const created = service.create(repo, 'version flag', 'medium');
     turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'playback', spec: SPEC })] });
     const view = await service.intake(1, { root: repo, id: created.id, message: 'add a --version flag' });
     assert.deepEqual(view.spec, SPEC);
@@ -222,7 +222,7 @@ describe('big intake', () => {
   });
 
   it('resumes the same intake session on the next message', async () => {
-    const created = service.create(repo, 'version flag');
+    const created = service.create(repo, 'version flag', 'medium');
     turns.push({ frames: [frames.init(), frames.result('q1', { ready: false, message: 'which file?' })] });
     await service.intake(1, { root: repo, id: created.id, message: 'a flag' });
     turns.push({ frames: [frames.init(), frames.result('q2', { ready: true, message: 'ok', spec: SPEC })] });
@@ -233,7 +233,7 @@ describe('big intake', () => {
   });
 
   it('invents no spec when the structured answer is unusable', async () => {
-    const created = service.create(repo, 'version flag');
+    const created = service.create(repo, 'version flag', 'medium');
     turns.push({ frames: [frames.init(), frames.result('prose only', 'not an object')] });
     const view = await service.intake(1, { root: repo, id: created.id, message: 'a flag' });
     assert.equal(view.spec, null);
@@ -254,8 +254,8 @@ describe('big build isolation', () => {
     const view = await approved();
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
     assert.equal(view.state, 'building');
-    assert.equal(view.worktree?.baseCommit, head);
-    assert.equal(view.worktree?.baseBranch, 'main');
+    assert.equal(view.base?.commit, head);
+    assert.equal(view.base?.branch, 'main');
     // Approval runs under the editor's control deadline, so it does no
     // checkout at all; the clone is the build's first act.
     assert.equal(view.worktree?.ready, false);
@@ -322,7 +322,7 @@ describe('big build isolation', () => {
   });
 
   it('refuses to approve a spec that does not exist yet', async () => {
-    const created = service.create(repo, 'no spec');
+    const created = service.create(repo, 'no spec', 'medium');
     await assert.rejects(
       () => service.approve(repo, created.id),
       (error: unknown) => error instanceof ProtocolError && /no spec/.test(error.message),

@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, join } from 'node:path';
+import { DEFAULT_DIFFICULTY, isDifficulty, type Difficulty } from './gate.js';
 import { ProtocolError } from './protocol.js';
 import type { TriageBlock } from './triage.js';
 
@@ -42,12 +43,24 @@ export interface BigSpec {
 }
 
 /**
- * Where a session is. Two states deliberately absent: `mergeable` is
- * `reviewing` with nothing open, derived at read time so the two cannot
- * disagree; and there is no `discarded`, because discarding deletes the record
- * rather than leaving a tombstone that every reader has to special-case.
+ * Where a session is. `merged` is terminal: the change is in the operator's
+ * branch and nothing may move it back. Two states deliberately absent:
+ * `mergeable` is `reviewing` with nothing open, derived at read time so the two
+ * cannot disagree; and there is no `discarded`, because discarding deletes the
+ * record rather than leaving a tombstone that every reader has to special-case.
  */
-export type BigState = 'drafting' | 'building' | 'triaging' | 'reviewing';
+export type BigState = 'drafting' | 'building' | 'triaging' | 'reviewing' | 'merged';
+
+/** What a completed local merge left behind, for the record and the report. */
+export interface BigMerge {
+  /** The branch nvime created at the base commit and landed. */
+  branch: string;
+  /** The commit holding the reviewed diff. */
+  commit: string;
+  /** The branch it was fast-forwarded into. */
+  baseBranch: string;
+  at: number;
+}
 
 export interface BigTransition {
   state: BigState;
@@ -55,10 +68,19 @@ export interface BigTransition {
   note: string;
 }
 
+/**
+ * What the change is built on. A property of the CHANGE, not of the clone: the
+ * clone is disposable and the reviewed diff outlives it, but a diff without the
+ * commit it applies to cannot be landed at all.
+ */
+export interface BigBase {
+  commit: string;
+  /** The branch HEAD was on, or null when the repo was already detached. */
+  branch: string | null;
+}
+
 export interface BigWorktree {
   path: string;
-  baseCommit: string;
-  baseBranch: string | null;
   createdAt: number;
   /**
    * False between approval and the clone that `build` makes. It separates
@@ -80,6 +102,8 @@ export interface BigSession {
   repoRoot: string;
   title: string;
   state: BigState;
+  /** How hard the comprehension gate is. Chosen at intake, fixed after. */
+  difficulty: Difficulty;
   createdAt: number;
   updatedAt: number;
   transitions: BigTransition[];
@@ -90,7 +114,13 @@ export interface BigSession {
    *  the build agent must not inherit intake's read-only history as licence. */
   intakeSessionId: string | null;
   buildSessionId: string | null;
+  /** The grader's own session, so a follow-up round remembers the last one. */
+  gradeSessionId: string | null;
+  /** Recorded at approval, moved by a rebase. Outlives the clone. */
+  base: BigBase | null;
   worktree: BigWorktree | null;
+  /** Set once, when the change landed. Null for everything not yet merged. */
+  merge: BigMerge | null;
   /**
    * Identity of the diff `blocks` describe, written in the same record write
    * as they are. `diff.patch` on disk that hashes to something else is a diff
@@ -160,7 +190,7 @@ export class BigStore {
     return join(this.dirFor(repoRoot, id), 'lock.json');
   }
 
-  create(repoRoot: string, title: string): BigSession {
+  create(repoRoot: string, title: string, difficulty: Difficulty = DEFAULT_DIFFICULTY): BigSession {
     if (title.trim() === '') throw new ProtocolError('bad_request', 'a big change needs a title');
     const now = Date.now();
     const session: BigSession = {
@@ -169,6 +199,7 @@ export class BigStore {
       repoRoot,
       title: title.trim().slice(0, 120),
       state: 'drafting',
+      difficulty,
       createdAt: now,
       updatedAt: now,
       transitions: [{ state: 'drafting', at: now, note: 'created' }],
@@ -177,7 +208,10 @@ export class BigStore {
       approvedAt: null,
       intakeSessionId: null,
       buildSessionId: null,
+      gradeSessionId: null,
+      base: null,
       worktree: null,
+      merge: null,
       diffId: null,
       diffCapturedAt: null,
       diffBytes: 0,
@@ -229,7 +263,7 @@ export class BigStore {
     try {
       const parsed = JSON.parse(text) as BigSession;
       if (parsed.version !== 1 || parsed.id !== id) throw new Error('unexpected shape');
-      return parsed;
+      return withDefaults(parsed);
     } catch (cause) {
       process.stderr.write(`nvime: ignoring corrupt big session ${path}: ${String(cause)}\n`);
       return null;
@@ -492,8 +526,27 @@ function confirmClaim(path: string, claim: BigLock): SessionLock {
   return heartbeat(path, claim);
 }
 
+/**
+ * Refreshes the claim until it is released — but only while it is still OURS.
+ *
+ * The compare is the point. A run this process was too wedged to heartbeat is
+ * reclaimed as stale by another editor, which then owns the session; a beat
+ * that arrived afterwards and wrote unconditionally would resurrect the dead
+ * claim over the live one and hand two editors the same build clone. So each
+ * beat re-reads the file first and stops the moment the owner is not us.
+ *
+ * The read and the write are not one atomic step, and cannot be: `rename` takes
+ * no expected-inode. The residual window is a takeover landing between them,
+ * which needs this beat to be 15s stale (why it was reclaimed) and running now.
+ */
 function heartbeat(path: string, claim: BigLock): SessionLock {
   const timer = setInterval(() => {
+    const held = readLockAt(path);
+    if (held === null || held.owner !== claim.owner) {
+      process.stderr.write(`nvime: the big-change lock ${path} is no longer ours — not refreshing it\n`);
+      clearInterval(timer);
+      return;
+    }
     // Atomic: a reader must never see a half-written claim and mistake it for
     // an abandoned one, which would hand a second editor the same session.
     try {
@@ -551,6 +604,28 @@ function newId(): string {
   return Date.now().toString(36) + randomBytes(3).toString('hex');
 }
 
+/**
+ * Fills in the fields a record written by an earlier sidecar does not carry.
+ * The gate's difficulty is the reason this exists: an absent value would read
+ * as "no threshold", which is `vibe` — a silently disarmed gate on a session
+ * the reader believes is gated.
+ */
+function withDefaults(session: BigSession): BigSession {
+  if (!isDifficulty(session.difficulty)) session.difficulty = DEFAULT_DIFFICULTY;
+  if (session.gradeSessionId === undefined) session.gradeSessionId = null;
+  if (session.merge === undefined) session.merge = null;
+  // The base used to live on the worktree, before it had to outlive the clone.
+  const legacy = session.worktree as unknown as { baseCommit?: string; baseBranch?: string | null } | null;
+  if (session.base == null && legacy?.baseCommit !== undefined) {
+    session.base = { commit: legacy.baseCommit, branch: legacy.baseBranch ?? null };
+  }
+  if (session.base === undefined) session.base = null;
+  for (const block of session.blocks) {
+    if (!Array.isArray(block.rounds)) block.rounds = [];
+  }
+  return session;
+}
+
 /** Identity of a captured diff: the same bytes, the same id, always. */
 export function diffIdOf(diff: string): string {
   return createHash('sha256').update(diff, 'utf8').digest('hex').slice(0, 32);
@@ -603,10 +678,14 @@ export interface Reconciled {
  * Makes the record agree with the disk. A session is only ever claimed to be
  * further along than the evidence supports if this function has a bug:
  *
+ *   * merged                             → terminal; the change is in the
+ *     operator's branch and no disk state can take it back.
  *   * the clone is gone, diff unverified → nothing trustworthy to review;
  *     back to drafting.
  *   * the clone is gone, diff verified   → the finished review survives; only
- *     the clone-dependent actions (revise, open-file) go away with it.
+ *     the clone-dependent actions (revise, open-file) go away with it, and a
+ *     build or triage that was in flight lands in `reviewing`, because the
+ *     verified diff IS the finished capture and there is nothing left to run.
  *   * reviewing, no diff                 → nothing to review; back to triaging.
  *   * building, nothing live             → still building, but nobody is
  *     driving it.
@@ -618,7 +697,9 @@ export interface Reconciled {
 export function reconcile(session: BigSession, reality: Reality): Reconciled {
   const live = reality.running || reality.heldElsewhere;
   const held = reality.heldElsewhere;
-  if (session.state === 'drafting') return { changed: false, detached: false, heldElsewhere: held };
+  if (session.state === 'drafting' || session.state === 'merged') {
+    return { changed: false, detached: false, heldElsewhere: held };
+  }
   // An approved session whose clone `build` has not made yet: its absence from
   // disk is expected, not evidence that a build was lost.
   const pending = session.worktree !== null && !session.worktree.ready;
@@ -627,14 +708,24 @@ export function reconcile(session: BigSession, reality: Reality): Reconciled {
       // Only reading needs the clone; a captured diff that still verifies is
       // a complete, self-consistent record of the change on its own. Drop the
       // clone-dependent affordances, but keep the review itself intact.
-      const changed = session.worktree !== null || session.buildSessionId !== null;
+      let changed = session.worktree !== null || session.buildSessionId !== null;
       session.worktree = null;
       session.buildSessionId = null;
+      // A `building`/`triaging` record here would otherwise be stuck: both
+      // offer only "resume" and "discard", and resuming needs the clone that
+      // is gone. The threads and the diff they describe are right there.
+      if (session.state !== 'reviewing') {
+        transition(session, 'reviewing', 'the build clone is gone, but its reviewed diff is intact');
+        changed = true;
+      }
       return { changed, detached: false, heldElsewhere: held };
     }
     transition(session, 'drafting', 'the build clone is gone — approve again to rebuild');
     session.worktree = null;
     session.buildSessionId = null;
+    // Approving again reads HEAD afresh; a base left over from the lost build
+    // would describe a commit nothing here is built on any more.
+    session.base = null;
     clearCapture(session);
     return { changed: true, detached: false, heldElsewhere: held };
   }

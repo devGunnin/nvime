@@ -210,6 +210,6 @@ describe('carryForward', () => {
   });
 
   it('counts what is left to review', () => {
-    assert.deepEqual(countBlocks(first), { total: 2, open: 1, substantial: 1 });
+    assert.deepEqual(countBlocks(first), { total: 2, open: 1, substantial: 1, defended: 0 });
   });
 });

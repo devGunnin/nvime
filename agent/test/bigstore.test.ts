@@ -40,7 +40,8 @@ function built(): BigSession {
   const session = store.create(repo, 'connection-pool backoff');
   const path = store.worktreePathFor(repo, session.id);
   mkdirSync(join(path, '.git'), { recursive: true });
-  session.worktree = { path, baseCommit: 'a'.repeat(40), baseBranch: 'main', createdAt: Date.now(), ready: true };
+  session.base = { commit: 'a'.repeat(40), branch: 'main' };
+  session.worktree = { path, createdAt: Date.now(), ready: true };
   transition(session, 'building', 'test');
   store.save(session);
   return session;
@@ -163,7 +164,7 @@ describe('reconcile', () => {
   it('sends a session whose build clone vanished back to drafting', () => {
     const session = built();
     session.blocks = [
-      { id: 'b1', title: 't', files: [], hunkIds: ['h1.1'], substantial: true, rationale: '', state: 'open', reopened: false, signatures: ['s'] },
+      { id: 'b1', title: 't', files: [], hunkIds: ['h1.1'], substantial: true, rationale: '', state: 'open', reopened: false, signatures: ['s'], rounds: [] },
     ];
     transition(session, 'reviewing', 'test');
     const result = reconcile(session, reality({ worktreeExists: false, diffExists: true }));
@@ -177,7 +178,7 @@ describe('reconcile', () => {
   it('keeps a finished review when the clone is gone but the captured diff still verifies', () => {
     const session = built();
     session.blocks = [
-      { id: 'b1', title: 't', files: [], hunkIds: ['h1.1'], substantial: true, rationale: '', state: 'open', reopened: false, signatures: ['s'] },
+      { id: 'b1', title: 't', files: [], hunkIds: ['h1.1'], substantial: true, rationale: '', state: 'open', reopened: false, signatures: ['s'], rounds: [] },
     ];
     session.diffId = 'abc';
     session.diffCapturedAt = Date.now();
@@ -215,10 +216,9 @@ describe('reconcile', () => {
 
   it('does not call an approved-but-unbuilt clone "gone"', () => {
     const session = store.create(repo, 'approved');
+    session.base = { commit: 'b'.repeat(40), branch: 'main' };
     session.worktree = {
       path: store.worktreePathFor(repo, session.id),
-      baseCommit: 'b'.repeat(40),
-      baseBranch: 'main',
       createdAt: Date.now(),
       ready: false,
     };
