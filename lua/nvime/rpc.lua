@@ -127,13 +127,14 @@ function Client:request(method, params, cb, timeout_ms)
   next_id = next_id + 1
   local id = next_id
 
-  local done, timer = false, nil
-  local function settle(err, result)
-    if done then
-      return
-    end
-    done = true
-    self.pending[id] = nil
+  local timer = nil
+  -- The reply and the deadline both race to answer `id`. `self.pending[id]`
+  -- is the single source of truth for who won: whichever of `_dispatch` and
+  -- the timer's own callback clears it first is the one that gets to settle,
+  -- decided synchronously at that point rather than inside the vim.schedule
+  -- each defers to — otherwise a reply that arrives in the same tick the
+  -- deadline fires can still lose to a timeout it already beat.
+  self.pending[id] = function(err, result)
     if timer ~= nil then
       timer:stop()
       timer:close()
@@ -141,10 +142,14 @@ function Client:request(method, params, cb, timeout_ms)
     end
     cb(err, result)
   end
-  self.pending[id] = settle
+
   if timeout_ms ~= nil then
     timer = vim.uv.new_timer()
     timer:start(timeout_ms, 0, function()
+      local settle = self:_claim(id)
+      if settle == nil then
+        return
+      end
       vim.schedule(function()
         settle({
           code = 'internal',
@@ -159,10 +164,21 @@ function Client:request(method, params, cb, timeout_ms)
     self.proc:write(line .. '\n')
   end)
   if not written then
-    settle({ code = 'internal', message = 'could not write to the sidecar', detail = tostring(err) }, nil)
+    local settle = self:_claim(id)
+    if settle ~= nil then
+      settle({ code = 'internal', message = 'could not write to the sidecar', detail = tostring(err) }, nil)
+    end
     return nil
   end
   return id
+end
+
+--- Removes and returns the pending callback for `id`, or nil if something
+--- else (a reply, a write failure, `_fail_all`) already claimed it.
+function Client:_claim(id)
+  local settle = self.pending[id]
+  self.pending[id] = nil
+  return settle
 end
 
 function Client:stop()
@@ -218,11 +234,10 @@ function Client:_dispatch(line)
     end)
     return
   end
-  local cb = self.pending[frame.id]
+  local cb = self:_claim(frame.id)
   if cb == nil then
     return
   end
-  self.pending[frame.id] = nil
   -- Not `cond and nil or fallback`: in Lua that always yields the fallback.
   local err = nil
   if frame.ok ~= true then

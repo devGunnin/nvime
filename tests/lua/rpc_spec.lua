@@ -143,4 +143,34 @@ describe('rpc request deadline', function()
       client:request('ping', nil, function() end, 0)
     end, 'positive timeout')
   end)
+
+  -- A reply and its deadline both settle the same request by claiming
+  -- `pending[id]` synchronously; whichever does it first wins and the other
+  -- finds nothing. `_claim` is exactly what the deadline timer's own raw
+  -- callback runs before it ever defers to vim.schedule, so calling it here
+  -- stands in for "the timer fired first" without a real, flaky race.
+  it('a deadline that claims first leaves the reply nothing to deliver', function()
+    local client = client_with_writes()
+    local calls = 0
+    local id = client:request('chat.list', nil, function()
+      calls = calls + 1
+    end, 20)
+    ok(client:_claim(id) ~= nil, 'the deadline is the first to claim the request')
+    client:_dispatch(string.format('{"id":%d,"ok":true,"result":{}}', id))
+    eq(0, calls, 'a reply that loses the claim must not also settle the callback')
+  end)
+
+  it('a reply that claims first leaves the deadline nothing to answer', function()
+    local client = client_with_writes()
+    local calls = 0
+    local id = client:request('chat.list', nil, function()
+      calls = calls + 1
+    end, 20)
+    client:_dispatch(string.format('{"id":%d,"ok":true,"result":{}}', id))
+    vim.wait(50, function()
+      return calls > 0
+    end, 5)
+    eq(1, calls, 'the reply settles the callback')
+    eq(nil, client:_claim(id), 'nothing is left for the deadline to claim once the reply already has')
+  end)
 end)
