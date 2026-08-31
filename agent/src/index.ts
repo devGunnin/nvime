@@ -14,11 +14,11 @@ import {
 import { LineSplitter, ProtocolError, encodeFrame, type OutgoingFrame } from './protocol.js';
 import { Dispatcher } from './rpc.js';
 import { SessionStore, defaultStorePath } from './sessions.js';
+import { CLAUDE_VERSION_PROBE_TIMEOUT_MS, DRAIN_TIMEOUT_MS } from './timeouts.js';
+
+export { CLAUDE_VERSION_PROBE_TIMEOUT_MS, DRAIN_TIMEOUT_MS } from './timeouts.js';
 
 export const AGENT_VERSION = '0.1.0';
-
-/** How long a shutdown waits for in-flight requests to answer before exiting. */
-export const DRAIN_TIMEOUT_MS = 5000;
 
 const run = promisify(execFile);
 
@@ -148,7 +148,7 @@ function registerHandlers(
 
 async function readClaudeVersion(claudePath: string): Promise<string | null> {
   try {
-    const { stdout } = await run(claudePath, ['--version'], { timeout: 10_000 });
+    const { stdout } = await run(claudePath, ['--version'], { timeout: CLAUDE_VERSION_PROBE_TIMEOUT_MS });
     return stdout.trim();
   } catch (cause) {
     process.stderr.write(`nvime: could not read claude version: ${String(cause)}\n`);
