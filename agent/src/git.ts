@@ -208,7 +208,10 @@ export async function rebaseCloneOnto(cloneDir: string, newBase: string): Promis
     await git(cloneDir, ['commit', '-m', 'nvime: work in progress'], { env: CLONE_IDENTITY });
   }
   try {
-    await git(cloneDir, ['rebase', newBase]);
+    // Replaying commits writes new commit objects even when nothing conflicts,
+    // so the clone's own identity has to travel with this call too — not just
+    // the WIP commit above — or a runner with no global git config fails here.
+    await git(cloneDir, ['rebase', newBase], { env: CLONE_IDENTITY });
     return { conflicted: false };
   } catch (cause) {
     if (await rebaseInProgress(cloneDir)) return { conflicted: true };

@@ -18,6 +18,7 @@ import { BIG_AUTO_ALLOWED, BigService, buildWriteBoundary, type SessionView } fr
 import { BigStore } from '../src/bigstore.js';
 import { ProtocolError } from '../src/protocol.js';
 import { TRIVIA_ACK_TITLE } from '../src/triage.js';
+import { configureGitIdentity } from './fixtures/git-identity.js';
 
 const SESSION = '11111111-2222-3333-4444-555555555555';
 
@@ -106,8 +107,7 @@ function gitInit(dir: string): void {
     execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
   };
   run('init', '-q', '-b', 'main');
-  run('config', 'user.email', 'nvime@example.invalid');
-  run('config', 'user.name', 'nvime tests');
+  configureGitIdentity(dir);
   writeFileSync(join(dir, 'README.md'), 'scratch\n');
   run('add', '-A');
   run('commit', '-qm', 'initial');

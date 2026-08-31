@@ -330,17 +330,43 @@ function clearStaleIndexLock(indexFile: string, startedAt: number): void {
   process.stderr.write(`nvime: cleared a stale private-index lock at ${lock}\n`);
 }
 
-/** The reviewed diff as a commit on top of `baseCommit`. Touches no ref. */
+/**
+ * The reviewed diff as a commit on top of `baseCommit`. Touches no ref.
+ *
+ * Deliberately carries no explicit identity: this is the one commit that
+ * lands in the operator's history, so it must be authored as they are
+ * configured in their own repository — never the clone's throwaway `nvime`
+ * identity a rebase uses internally. A repository with none configured
+ * refuses with a clear message instead of surfacing git's raw plumbing error.
+ */
 async function buildCommit(request: LandRequest, startedAt: number): Promise<string> {
   const { repoRoot, baseCommit, patchPath, message, indexFile } = request;
   clearStaleIndexLock(indexFile, startedAt);
   const tree = await buildTree(repoRoot, baseCommit, patchPath, indexFile);
-  const { stdout } = await git(repoRoot, ['commit-tree', tree, '-p', baseCommit, '-m', message]);
+  let stdout: string;
+  try {
+    ({ stdout } = await git(repoRoot, ['commit-tree', tree, '-p', baseCommit, '-m', message]));
+  } catch (cause) {
+    if (isIdentityFailure(cause)) {
+      throw new ProtocolError(
+        'bad_request',
+        'this repository has no git identity configured',
+        `set it with \`git config user.name "..."\` and \`git config user.email "..."\`, then land again — ${detailOf(cause)}`,
+      );
+    }
+    throw cause;
+  }
   const commit = stdout.trim();
   if (!/^[0-9a-f]{40}$/.test(commit)) {
     throw new ProtocolError('agent_error', 'git did not return a commit for the reviewed diff', commit);
   }
   return commit;
+}
+
+/** True when a git failure is the operator repo having no author/committer
+ *  identity configured, rather than some other commit-tree failure. */
+function isIdentityFailure(cause: unknown): boolean {
+  return /identity unknown|tell me who you are/i.test(detailOf(cause));
 }
 
 /** Applies the patch onto `baseCommit` in a private index and returns the

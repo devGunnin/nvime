@@ -10,6 +10,7 @@ import { branchNameFor, checkMerge, expectedTree, landDiff, type MergeRefusalCod
 import { ProtocolError } from '../src/protocol.js';
 import type { TriageBlock } from '../src/triage.js';
 import { parseUnifiedDiff } from '../src/unidiff.js';
+import { configureGitIdentity } from './fixtures/git-identity.js';
 
 let root = '';
 let repo = '';
@@ -24,8 +25,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'nvime-merge-'));
   repo = join(root, 'repo');
   execFileSync('git', ['init', '-q', '-b', 'main', repo]);
-  run(repo, 'config', 'user.email', 'nvime@example.invalid');
-  run(repo, 'config', 'user.name', 'nvime tests');
+  configureGitIdentity(repo);
   writeFileSync(join(repo, 'tool.py'), 'def main():\n    print("hi")\n');
   run(repo, 'add', '-A');
   run(repo, 'commit', '-qm', 'initial');
@@ -256,6 +256,24 @@ describe('landing the reviewed diff', () => {
     const landed = await landDiff(landRequest());
     assert.equal(run(repo, 'log', '-1', '--format=%an', landed.commit), 'nvime tests');
     assert.equal(run(repo, 'log', '-1', '--format=%b', landed.commit), '', 'no attribution trailer');
+  });
+
+  it('refuses with a clear message, and writes nothing, when the operator repo has no git identity', async () => {
+    run(repo, 'config', '--unset', 'user.name');
+    run(repo, 'config', '--unset', 'user.email');
+    const before = snapshot();
+    await withoutAmbientGitIdentity(async () => {
+      await assert.rejects(
+        () => landDiff(landRequest()),
+        (error: unknown) => {
+          assert.ok(error instanceof ProtocolError);
+          assert.match(error.message, /no git identity configured/);
+          assert.match(error.detail ?? '', /git config user\.name/);
+          return true;
+        },
+      );
+    });
+    assert.deepEqual(snapshot(), before, 'nothing was written');
   });
 
   it('refuses to overwrite a branch that already exists', async () => {
@@ -551,4 +569,27 @@ function snapshot(): Record<string, string> {
     tool: readFileSync(join(repo, 'tool.py'), 'utf8'),
     refs: run(repo, 'show-ref'),
   };
+}
+
+/**
+ * Runs `body` with no git identity reachable from anywhere but the repo's own
+ * local config — the same isolation CI runners give every command for free,
+ * reproduced here so "the operator has none configured" is deterministic on a
+ * dev machine that has a global one. Restores the real environment after.
+ */
+async function withoutAmbientGitIdentity(body: () => Promise<void>): Promise<void> {
+  const emptyHome = mkdtempSync(join(tmpdir(), 'nvime-noident-home-'));
+  const saved = { HOME: process.env.HOME, GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM: process.env.GIT_CONFIG_SYSTEM };
+  process.env.HOME = emptyHome;
+  process.env.GIT_CONFIG_GLOBAL = '/dev/null';
+  process.env.GIT_CONFIG_SYSTEM = '/dev/null';
+  try {
+    await body();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(emptyHome, { recursive: true, force: true });
+  }
 }
