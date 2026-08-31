@@ -1,0 +1,218 @@
+local t = require('harness')
+local config = require('nvime.config')
+local palette = require('nvime.palette')
+local panel = require('nvime.panel')
+
+local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
+
+--- Stands in for the sidecar: records every request and hands back canned
+--- replies, so the chat wiring is exercised without a process or a login.
+local fake = { requests = {}, replies = {}, subscriber = nil }
+
+function fake.request(method, params, cb, opts)
+  fake.requests[#fake.requests + 1] = { method = method, params = params, opts = opts }
+  if opts ~= nil and opts.on_sent ~= nil then
+    opts.on_sent(#fake.requests)
+  end
+  local reply = fake.replies[method]
+  if reply ~= nil then
+    cb(reply.err, reply.result)
+  end
+end
+
+function fake.on_event(fn)
+  fake.subscriber = fn
+  return function() end
+end
+
+local real_agent = require('nvime.agent')
+package.loaded['nvime.agent'] = {
+  request = fake.request,
+  on_event = fake.on_event,
+  is_running = function()
+    return true
+  end,
+}
+package.loaded['nvime.chat'] = nil
+local chat = require('nvime.chat')
+
+--- A project root: `project_root` looks for `.git`, else it falls back to cwd.
+local function sandbox()
+  local dir = vim.fs.normalize(vim.fn.tempname())
+  vim.fn.mkdir(dir .. '/.git', 'p')
+  vim.fn.writefile({ 'local a = 1' }, dir .. '/a.lua')
+  return dir
+end
+
+--- Opens chat with `dir/a.lua` as the current buffer and a clean fake sidecar.
+local function open_on(dir)
+  panel.close()
+  fake.requests = {}
+  fake.replies = { ['chat.list'] = { err = nil, result = { current = nil, sessions = {} } } }
+  local live = chat.state()
+  live.request_id, live.session_id, live.root = nil, nil, nil
+  config.setup({})
+  palette.apply()
+  vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/a.lua'))
+  chat.open()
+end
+
+local function sent(method)
+  for _, request in ipairs(fake.requests) do
+    if request.method == method then
+      return request
+    end
+  end
+  return nil
+end
+
+local function scrollback()
+  return vim.api.nvim_buf_get_lines(panel.current().buf, 0, -1, false)
+end
+
+--- Runs `fn` from a cwd that is not the project, the case finding 1 lived in.
+local function from_elsewhere(fn)
+  local before = vim.uv.cwd()
+  vim.cmd('cd /')
+  local okay, err = pcall(fn)
+  vim.cmd('cd ' .. vim.fn.fnameescape(before))
+  if not okay then
+    error(err, 0)
+  end
+end
+
+describe('chat.open', function()
+  it('captures the project root from the buffer the user was in', function()
+    local dir = sandbox()
+    from_elsewhere(function()
+      open_on(dir)
+      eq(dir, chat.state().root)
+      eq(dir, sent('chat.list').params.root, 'and sends that root, not the cwd')
+    end)
+    panel.close()
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('keeps the root when reopened from inside the panel', function()
+    local dir = sandbox()
+    from_elsewhere(function()
+      open_on(dir)
+      -- `<leader>nc` from the prompt buffer: `nvime://prompt` is not a real
+      -- path, so recomputing here would silently re-root the session on the cwd.
+      chat.open()
+      eq(dir, chat.state().root)
+      local lists = vim.tbl_filter(function(request)
+        return request.method == 'chat.list'
+      end, fake.requests)
+      eq(1, #lists, 'and the session is not restored a second time')
+    end)
+    panel.close()
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
+describe('chat.send', function()
+  it('resolves a relative @path against the project root, not the editor cwd', function()
+    local dir = sandbox()
+    from_elsewhere(function()
+      open_on(dir)
+      chat.send('explain @a.lua')
+      local request = sent('chat.send')
+      ok(request ~= nil, 'the turn was sent')
+      eq(dir, request.params.root)
+      eq(1, #request.params.context, 'the referenced file is attached')
+      eq(dir .. '/a.lua', request.params.context[1].path)
+      ok(request.opts.no_deadline, 'a streaming turn carries no deadline')
+    end)
+    panel.close()
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('warns in the panel when a reference does not resolve', function()
+    local dir = sandbox()
+    open_on(dir)
+    chat.send('explain @nope.lua')
+    ok(
+      vim.iter(scrollback()):any(function(line)
+        return line:find('did not resolve') ~= nil
+      end),
+      'the warning reaches the scrollback'
+    )
+    panel.close()
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('refuses a second turn while one is running', function()
+    local dir = sandbox()
+    open_on(dir)
+    chat.send('first')
+    chat.send('second')
+    eq(1, #vim.tbl_filter(function(request)
+      return request.method == 'chat.send'
+    end, fake.requests))
+    panel.close()
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
+describe('chat events', function()
+  it('renders only the events belonging to the running turn', function()
+    local dir = sandbox()
+    open_on(dir)
+    chat.send('hello')
+    local id = chat.state().request_id
+    ok(id ~= nil, 'the request id was captured')
+
+    fake.subscriber('chat.delta', { id = id, text = 'mine' })
+    fake.subscriber('chat.delta', { id = id + 99, text = 'someone else' })
+    local rendered = table.concat(scrollback(), '\n')
+    ok(rendered:find('mine', 1, true) ~= nil, 'the running turn streams')
+    ok(rendered:find('someone else', 1, true) == nil, 'a stale id must not')
+    panel.close()
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('shows a sidecar error without ending the turn', function()
+    local dir = sandbox()
+    open_on(dir)
+    chat.send('hello')
+    fake.subscriber('rpc.error', { error = { code = 'bad_request', message = 'nope' } })
+    ok(
+      vim.iter(scrollback()):any(function(line)
+        return line:find('nope', 1, true) ~= nil
+      end),
+      'the failure is rendered, not swallowed'
+    )
+    ok(chat.state().request_id ~= nil, 'and an unrelated failure does not truncate the stream')
+    panel.close()
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
+describe('closing the panel', function()
+  it('stops the turn nobody will read', function()
+    local dir = sandbox()
+    open_on(dir)
+    chat.send('a long one')
+    local id = chat.state().request_id
+    ok(id ~= nil)
+
+    panel.close()
+    local cancel = sent('chat.cancel')
+    ok(cancel ~= nil, 'the subscription pays for a turn nobody sees')
+    eq(id, cancel.params.target)
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('says nothing when there is no turn running', function()
+    local dir = sandbox()
+    open_on(dir)
+    panel.close()
+    eq(nil, sent('chat.cancel'))
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
+-- `chat.lua` captured the stub when it was required; every later spec gets the
+-- real module back.
+package.loaded['nvime.agent'] = real_agent
