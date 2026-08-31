@@ -62,6 +62,20 @@ local function subscribe_once()
   state.subscribed = true
 end
 
+--- Panel closed with a turn still running: nobody will read the reply, and the
+--- subscription pays for it either way, so stop it.
+local function on_panel_close()
+  local target = state.request_id
+  if target == nil then
+    return
+  end
+  agent.request('chat.cancel', { target = target }, function(err)
+    if err ~= nil then
+      vim.notify('nvime: could not stop the turn: ' .. (err.message or '?'), vim.log.levels.WARN)
+    end
+  end)
+end
+
 --- Renders the resumed transcript so a reopened panel is not mysteriously empty.
 local function load_history(session_id)
   agent.request('chat.history', { root = state.root, sessionId = session_id, limit = 40 }, function(err, result)
@@ -97,11 +111,16 @@ local function restore_session()
 end
 
 --- Opens (or focuses) the chat panel and resumes this project's session.
+--- The root is captured once per panel, from the buffer the user was in — a
+--- second `M.open()` from inside the panel must not re-root the session on the
+--- prompt buffer, which has no path and would fall back to the cwd.
 function M.open()
   local opts = config.get()
-  state.root = context.project_root()
   subscribe_once()
   local existed = panel.is_open()
+  if not existed then
+    state.root = context.project_root()
+  end
   panel.open({
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
@@ -109,6 +128,7 @@ function M.open()
     on_submit = M.send,
     on_cancel = M.cancel,
     on_history = M.pick_session,
+    on_close = on_panel_close,
   })
   if not existed then
     state.restored = false
@@ -121,11 +141,12 @@ end
 --- @param extra table|nil an additional context block (a visual selection)
 function M.send(text, extra)
   assert(type(text) == 'string', 'chat.send needs prompt text')
+  assert(type(state.root) == 'string', 'chat.send needs an open panel with a captured root')
   if state.request_id ~= nil then
     vim.notify('nvime: a turn is already running (<C-c> to stop it)', vim.log.levels.WARN)
     return
   end
-  local blocks, warnings = context.expand(text)
+  local blocks, warnings = context.expand(text, state.root)
   if extra ~= nil then
     table.insert(blocks, 1, extra)
   end
@@ -198,9 +219,8 @@ end
 
 --- `<C-r>`: pick a past session for this project and continue it.
 function M.pick_session()
-  if state.root == nil then
-    state.root = context.project_root()
-  end
+  -- Only reachable from a panel keybind, so the panel's root is already captured.
+  assert(type(state.root) == 'string', 'chat.pick_session needs an open panel')
   agent.request('chat.list', { root = state.root, limit = 25 }, function(err, result)
     if err ~= nil then
       show_error(err)
