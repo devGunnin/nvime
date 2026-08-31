@@ -69,6 +69,36 @@ describe('Dispatcher', () => {
     assert.equal((h.frames[0] as { event: string }).event, 'rpc.error');
   });
 
+  it('answers a rejected frame against its own id when it named one', async () => {
+    // An event settles no pending callback: the plugin's spinner would spin
+    // forever and every later send would answer "a turn is already running".
+    const h = harness();
+    h.dispatcher.handleLine('{"id":9,"method":"ping","params":[]}');
+    await settled();
+    assert.deepEqual(h.frames, [
+      {
+        id: 9,
+        ok: false,
+        error: { code: 'bad_request', message: 'frame.params must be an object when present' },
+      },
+    ]);
+  });
+
+  it('answers a missing method against its id too', async () => {
+    const h = harness();
+    h.dispatcher.handleLine('{"id":10}');
+    await settled();
+    assert.equal((h.frames[0] as { id: number }).id, 10);
+    assert.equal((h.frames[0] as { error: { code: string } }).error.code, 'bad_request');
+  });
+
+  it('falls back to an event only when the id itself is unusable', async () => {
+    const h = harness();
+    h.dispatcher.handleLine('{"id":"seven","method":"ping"}');
+    await settled();
+    assert.equal((h.frames[0] as { event: string }).event, 'rpc.error');
+  });
+
   it('refuses to register a method twice', () => {
     const h = harness();
     h.dispatcher.register('ping', async () => null);

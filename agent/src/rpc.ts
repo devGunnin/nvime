@@ -34,8 +34,9 @@ export class Dispatcher {
   }
 
   /**
-   * A line that cannot be attributed to a request has no id to answer, so it
-   * is reported as an `rpc.error` event rather than dropped.
+   * A rejected line is answered against its own id whenever it named one; only
+   * a line with no usable id becomes an `rpc.error` event. The plugin promises
+   * exactly one callback per request, and an event settles nothing.
    */
   handleLine(line: string): void {
     let request: RequestFrame;
@@ -43,7 +44,9 @@ export class Dispatcher {
       request = parseRequest(line);
     } catch (cause) {
       const error = cause instanceof ProtocolError ? cause.toFrameError() : rpcError('internal', String(cause));
-      this.#write({ event: 'rpc.error', params: { error } });
+      const id = cause instanceof ProtocolError ? cause.requestId : undefined;
+      if (id === undefined) this.#write({ event: 'rpc.error', params: { error } });
+      else this.#write({ id, ok: false, error });
       return;
     }
     void this.#dispatch(request);

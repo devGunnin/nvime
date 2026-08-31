@@ -57,11 +57,14 @@ export const MAX_LINE_BYTES = 16 * 1024 * 1024;
 export class ProtocolError extends Error {
   readonly code: ErrorCode;
   readonly detail?: string | undefined;
-  constructor(code: ErrorCode, message: string, detail?: string) {
+  /** Set when a rejected line still named a usable id, so it can be answered. */
+  readonly requestId?: RequestId | undefined;
+  constructor(code: ErrorCode, message: string, detail?: string, requestId?: RequestId) {
     super(message);
     this.name = 'ProtocolError';
     this.code = code;
     this.detail = detail;
+    this.requestId = requestId;
   }
 
   toFrameError(): RpcError {
@@ -92,7 +95,7 @@ export class LineSplitter {
       start = nl + 1;
     }
     this.#buffer = this.#buffer.slice(start);
-    if (this.#buffer.length > MAX_LINE_BYTES) {
+    if (Buffer.byteLength(this.#buffer, 'utf8') > MAX_LINE_BYTES) {
       this.#buffer = '';
       throw new ProtocolError(
         'bad_request',
@@ -104,7 +107,7 @@ export class LineSplitter {
 
   /** Bytes held back waiting for a newline. Tests and shutdown checks use it. */
   get pending(): number {
-    return this.#buffer.length;
+    return Buffer.byteLength(this.#buffer, 'utf8');
   }
 }
 
@@ -117,9 +120,9 @@ export function encodeFrame(frame: OutgoingFrame): string {
 }
 
 /**
- * Parses one incoming line. Throws ProtocolError when the line cannot be
- * attributed to a request — the caller reports those as an `rpc.error` event
- * because there is no id to answer.
+ * Parses one incoming line. Throws ProtocolError; once `id` has validated the
+ * error carries it, so the caller answers that request instead of pushing an
+ * unattributable event and leaving the plugin's callback hanging forever.
  */
 export function parseRequest(line: string): RequestFrame {
   let raw: unknown;
@@ -135,15 +138,16 @@ export function parseRequest(line: string): RequestFrame {
   if (typeof frame.id !== 'number' || !Number.isSafeInteger(frame.id)) {
     throw new ProtocolError('bad_request', 'frame.id must be a safe integer');
   }
+  const id = frame.id;
   if (typeof frame.method !== 'string' || frame.method === '') {
-    throw new ProtocolError('bad_request', 'frame.method must be a non-empty string');
+    throw new ProtocolError('bad_request', 'frame.method must be a non-empty string', undefined, id);
   }
   const params = frame.params;
   if (params !== undefined && (typeof params !== 'object' || params === null || Array.isArray(params))) {
-    throw new ProtocolError('bad_request', 'frame.params must be an object when present');
+    throw new ProtocolError('bad_request', 'frame.params must be an object when present', undefined, id);
   }
   return {
-    id: frame.id,
+    id,
     method: frame.method,
     params: (params as Record<string, unknown> | undefined) ?? {},
   };

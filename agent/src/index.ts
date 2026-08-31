@@ -22,8 +22,19 @@ export const DRAIN_TIMEOUT_MS = 5000;
 
 const run = promisify(execFile);
 
+/**
+ * Frames handed to stdout but not yet flushed. On a pipe Node's stdout is
+ * asynchronous and `process.exit` drops whatever is still queued, which would
+ * cut a large final `chat.send` reply mid-frame.
+ */
+let unflushed = 0;
+
 function write(frame: OutgoingFrame): void {
-  process.stdout.write(encodeFrame(frame));
+  const line = encodeFrame(frame);
+  unflushed += 1;
+  process.stdout.write(line, () => {
+    unflushed -= 1;
+  });
 }
 
 function main(): void {
@@ -57,13 +68,14 @@ function requireChat(chat: ChatService | null): ChatService {
 }
 
 /**
- * Exits once every accepted request has been answered, or the deadline passes.
- * Without this, closing stdin kills a request that is still being served — the
- * exact race a `:checkhealth` ping loses to a `claude --version` lookup.
+ * Exits once every accepted request has been answered AND its frames have left
+ * stdout, or the deadline passes. Without the first, closing stdin kills a
+ * request still being served — the race a `:checkhealth` ping loses to a
+ * `claude --version` lookup; without the second, the last reply is truncated.
  */
 async function drainThenExit(dispatcher: Dispatcher): Promise<never> {
   const deadline = Date.now() + DRAIN_TIMEOUT_MS;
-  while (dispatcher.inflight > 0 && Date.now() < deadline) {
+  while ((dispatcher.inflight > 0 || unflushed > 0) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   process.exit(0);
