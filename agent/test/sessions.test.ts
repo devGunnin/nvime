@@ -73,6 +73,38 @@ describe('SessionStore', () => {
     assert.deepEqual(store.get('/proj'), { current: null, known: [] });
   });
 
+  it('keeps another instance’s projects when writing its own', () => {
+    // Two Neovim instances, two sidecars, one store file. Each snapshotted the
+    // file at construction, so a plain write-back would delete the other's work.
+    const first = new SessionStore(path);
+    const second = new SessionStore(path);
+    first.remember('/one', 'a1');
+    second.remember('/two', 'b1');
+
+    const reread = new SessionStore(path);
+    assert.deepEqual(reread.get('/one'), { current: 'a1', known: ['a1'] }, 'no silent data loss');
+    assert.deepEqual(reread.get('/two'), { current: 'b1', known: ['b1'] });
+  });
+
+  it('adopts the merged file, so a later write does not undo the first read', () => {
+    const first = new SessionStore(path);
+    const second = new SessionStore(path);
+    first.remember('/one', 'a1');
+    second.remember('/two', 'b1');
+    assert.deepEqual(second.get('/one').known, ['a1'], 'the merge is visible in memory too');
+
+    second.remember('/two', 'b2');
+    assert.deepEqual(new SessionStore(path).get('/one'), { current: 'a1', known: ['a1'] });
+  });
+
+  it('lets the last write win for the same project, without corrupting it', () => {
+    const first = new SessionStore(path);
+    const second = new SessionStore(path);
+    first.remember('/proj', 'a1');
+    second.remember('/proj', 'b1');
+    assert.deepEqual(new SessionStore(path).get('/proj'), { current: 'b1', known: ['b1'] });
+  });
+
   it('places the default store under XDG_DATA_HOME when set', () => {
     assert.equal(defaultStorePath({ XDG_DATA_HOME: '/xdg' }), '/xdg/nvime/sessions.json');
   });

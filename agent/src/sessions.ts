@@ -56,7 +56,7 @@ export class SessionStore {
     const known = [sessionId, ...entry.known.filter((id) => id !== sessionId)];
     known.length = Math.min(known.length, MAX_KNOWN_PER_PROJECT);
     this.#file.projects[root] = { current: sessionId, known };
-    this.#persist();
+    this.#persist(root);
   }
 
   /** Drops ids the SDK no longer knows about, so the picker stays truthful. */
@@ -67,13 +67,25 @@ export class SessionStore {
     if (known.length === entry.known.length) return;
     const current = entry.current !== null && liveIds.has(entry.current) ? entry.current : null;
     this.#file.projects[root] = { current, known };
-    this.#persist();
+    this.#persist(root);
   }
 
-  #persist(): void {
+  /**
+   * One store file, one sidecar per Neovim instance: a plain write-back would
+   * delete whatever another instance recorded since this one started. So the
+   * file is re-read and only `root` is overwritten — last write wins per
+   * project, never across them — and the merge becomes this store's new view.
+   */
+  #persist(root: string): void {
+    const merged = readStore(this.#path);
+    const entry = this.#file.projects[root];
+    if (entry === undefined) delete merged.projects[root];
+    else merged.projects[root] = entry;
+    this.#file = merged;
+
     const tmp = `${this.#path}.${process.pid}.tmp`;
     mkdirSync(dirname(this.#path), { recursive: true });
-    writeFileSync(tmp, JSON.stringify(this.#file, null, 2), { mode: 0o600 });
+    writeFileSync(tmp, JSON.stringify(merged, null, 2), { mode: 0o600 });
     renameSync(tmp, this.#path);
   }
 }
