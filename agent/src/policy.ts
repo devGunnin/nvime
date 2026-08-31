@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, parse, sep } from 'node:path';
 
 /**
  * What edit mode lets the agent do, decided in the sidecar and enforced
@@ -29,28 +29,46 @@ export type ToolDecision =
   | { kind: 'deny'; reason: string };
 
 /**
- * `target` with every symlink on its existing prefix resolved. `realpathSync`
- * fails outright on a path that does not exist yet, which is the normal case
- * for a `Write` creating a file — so the deepest existing ancestor is resolved
- * and the remaining segments are rejoined. Without this a symlink inside the
- * project pointing at `/etc` would look like a path under the root.
+ * `realpathSync` on one existing component, or the component itself when it
+ * does not exist yet — the normal case for a `Write` creating a file. Any
+ * other error (a permission or symlink-loop failure) is a real failure and is
+ * left to propagate rather than resolving to a path the kernel would refuse.
+ */
+function resolveComponent(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw cause;
+    return path;
+  }
+}
+
+/**
+ * `target` resolved the way the kernel resolves it: one component at a time,
+ * left to right, each symlink followed before the next segment is applied.
+ *
+ * `path.resolve` must NOT be used for this. It collapses `..` lexically, on
+ * the string, before any symlink is followed — so `<root>/link-to-outside/..`
+ * comes back as `<root>`, while the kernel walks out of the link's target and
+ * the write lands outside the project. Resolving per component closes that.
  */
 export function realPathOf(target: string): string {
-  let head = resolve(target);
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      return tail.length === 0 ? realpathSync(head) : join(realpathSync(head), ...tail);
-    } catch (cause) {
-      const code = (cause as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw cause;
-      const parent = dirname(head);
-      // Reached the filesystem root without finding anything that exists.
-      if (parent === head) return tail.length === 0 ? head : join(head, ...tail);
-      tail.unshift(basename(head));
-      head = parent;
-    }
+  if (typeof target !== 'string' || target === '') {
+    throw new TypeError('realPathOf needs a non-empty path');
   }
+  // Concatenated, not `join`ed: both `join` and `resolve` would collapse `..`
+  // on the way in, which is the whole bug.
+  const anchored = isAbsolute(target) ? target : process.cwd() + sep + target;
+  const base = parse(anchored).root;
+  let resolved = resolveComponent(base);
+  for (const segment of anchored.slice(base.length).split(sep)) {
+    if (segment === '' || segment === '.') continue;
+    // Applied to the RESOLVED prefix, so `..` after a symlink climbs out of
+    // the link's target, not out of the written path's lexical parent.
+    resolved = segment === '..' ? dirname(resolved) : resolveComponent(join(resolved, segment));
+  }
+  return resolved;
 }
 
 /** True when `candidate` is `root` itself or sits under it. Both must be real paths. */

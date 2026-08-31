@@ -4,10 +4,18 @@ import { ApprovalGate, DEFAULT_APPROVAL_TIMEOUT_MS } from './approvals.js';
 import type { SdkBindings } from './chat.js';
 import { composePrompt, type ContextBlock } from './context.js';
 import { subscriptionEnv, type Env } from './env.js';
-import { classifyTool, FILE_PATH_KEYS, READ_ONLY_TOOLS, realPathOf } from './policy.js';
+import { classifyTool, FILE_PATH_KEYS, READ_ONLY_TOOLS, realPathOf, SHELL_TOOLS } from './policy.js';
 import { ProtocolError } from './protocol.js';
 import { readSnapshot, sameSnapshot, snapshotBytes, type Snapshot } from './snapshot.js';
-import { describeTool, readUsage, textDelta, toolCalls, toolResultIds, type RunUsage } from './stream.js';
+import {
+  describeTool,
+  readUsage,
+  textDelta,
+  toolCalls,
+  toolDetail,
+  toolResultIds,
+  type RunUsage,
+} from './stream.js';
 
 /**
  * Edit mode. The agent may change files, but every change is intercepted,
@@ -89,6 +97,8 @@ interface Run {
   abort: AbortController;
   /** Tool-use id -> the file it is about to change, snapshotted before it ran. */
   pending: Map<string, { path: string; tool: string; before: Snapshot }>;
+  /** Tool-use ids of shell calls, whose file effects nvime cannot snapshot. */
+  shells: Set<string>;
   approvalIds: Set<string>;
   changes: AppliedChange[];
 }
@@ -136,6 +146,7 @@ export class EditService {
       realRoot: realPathOf(params.root),
       abort: new AbortController(),
       pending: new Map(),
+      shells: new Set(),
       approvalIds: new Set(),
       changes: [],
     };
@@ -192,7 +203,7 @@ export class EditService {
       } else if (message.type === 'assistant') {
         this.#onAssistant(run, message);
       } else if (message.type === 'user') {
-        for (const id of toolResultIds(message.message)) this.#settleMutation(run, id);
+        for (const id of toolResultIds(message.message)) this.#settleTool(run, id);
       } else if (message.type === 'result') {
         return this.#onResult(run, message, sessionId);
       }
@@ -222,8 +233,28 @@ export class EditService {
     }
     for (const call of toolCalls(message.message, run.root)) {
       this.#emit('edit.tool', { id: run.requestId, tool: call.tool, summary: call.summary });
-      if (call.id !== '') this.#track(run, call.id, call.tool, inputs.get(call.id) ?? {});
+      if (call.id === '') continue;
+      if ((SHELL_TOOLS as readonly string[]).includes(call.tool)) run.shells.add(call.id);
+      else this.#trackPlanned(run, call.id, call.tool, inputs.get(call.id) ?? {});
     }
+  }
+
+  /**
+   * One tool's result arrived. A shell command's file effects are invisible to
+   * the snapshot pair — it names no path — so the editor is told to look for
+   * itself rather than being left with buffers that quietly went stale and a
+   * later conflict that blames the user for the agent's own write.
+   */
+  #settleTool(run: Run, toolUseId: string): void {
+    if (run.shells.delete(toolUseId)) {
+      this.#emit('edit.external_change', {
+        id: run.requestId,
+        runId: run.runId,
+        root: run.realRoot,
+        reason: 'a shell command ran; nvime did not record what it changed',
+      });
+    }
+    this.#settleMutation(run, toolUseId);
   }
 
   #onResult(
@@ -247,18 +278,46 @@ export class EditService {
     };
   }
 
-  /**
-   * Snapshots the file a tool is about to change. First write wins, so the
-   * `before` is the earliest state seen — the callback and the assistant
-   * message both land here and only one of them may be first.
-   */
-  #track(run: Run, toolUseId: string, tool: string, input: Record<string, unknown>): void {
-    if (run.pending.has(toolUseId)) return;
+  /** The real path a tool will change, or null when it changes no file. */
+  #targetOf(tool: string, input: Record<string, unknown>): string | null {
     const key = FILE_PATH_KEYS[tool];
-    if (key === undefined) return;
+    if (key === undefined) return null;
     const raw = input[key];
-    if (typeof raw !== 'string' || raw === '') return;
-    const path = realPathOf(raw);
+    if (typeof raw !== 'string' || raw === '') return null;
+    return realPathOf(raw);
+  }
+
+  /**
+   * A mutation seen in the assistant message, before any tool in it has run.
+   * Tracked here as well as from the callback because a tool the CLI ever
+   * auto-allows would never reach the callback, and a mutation nvime failed to
+   * snapshot is a buffer that silently goes stale.
+   *
+   * A second tool on a path already claimed by this message is deliberately
+   * NOT snapshotted here: it starts from what its predecessor leaves behind,
+   * which only `#trackImminent` is late enough to read.
+   */
+  #trackPlanned(run: Run, toolUseId: string, tool: string, input: Record<string, unknown>): void {
+    if (run.pending.has(toolUseId)) return;
+    const path = this.#targetOf(tool, input);
+    if (path === null) return;
+    for (const entry of run.pending.values()) if (entry.path === path) return;
+    run.pending.set(toolUseId, { path, tool, before: readSnapshot(path) });
+  }
+
+  /**
+   * A mutation about to run. Every earlier tool on the same path has finished
+   * by now, so this is the one moment their true `after` — and this tool's
+   * true `before` — is on disk: they are settled here, and the snapshot taken
+   * afterwards. Two batched edits to one file therefore chain A→B then B→C
+   * instead of both claiming the whole A→C delta.
+   */
+  #trackImminent(run: Run, toolUseId: string, tool: string, input: Record<string, unknown>): void {
+    const path = this.#targetOf(tool, input);
+    if (path === null) return;
+    for (const [id, entry] of [...run.pending]) {
+      if (id !== toolUseId && entry.path === path) this.#settleMutation(run, id);
+    }
     run.pending.set(toolUseId, { path, tool, before: readSnapshot(path) });
   }
 
@@ -302,6 +361,7 @@ export class EditService {
 
   /** Idempotent: flushes tool calls with no result, and unparks approvals. */
   #finishRun(run: Run, reason: string): void {
+    for (const id of [...run.shells]) this.#settleTool(run, id);
     for (const id of [...run.pending.keys()]) this.#settleMutation(run, id);
     for (const id of run.approvalIds) this.#gate.deny(id, reason);
     run.approvalIds.clear();
@@ -374,11 +434,18 @@ export class EditService {
     const decision = classifyTool(toolName, input, run.realRoot);
     if (decision.kind === 'deny') return { behavior: 'deny', message: decision.reason };
     if (decision.kind === 'allow') {
-      this.#track(run, toolUseId, toolName, input);
+      this.#trackImminent(run, toolUseId, toolName, input);
       return { behavior: 'allow' };
     }
     const approvalId = `${run.runId}:${toolUseId}`;
+    if (this.#gate.isPending(approvalId)) {
+      // A retried call, or an empty tool-use id used twice. The first ask is
+      // still on screen and the user cannot answer one id two ways, so this
+      // one is refused — never a throw that would take the whole run down.
+      return { behavior: 'deny', message: 'nvime is already asking about this tool call' };
+    }
     run.approvalIds.add(approvalId);
+    const detail = toolDetail(toolName, input);
     this.#emit('edit.approval', {
       id: run.requestId,
       runId: run.runId,
@@ -386,13 +453,16 @@ export class EditService {
       tool: toolName,
       summary: describeTool(toolName, input, run.root),
       reason: decision.reason,
+      // Verbatim, because `summary` is clipped and nobody can consent to a
+      // command they were shown three quarters of.
+      ...(detail === null ? {} : { detail }),
       ...(decision.path === undefined ? {} : { path: decision.path }),
     });
     const outcome = await this.#gate.request(approvalId, run.abort.signal);
     run.approvalIds.delete(approvalId);
     this.#emit('edit.approval_settled', { id: run.requestId, approvalId, allowed: outcome.allowed });
     if (!outcome.allowed) return { behavior: 'deny', message: outcome.reason };
-    this.#track(run, toolUseId, toolName, input);
+    this.#trackImminent(run, toolUseId, toolName, input);
     return { behavior: 'allow' };
   }
 }

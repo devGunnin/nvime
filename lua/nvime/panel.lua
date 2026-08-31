@@ -297,6 +297,9 @@ function M.get(name)
   if alive then
     return self
   end
+  -- Dropped without this, its spinner keeps firing every SPINNER_MS for the
+  -- rest of the session: `M.close` finds nothing left to stop it through.
+  self:stop_activity()
   panels[name] = nil
   return nil
 end

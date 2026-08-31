@@ -114,8 +114,10 @@ its exact before/after the moment the tool finishes. If a buffer holds that
 file, only the changed hunks are rewritten through the buffer API: your cursor
 and scroll position stay put, the changed lines light up and fade after ~1.5s,
 and the buffer is left unmodified and in step with disk — no `:e`, no reload
-prompt, and no W11/W12 warning later. A file nothing has open is simply current
-when you next open it; the panel says it changed.
+prompt, and no W11/W12 warning later. "Stay put" means the *line you were on*,
+not the line number: a hunk inserted above you moves your cursor down with your
+own content. A file nothing has open is simply current when you next open it;
+the panel says it changed.
 
 **One undo block per run, per buffer.** A single `u` reverts everything one run
 did to that buffer. Honestly: `u` reverts the *buffer*. Disk keeps the agent's
@@ -126,6 +128,12 @@ did not see, nvime refuses to touch it and reports a conflict instead. The
 change is still on disk and still in the changeset — review and revert it from
 `<leader>nd`, or save/discard your edits and re-run.
 
+**Nor is anyone else's write.** Before reconciling a buffer nvime re-reads the
+file and requires it to still hold one of the two sides of the change. If a
+formatter, a `git checkout`, or a second editor got there in between, nvime
+reports `external-change` and writes nothing — the newer content survives, and
+the stale mtime is left in place so `:checktime` still warns you.
+
 **Trust is scoped.** Writes under the project root run unattended. A write
 anywhere else, and any shell command, stops and asks — a float with `y`/`n`,
 never a modal, and the editor stays usable while it waits. An unanswered ask
@@ -134,17 +142,51 @@ is denied, as is one whose run you cancelled. The policy lives in the sidecar's
 text: the hook is there because the CLI's own safe-command classifier would
 otherwise approve some shell calls without asking anyone.
 
+The float shows the **whole** command, or the whole path, wrapped over as many
+lines as it takes and scrolled if it does not fit. The one-line summary in the
+panel is clipped; the thing you are asked to authorize is not. Past 8 KB the
+frame says `!! TRUNCATED` and how many bytes it could not show, so a padded
+command is visibly padded rather than quietly ending in an ellipsis.
+
+Paths are resolved one component at a time, the way the kernel resolves them,
+so a `..` that follows a symlink out of the project (`node_modules/.pnpm`
+links, `docs -> ../shared-docs`, a dotfiles `config -> ~/.config`) climbs out
+of the link's target and is asked about — it does not collapse back to a path
+that looks like it is inside the root.
+
+**A shell step is not silent.** An approved `Bash` call can change files nvime
+has no before/after for. When one finishes, nvime reconciles the buffers under
+the root with disk: clean ones are brought up to date (and said to be *not* in
+the changeset, because they are not), and any with unsaved edits are named
+rather than touched.
+
+#### What edit mode does not confine
+
 Read-only tools (`Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`) are always
 allowed and are *not* confined to the project root — edit mode scopes what can
 be changed, not what can be read.
 
+Say that plainly, because it is the sharpest edge in the feature: **`Read` any
+file you can read, then `WebFetch` an attacker's URL, is a complete
+exfiltration path with no approval prompt anywhere in it.** `~/.ssh/id_rsa`, a
+`.env`, a password store — none of them are behind the gate, and `WebFetch` is
+treated as a read rather than as network egress. The realistic trigger is not
+the model deciding to do this; it is prompt-injected content in a repo you
+opened, which the model read and followed.
+
+This is a deliberate tradeoff — an agent that cannot read outside the project
+cannot follow an import into a dependency — and not one you can currently turn
+off. Weigh it before pointing edit mode at an unfamiliar repository. The write
+gate is unaffected: nothing here lets the agent *change* anything outside the
+root without asking you.
+
 **Changeset.** `<leader>nd` lists every file the run touched with its hunks.
 `<CR>` jumps to a hunk, `d` toggles a plain unified diff, and `r` reverts one
-hunk through the same live-application path. A hunk whose lines you have since
-hand-edited refuses to revert rather than writing something neither side asked
-for; a hunk that only moved (because you reverted something above it) still
-reverts correctly. Files the agent created are recorded but not revertible —
-delete them yourself.
+hunk through the same live-application path — in either view, on any `+` or `-`
+line. A hunk whose lines you have since hand-edited refuses to revert rather
+than writing something neither side asked for; a hunk that only moved (because
+you reverted something above it) still reverts correctly. Files the agent
+created are recorded but not revertible — delete them yourself.
 
 Chat and edit both load **no** `.claude/settings.json` — not the repo's, not yours. Project
 settings carry `hooks` (shell commands the model's first `Read` would fire) and

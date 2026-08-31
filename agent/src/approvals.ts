@@ -38,14 +38,22 @@ export class ApprovalGate {
     return this.#waiting.size;
   }
 
+  /** Whether an ask with this id is still on the editor's screen. */
+  isPending(approvalId: string): boolean {
+    return this.#waiting.has(approvalId);
+  }
+
   /**
    * Blocks until the editor answers `approvalId`, the deadline passes, or the
-   * run aborts. Resolves exactly once; a duplicate id is a programming error,
-   * not a silently dropped request.
+   * run aborts. Resolves exactly once.
+   *
+   * A duplicate id is refused rather than thrown: the throw escaped into the
+   * SDK and failed the whole run with an opaque error, where the caller wants
+   * the one tool call refused and the ask already on screen left alone.
    */
   request(approvalId: string, signal?: AbortSignal): Promise<ApprovalOutcome> {
     if (this.#waiting.has(approvalId)) {
-      throw new Error(`approval ${approvalId} is already pending`);
+      return Promise.resolve({ allowed: false, reason: `approval ${approvalId} is already pending` });
     }
     if (signal?.aborted === true) {
       return Promise.resolve({ allowed: false, reason: 'the run was cancelled' });

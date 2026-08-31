@@ -5,9 +5,19 @@
 ---
 --- Asks queue: one float at a time, in arrival order, so a run that trips two
 --- rules does not stack windows on top of each other.
+---
+--- The float shows the payload — the whole command, the whole path — verbatim,
+--- wrapped over as many lines as it takes and scrolled if it does not fit. The
+--- panel's one-line summary is clipped, and nobody can consent to a command
+--- they were shown three quarters of.
+local keymaps = require('nvime.keymaps')
+
 local M = {}
 
-local WIDTH = 64
+local WIDTH = 72
+
+--- Room for the two-space indent the payload is rendered with.
+local INDENT = '  '
 
 local queue = {}
 local active = nil
@@ -26,30 +36,89 @@ local function close_window()
   end
 end
 
-local function body(request)
-  return {
+--- `text` broken into rendered lines of at most `width` characters, its own
+--- newlines kept. Character-based, so a multi-byte payload is never cut in
+--- half; nothing is ever elided.
+--- @return string[]
+local function wrapped(text, width)
+  local out = {}
+  for _, line in ipairs(vim.split(text, '\n', { plain = true })) do
+    local total = vim.fn.strchars(line)
+    if total == 0 then
+      out[#out + 1] = ''
+    end
+    local at = 0
+    while at < total do
+      out[#out + 1] = vim.fn.strcharpart(line, at, width)
+      at = at + width
+    end
+  end
+  return out
+end
+
+--- The float's contents.
+---
+--- The decision and its keys sit at the top, where they stay visible however
+--- long the payload below them is; the payload itself follows in full.
+--- @param request table approvalId, tool, summary, reason, detail
+--- @param width integer columns available inside the border
+--- @return string[] lines
+--- @return integer|nil warn 1-based row of the truncation banner, if any
+function M.render(request, width)
+  assert(type(request) == 'table', 'approval.render needs a request')
+  local lines = {
     ' claude wants to:',
-    '   ' .. (request.summary or request.tool or 'run a tool'),
+    INDENT .. (request.summary or request.tool or 'run a tool'),
     '',
     ' nvime will not allow that on its own:',
-    '   ' .. (request.reason or 'outside the agreed scope'),
+    INDENT .. (request.reason or 'outside the agreed scope'),
     '',
     ' y  allow once      n  deny',
   }
+  local detail = request.detail
+  if type(detail) ~= 'table' or type(detail.text) ~= 'string' or detail.text == '' then
+    return lines, nil
+  end
+  local body = wrapped(detail.text, math.max(width - #INDENT, 8))
+  lines[#lines + 1] = string.format(
+    ' the exact %s — %d line%s, %d byte%s:',
+    detail.kind or 'value',
+    #body,
+    #body == 1 and '' or 's',
+    detail.bytes or #detail.text,
+    (detail.bytes or #detail.text) == 1 and '' or 's'
+  )
+  local warn = nil
+  if detail.truncated then
+    lines[#lines + 1] =
+      string.format(' !! TRUNCATED — nvime can only show you %d of %d bytes', #detail.text, detail.bytes)
+    warn = #lines
+  end
+  for _, line in ipairs(body) do
+    lines[#lines + 1] = INDENT .. line
+  end
+  return lines, warn
 end
 
---- Opens the float for `ask` and wires `y`/`n`/`<Esc>` to `answer`.
+--- Opens the float for `ask` and wires the approval keys to `answer`.
 local function show(ask, answer)
+  local width = math.min(WIDTH, math.max(vim.o.columns - 4, 20))
+  local lines, warn = M.render(ask.request, width)
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, body(ask.request))
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  if warn ~= nil then
+    vim.api.nvim_buf_set_extmark(buf, vim.api.nvim_create_namespace('nvime.approval'), warn - 1, 0, {
+      line_hl_group = 'NvimeError',
+    })
+  end
   vim.bo[buf].modifiable = false
   vim.bo[buf].bufhidden = 'wipe'
 
-  local height = vim.api.nvim_buf_line_count(buf)
-  local width = math.min(WIDTH, math.max(vim.o.columns - 4, 20))
+  local height = #lines
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
     width = width,
+    -- Clamped, never the content: a payload taller than the screen scrolls.
     height = math.max(math.min(height, vim.o.lines - 2), 1),
     row = math.max(math.floor((vim.o.lines - height) / 2), 0),
     col = math.max(math.floor((vim.o.columns - width) / 2), 0),
@@ -58,18 +127,14 @@ local function show(ask, answer)
     title = ' nvime · approve? ',
     title_pos = 'center',
   })
+  vim.wo[win].wrap = true
   active = { win = win, buf = buf, request = ask.request, on_answer = ask.on_answer }
 
-  local function map(lhs, allow)
-    vim.keymap.set('n', lhs, function()
-      answer(allow)
-    end, { buffer = buf, nowait = true, silent = true, desc = 'nvime: answer the approval' })
+  for _, key in ipairs(keymaps.APPROVAL) do
+    vim.keymap.set('n', key.lhs, function()
+      answer(key.allow)
+    end, { buffer = buf, nowait = true, silent = true, desc = key.desc })
   end
-  map('y', true)
-  map('Y', true)
-  map('n', false)
-  map('N', false)
-  map('<Esc>', false)
 end
 
 local function pump()

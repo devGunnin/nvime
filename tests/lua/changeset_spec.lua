@@ -219,16 +219,64 @@ describe('changeset.revert', function()
 end)
 
 describe('changeset: the unified view', function()
-  it('toggles to a plain unified diff and back', function()
-    open_over(BEFORE, AFTER)
-    local view = changeset.view()
-    view.unified = true
+  --- The rendered row whose text is `text`, and what the view maps it to.
+  local function row_for(text)
+    for row, line in ipairs(lines()) do
+      if line == text then
+        return row, changeset.view().rows[row]
+      end
+    end
+    ok(false, 'no rendered row reads ' .. text)
+  end
+
+  local function open_unified()
+    local dir, path = open_over(BEFORE, AFTER)
+    changeset.view().unified = true
     changeset.open()
+    return dir, path
+  end
+
+  it('toggles to a plain unified diff and back', function()
+    open_unified()
     local rendered = table.concat(lines(), '\n')
     ok(rendered:find('--- a/queue.py', 1, true) ~= nil, 'a real unified header')
     ok(rendered:find('\n-two', 1, true) ~= nil, 'the removed line')
     ok(rendered:find('\n+TWO', 1, true) ~= nil, 'and the added one')
-    view.unified = false
+    changeset.view().unified = false
+    cleanup()
+  end)
+
+  it('reverts the hunk the cursor is on, which the status line has always advertised', function()
+    local _, path = open_unified()
+    local _, target = row_for('+TWO')
+    ok(target ~= nil and target.hunk ~= nil, 'a changed line must map to its hunk')
+    local ok_revert, reason = changeset.revert(target)
+    ok(ok_revert, tostring(reason))
+    eq('one\ntwo\nthree\nfour\nFIVE\n', disk(path), 'only that hunk went back')
+    changeset.view().unified = false
+    cleanup()
+  end)
+
+  it('maps a removed line to its hunk as well as an added one', function()
+    open_unified()
+    local _, removed = row_for('-five')
+    local _, added = row_for('+FIVE')
+    ok(removed ~= nil and removed.hunk ~= nil, 'a removed line maps to a hunk too')
+    ok(added ~= nil and added.hunk ~= nil)
+    eq(added.hunk, removed.hunk, 'both sides of one hunk are the same hunk')
+    changeset.view().unified = false
+    cleanup()
+  end)
+
+  it('still refuses on a context line rather than guessing a hunk', function()
+    open_unified()
+    local _, context = row_for(' three')
+    ok(context ~= nil)
+    eq(nil, context.hunk)
+    local ok_revert, reason = changeset.revert(context)
+    eq(false, ok_revert)
+    ok(reason:find('cursor on a hunk', 1, true) ~= nil)
+    changeset.view().unified = false
     cleanup()
   end)
 end)

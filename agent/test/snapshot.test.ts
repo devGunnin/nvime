@@ -28,6 +28,21 @@ describe('readSnapshot', () => {
     assert.deepEqual(readSnapshot(path), { kind: 'opaque', reason: 'binary', bytes: 3 });
   });
 
+  it('refuses a file whose bytes are not valid UTF-8, rather than mangling them', () => {
+    const path = join(dir, 'latin1.txt');
+    // 0xE9 is `é` in latin-1 and an invalid lone byte in UTF-8: decoding it
+    // yields U+FFFD, and a snapshot that no longer describes the file's bytes
+    // would have the editor write the mangled version back over it.
+    writeFileSync(path, Buffer.from([0x63, 0xe9, 0x0a]));
+    assert.deepEqual(readSnapshot(path), { kind: 'opaque', reason: 'binary', bytes: 3 });
+  });
+
+  it('keeps valid multi-byte UTF-8 as text', () => {
+    const path = join(dir, 'utf8.txt');
+    writeFileSync(path, 'héllo ☃\n');
+    assert.deepEqual(readSnapshot(path), { kind: 'text', text: 'héllo ☃\n' });
+  });
+
   it('refuses to carry a file over the size ceiling', () => {
     const path = join(dir, 'big.txt');
     writeFileSync(path, 'x'.repeat(4096));

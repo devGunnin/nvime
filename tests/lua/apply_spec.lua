@@ -44,6 +44,24 @@ local function agent_wrote(path, before, after)
   return { path = path, before = { kind = 'text', text = before }, after = { kind = 'text', text = after } }
 end
 
+--- Somebody other than the agent writing the file: a formatter, a git
+--- checkout, a second editor.
+local function externally_wrote(path, text)
+  local handle = assert(io.open(path, 'ab'))
+  handle:write(text)
+  handle:close()
+end
+
+local function lines_of(buf)
+  return vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+end
+
+--- The text under the cursor, which is what "the cursor stayed put" means.
+local function cursor_text(buf)
+  local row = vim.api.nvim_win_get_cursor(0)[1]
+  return vim.api.nvim_buf_get_lines(buf, row - 1, row, false)[1]
+end
+
 local function marks(buf)
   return vim.api.nvim_buf_get_extmarks(buf, apply.NS, 0, -1, { details = true })
 end
@@ -177,6 +195,86 @@ describe('apply.apply', function()
     cleanup()
   end)
 
+  it('keeps the cursor on its own line when the agent inserts lines above it', function()
+    local path, buf = open_file('l1\nl2\nl3\nl4\nl5\n')
+    vim.api.nvim_win_set_cursor(0, { 5, 1 })
+    eq('l5', cursor_text(buf), 'the probe starts on l5')
+    eq(
+      'applied',
+      apply.apply(agent_wrote(path, 'l1\nl2\nl3\nl4\nl5\n', 'a\nb\nc\nl1\nl2\nl3\nl4\nl5\n'), {
+        run_id = 'r1',
+        nofade = true,
+      })
+    )
+    eq('l5', cursor_text(buf), 'the cursor rode the content down, not the line number')
+    eq(8, vim.api.nvim_win_get_cursor(0)[1])
+    eq(1, vim.api.nvim_win_get_cursor(0)[2], 'and kept its column')
+    cleanup()
+  end)
+
+  it('keeps the cursor on its own line when the agent deletes lines above it', function()
+    local path, buf = open_file('l1\nl2\nl3\nl4\nl5\n')
+    vim.api.nvim_win_set_cursor(0, { 5, 0 })
+    eq('applied', apply.apply(agent_wrote(path, 'l1\nl2\nl3\nl4\nl5\n', 'l4\nl5\n'), { run_id = 'r1', nofade = true }))
+    eq('l5', cursor_text(buf))
+    eq(2, vim.api.nvim_win_get_cursor(0)[1])
+    cleanup()
+  end)
+
+  it('refuses to write over a change something else made after the agent read the file', function()
+    local path, buf = open_file('one\ntwo\n')
+    local change = agent_wrote(path, 'one\ntwo\n', 'one\nTWO\n')
+    externally_wrote(path, 'EXTERNAL\n')
+    local status, detail = apply.apply(change, { run_id = 'r1', nofade = true })
+    eq('external-change', status)
+    ok(detail:find('changed on disk', 1, true) ~= nil, 'got: ' .. tostring(detail))
+    eq('one\nTWO\nEXTERNAL\n', disk(path), 'the other write survives — write! would have destroyed it')
+    eq({ 'one', 'two' }, lines_of(buf), 'and the buffer is left as it was')
+    cleanup()
+  end)
+
+  it('separates a stale buffer from one with unsaved edits', function()
+    local path, buf = open_file('a\nb\n')
+    -- A shell step rewrote the file; the buffer is clean but out of date.
+    local handle = assert(io.open(path, 'wb'))
+    handle:write('shell\nb\n')
+    handle:close()
+    local change = agent_wrote(path, 'shell\nb\n', 'shell\nB\n')
+    local status, detail = apply.apply(change, { run_id = 'r1', nofade = true })
+    eq('stale-buffer', status)
+    ok(detail:find('neither side', 1, true) ~= nil, 'got: ' .. tostring(detail))
+    ok(detail:find('unsaved') == nil, 'a clean buffer must not be accused of unsaved edits')
+    eq({ 'a', 'b' }, lines_of(buf))
+    cleanup()
+  end)
+
+  it("gives the user's 'fixendofline' back once the newline is restored", function()
+    local path, buf = open_file('a\nb\n')
+    eq(true, vim.bo[buf].fixendofline, 'the probe starts from the default')
+    eq('applied', apply.apply(agent_wrote(path, 'a\nb\n', 'a\nC'), { run_id = 'r1', nofade = true }))
+    eq(false, vim.bo[buf].fixendofline, 'off while the file genuinely has no trailing newline')
+    eq('applied', apply.apply(agent_wrote(path, 'a\nC', 'a\nC\n'), { run_id = 'r1', nofade = true }))
+    eq(true, vim.bo[buf].fixendofline, "and back on afterwards — the option is the user's")
+    eq('a\nC\n', disk(path))
+    cleanup()
+  end)
+
+  it('does not swallow a failed undo-block break', function()
+    local path = open_file('a\n')
+    local real_cmd = vim.cmd
+    vim.cmd = function(command)
+      if type(command) == 'string' and command:find('undolevels', 1, true) ~= nil then
+        error('undo break failed')
+      end
+      return real_cmd(command)
+    end
+    local ran, err = pcall(apply.apply, agent_wrote(path, 'a\n', 'b\n'), { run_id = 'r1', nofade = true })
+    vim.cmd = real_cmd
+    eq(false, ran, 'two runs sharing one undo block is the failure this must not hide')
+    ok(tostring(err):find('undo break failed', 1, true) ~= nil, 'got: ' .. tostring(err))
+    cleanup()
+  end)
+
   it('keeps disk and buffer identical after applying', function()
     local path, buf = open_file('one\ntwo\n')
     apply.apply(agent_wrote(path, 'one\ntwo\n', 'one\ntwo\nthree\n'), { run_id = 'r1', nofade = true })
@@ -242,6 +340,47 @@ describe('apply: hunk highlights', function()
       ok(#marks(buf) > 0, 'the newer highlights survive the older timer')
       cleanup()
     end)
+  end)
+end)
+
+describe('apply.recheck', function()
+  it('brings a clean buffer up to date after a shell step nvime could not record', function()
+    local path, buf = open_file('one\ntwo\n')
+    local root = vim.fs.dirname(path)
+    -- An approved `sed -i` / `prettier --write`: no snapshot, no changeset.
+    local handle = assert(io.open(path, 'wb'))
+    handle:write('one\nFORMATTED\n')
+    handle:close()
+
+    local reloaded, left = apply.recheck(root, { run_id = 'r1', nofade = true })
+    eq({ path }, reloaded)
+    eq({}, left)
+    eq({ 'one', 'FORMATTED' }, lines_of(buf), 'the buffer no longer lies about the file')
+    eq(false, vim.bo[buf].modified)
+    cleanup()
+  end)
+
+  it('leaves a buffer with unsaved edits alone and names it', function()
+    local path, buf = open_file('one\ntwo\n')
+    local root = vim.fs.dirname(path)
+    vim.api.nvim_buf_set_lines(buf, 1, 2, false, { 'mine' })
+    local handle = assert(io.open(path, 'wb'))
+    handle:write('one\nFORMATTED\n')
+    handle:close()
+
+    local reloaded, left = apply.recheck(root, { run_id = 'r1', nofade = true })
+    eq({}, reloaded)
+    eq({ path }, left)
+    eq({ 'one', 'mine' }, lines_of(buf), 'the hand edit survives')
+    cleanup()
+  end)
+
+  it('says nothing when the shell step changed no open file', function()
+    local path = open_file('one\ntwo\n')
+    local reloaded, left = apply.recheck(vim.fs.dirname(path), { run_id = 'r1', nofade = true })
+    eq({}, reloaded)
+    eq({}, left)
+    cleanup()
   end)
 end)
 

@@ -6,11 +6,22 @@
 --- exact failure this bans.
 local M = {}
 
+--- The approval float's keys. `approval.lua` binds exactly this table and
+--- `M.all` lists exactly this table, so the two cannot drift and leave the
+--- leaf-only check blind to a live mapping.
+M.APPROVAL = {
+  { lhs = 'y', allow = true, desc = 'nvime: allow once' },
+  { lhs = 'Y', allow = true, desc = 'nvime: allow once' },
+  { lhs = 'n', allow = false, desc = 'nvime: deny' },
+  { lhs = 'N', allow = false, desc = 'nvime: deny' },
+  { lhs = '<Esc>', allow = false, desc = 'nvime: deny' },
+}
+
 --- @param opts table the resolved config
 --- @return table[] entries with scope, mode, lhs, desc
 function M.all(opts)
   local keymaps = opts.keymaps
-  return {
+  local entries = {
     { scope = 'global', mode = 'n', lhs = keymaps.chat, desc = 'nvime: open chat' },
     { scope = 'global', mode = 'x', lhs = keymaps.send_selection, desc = 'nvime: send the selection' },
     { scope = 'global', mode = 'n', lhs = keymaps.edit, desc = 'nvime: edit this file' },
@@ -25,9 +36,6 @@ function M.all(opts)
     { scope = 'panel-changeset', mode = 'n', lhs = 'r', desc = 'nvime: revert this hunk' },
     { scope = 'panel-changeset', mode = 'n', lhs = 'd', desc = 'nvime: toggle the unified diff' },
     { scope = 'panel-changeset', mode = 'n', lhs = 'q', desc = 'nvime: close the changeset' },
-    { scope = 'approval', mode = 'n', lhs = 'y', desc = 'nvime: allow once' },
-    { scope = 'approval', mode = 'n', lhs = 'n', desc = 'nvime: deny' },
-    { scope = 'approval', mode = 'n', lhs = '<Esc>', desc = 'nvime: deny' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<CR>', desc = 'nvime: send the prompt' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<C-r>', desc = 'nvime: pick a session' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<C-c>', desc = 'nvime: stop the running turn' },
@@ -36,6 +44,10 @@ function M.all(opts)
     { scope = 'picker', mode = 'n', lhs = 'q', desc = 'nvime: dismiss' },
     { scope = 'picker', mode = 'n', lhs = '<Esc>', desc = 'nvime: dismiss' },
   }
+  for _, key in ipairs(M.APPROVAL) do
+    entries[#entries + 1] = { scope = 'approval', mode = 'n', lhs = key.lhs, desc = key.desc }
+  end
+  return entries
 end
 
 --- Resolves `<leader>` and friends to the keys Neovim actually matches on.

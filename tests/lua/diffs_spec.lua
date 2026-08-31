@@ -165,3 +165,49 @@ describe('diffs.unified', function()
     ok(diffs.unified('a.txt', 'same\n', 'same\n'):find('no textual change', 1, true) ~= nil)
   end)
 end)
+
+describe('diffs.unified_rows', function()
+  --- Every non-context line of the diff, with the hunk the map gives it.
+  local function mapped(before, after)
+    local text = diffs.unified('f', before, after)
+    local hunks = diffs.hunks(before, after)
+    local map = diffs.unified_rows(text, hunks)
+    local out = {}
+    for at, line in ipairs(vim.split(text, '\n', { plain = true })) do
+      local head = line:sub(1, 1)
+      if head == '+' or head == '-' then
+        if line:sub(1, 3) ~= '+++' and line:sub(1, 3) ~= '---' then
+          out[#out + 1] = { line, map[at] }
+        end
+      end
+    end
+    return out, map
+  end
+
+  it('gives both sides of a change to the same hunk', function()
+    eq({ { '-b', 1 }, { '+B', 1 } }, mapped('a\nb\nc\n', 'a\nB\nc\n'))
+  end)
+
+  it('separates two hunks far enough apart to stay separate', function()
+    local before = 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n'
+    local after = 'a\nB\nc\nd\ne\nf\ng\nh\ni\nJ\n'
+    eq(2, #diffs.hunks(before, after), 'the probe needs two hunks')
+    eq({ { '-b', 1 }, { '+B', 1 }, { '-j', 2 }, { '+J', 2 } }, mapped(before, after))
+  end)
+
+  it('maps a pure insertion and a pure deletion', function()
+    eq({ { '+b', 1 } }, mapped('a\nc\n', 'a\nb\nc\n'))
+    eq({ { '-b', 1 } }, mapped('a\nb\nc\n', 'a\nc\n'))
+  end)
+
+  it('leaves headers and context lines unmapped', function()
+    local _, map = mapped('a\nb\nc\n', 'a\nB\nc\n')
+    eq(nil, map[1], 'the --- header')
+    eq(nil, map[2], 'the +++ header')
+    eq(nil, map[3], 'the @@ header')
+  end)
+
+  it('reports nothing at all for a diff with no hunks', function()
+    eq({}, diffs.unified_rows('', {}))
+  end)
+end)

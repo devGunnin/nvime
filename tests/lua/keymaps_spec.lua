@@ -15,6 +15,24 @@ describe('keymaps', function()
     end
   end)
 
+  it('lists every key the approval float actually binds', function()
+    -- The float used to map Y and N without listing them, which left the
+    -- leaf-only check blind to two live mappings. Both sides read one table now.
+    local listed = {}
+    for _, entry in ipairs(keymaps.all(config.setup({}))) do
+      if entry.scope == 'approval' then
+        listed[entry.lhs] = true
+      end
+    end
+    for _, key in ipairs(keymaps.APPROVAL) do
+      ok(listed[key.lhs], key.lhs .. ' is bound in the float but missing from the registry')
+      ok(type(key.allow) == 'boolean', key.lhs .. ' has to answer the ask one way or the other')
+    end
+    for _, lhs in ipairs({ 'y', 'Y', 'n', 'N', '<Esc>' }) do
+      ok(listed[lhs], lhs .. ' must stay listed')
+    end
+  end)
+
   it('is leaf-only: no mapping is a prefix of another in the same mode', function()
     eq({}, keymaps.conflicts(keymaps.all(config.setup({}))))
   end)

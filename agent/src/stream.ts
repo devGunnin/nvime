@@ -69,6 +69,61 @@ export function toolResultIds(message: unknown): string[] {
   return out;
 }
 
+/**
+ * Ceiling on the verbatim payload sent with an approval. Generous enough that
+ * no real command or path reaches it, small enough that one frame cannot pin
+ * the editor. Past it the payload is marked `truncated` and the float says so.
+ */
+export const MAX_DETAIL_BYTES = 8 * 1024;
+
+/** The thing the user is actually being asked to authorize, verbatim. */
+export interface ToolDetail {
+  /** What it is, in the words the float labels it with: `command`, `path`, `url`. */
+  kind: string;
+  /** The value itself. Never whitespace-collapsed and never elided mid-string. */
+  text: string;
+  truncated: boolean;
+  /** Byte length of the WHOLE value, so the float can say how much is missing. */
+  bytes: number;
+}
+
+const DETAIL_KEYS: Readonly<Record<string, { kind: string; key: string }>> = {
+  Bash: { kind: 'command', key: 'command' },
+  Edit: { kind: 'path', key: 'file_path' },
+  Write: { kind: 'path', key: 'file_path' },
+  NotebookEdit: { kind: 'path', key: 'notebook_path' },
+  WebFetch: { kind: 'url', key: 'url' },
+};
+
+/**
+ * The verbatim payload for an approval frame, or null for a tool that asks the
+ * user to authorize nothing in particular.
+ *
+ * `describeTool`'s one-line summary is for the panel's status feed and clips
+ * hard; a truncated command is not something a human can consent to, so the
+ * approval carries this instead and the float renders every byte of it.
+ */
+export function toolDetail(name: string, input: Record<string, unknown>): ToolDetail | null {
+  const spec = DETAIL_KEYS[name];
+  if (spec === undefined) return null;
+  const value = input[spec.key];
+  if (typeof value !== 'string' || value === '') return null;
+  const buffer = Buffer.from(value, 'utf8');
+  if (buffer.length <= MAX_DETAIL_BYTES) {
+    return { kind: spec.kind, text: value, truncated: false, bytes: buffer.length };
+  }
+  // Back off to a code-point boundary: UTF-8 continuation bytes are 10xxxxxx,
+  // and cutting one in half would put a replacement character on screen.
+  let end = MAX_DETAIL_BYTES;
+  while (end > 0 && ((buffer[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+  return {
+    kind: spec.kind,
+    text: buffer.subarray(0, end).toString('utf8'),
+    truncated: true,
+    bytes: buffer.length,
+  };
+}
+
 const MAX_SUMMARY_CHARS = 120;
 
 function clip(text: string): string {

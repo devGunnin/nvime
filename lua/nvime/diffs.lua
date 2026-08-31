@@ -53,6 +53,62 @@ function M.unified(path, before, after)
   return string.format('--- a/%s\n+++ b/%s\n%s', path, path, body)
 end
 
+--- 1-based inclusive line span a hunk guards on the "b" side. A zero-count
+--- hunk has no lines of its own, so it guards the line it is anchored to:
+--- reverting an insertion point the user has since edited must refuse.
+local function guarded_span(b_start, b_count)
+  if b_count == 0 then
+    return math.max(b_start, 1), math.max(b_start, 1)
+  end
+  return b_start, b_start + b_count - 1
+end
+
+--- The hunk a diff line belongs to, found by the "b" line the walk is at.
+--- A `-` line sits between b-1 and b, so a pure deletion is matched one line
+--- back from where the counter stands.
+local function hunk_at(hunks, b_line, removed)
+  for index, hunk in ipairs(hunks) do
+    local first, last = guarded_span(hunk[3], hunk[4])
+    if hunk[4] == 0 then
+      if removed and b_line == first + 1 then
+        return index
+      end
+    elseif b_line >= first and b_line <= last then
+      return index
+    end
+  end
+  return nil
+end
+
+--- For each line of a unified diff, the index into `hunks` it belongs to, or
+--- nil for headers and context lines. Lets the unified view offer the same
+--- per-hunk revert as the list view instead of advertising one it cannot do.
+---
+--- @param unified string as produced by `M.unified`
+--- @param hunks table[] from `M.hunks` on the same two texts
+--- @return (integer|nil)[] one entry per line of `unified`
+function M.unified_rows(unified, hunks)
+  assert(type(unified) == 'string' and type(hunks) == 'table', 'diffs.unified_rows needs a diff and hunks')
+  local map = {}
+  local b_line = nil
+  for index, line in ipairs(vim.split(unified, '\n', { plain = true })) do
+    local header = line:match('^@@ %-%d+,?%d* %+(%d+)')
+    if header ~= nil then
+      b_line = tonumber(header)
+    elseif b_line == nil then
+      map[index] = nil
+    elseif line:sub(1, 1) == '+' then
+      map[index] = hunk_at(hunks, b_line, false)
+      b_line = b_line + 1
+    elseif line:sub(1, 1) == '-' then
+      map[index] = hunk_at(hunks, b_line, true)
+    elseif line ~= '' then
+      b_line = b_line + 1
+    end
+  end
+  return map
+end
+
 --- The buffer edit one hunk describes: replace rows `[first, last)` (0-based,
 --- end-exclusive, the shape `nvim_buf_set_lines` takes) with `lines`.
 --- @param hunk table one entry from `M.hunks`
@@ -115,16 +171,6 @@ function M.changed_rows(hunk, line_count)
     end
   end
   return rows, kind
-end
-
---- 1-based inclusive line span a hunk guards on the "b" side. A zero-count
---- hunk has no lines of its own, so it guards the line it is anchored to:
---- reverting an insertion point the user has since edited must refuse.
-local function guarded_span(b_start, b_count)
-  if b_count == 0 then
-    return math.max(b_start, 1), math.max(b_start, 1)
-  end
-  return b_start, b_start + b_count - 1
 end
 
 --- Where a hunk of `after` still sits in `current`, as a line offset to add to

@@ -37,7 +37,14 @@ export function readSnapshot(path: string, maxBytes: number = MAX_SNAPSHOT_BYTES
   }
   // A NUL byte is the cheap, conventional binary test; UTF-8 text has none.
   if (buffer.includes(0)) return { kind: 'opaque', reason: 'binary', bytes: buffer.length };
-  return { kind: 'text', text: buffer.toString('utf8') };
+  const text = buffer.toString('utf8');
+  // Invalid UTF-8 decodes to replacement characters, so `text` would no longer
+  // describe the file's bytes: the editor would write the mangled version back
+  // and the plugin's disk check would see a change nobody made.
+  if (!Buffer.from(text, 'utf8').equals(buffer)) {
+    return { kind: 'opaque', reason: 'binary', bytes: buffer.length };
+  }
+  return { kind: 'text', text };
 }
 
 /**

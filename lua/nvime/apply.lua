@@ -18,6 +18,10 @@ local M = {}
 
 M.NS = vim.api.nvim_create_namespace('nvime.edit')
 
+--- Separate from `M.NS`: these marks anchor the cursor and the viewport across
+--- one edit and must survive `M.clear`, which wipes the highlight namespace.
+local VIEW_NS = vim.api.nvim_create_namespace('nvime.edit.view')
+
 --- Second fade stage lasts this fraction of the configured fade.
 local CLEAR_FACTOR = 0.6
 
@@ -31,6 +35,11 @@ local HL = {
 --- exactly as nvime left it may be undo-joined: anything else means the user
 --- typed in between, and joining would swallow their edit into `u`.
 local marked = {}
+
+--- Buffer -> the user's 'fixendofline' from before nvime first switched it
+--- off. The option is the user's, borrowed only while the file it describes
+--- genuinely has no trailing newline.
+local fixeol_saved = {}
 
 --- Live fade timers by buffer, so a second change restarts the fade instead of
 --- letting the first one clear highlights the second just drew.
@@ -168,11 +177,36 @@ local function start_fade(buf, ids, opts)
   end)
 end
 
+--- Extmark on row `lnum - 1`, which then rides the edit: rows inserted above
+--- it push it down, exactly as the content it points at moves.
+local function anchor(buf, lnum)
+  return vim.api.nvim_buf_set_extmark(buf, VIEW_NS, math.max(lnum - 1, 0), 0, {})
+end
+
+--- @return integer 1-based row the anchor ended up on
+local function anchored_lnum(buf, id, fallback)
+  local pos = vim.api.nvim_buf_get_extmark_by_id(buf, VIEW_NS, id, {})
+  vim.api.nvim_buf_del_extmark(buf, VIEW_NS, id)
+  if pos[1] == nil then
+    return fallback
+  end
+  return pos[1] + 1
+end
+
+--- Anchors each window's cursor and scroll position to the CONTENT they are
+--- on, not to their line numbers. Restoring absolute numbers across a hunk
+--- inserted above would teleport the user to a different logical line.
 local function save_views(buf)
   local views = {}
   for _, win in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == buf then
-      views[win] = vim.api.nvim_win_call(win, vim.fn.winsaveview)
+      local view = vim.api.nvim_win_call(win, vim.fn.winsaveview)
+      views[#views + 1] = {
+        win = win,
+        view = view,
+        cursor = anchor(buf, view.lnum),
+        top = anchor(buf, view.topline),
+      }
     end
   end
   return views
@@ -180,11 +214,15 @@ end
 
 local function restore_views(buf, views)
   local last = vim.api.nvim_buf_line_count(buf)
-  for win, view in pairs(views) do
-    if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == buf then
-      view.lnum = math.min(math.max(view.lnum, 1), last)
-      view.topline = math.min(math.max(view.topline, 1), last)
-      vim.api.nvim_win_call(win, function()
+  local function clamp(lnum)
+    return math.min(math.max(lnum, 1), last)
+  end
+  for _, saved in ipairs(views) do
+    local view = saved.view
+    view.lnum = clamp(anchored_lnum(buf, saved.cursor, view.lnum))
+    view.topline = clamp(anchored_lnum(buf, saved.top, view.topline))
+    if vim.api.nvim_win_is_valid(saved.win) and vim.api.nvim_win_get_buf(saved.win) == buf then
+      vim.api.nvim_win_call(saved.win, function()
         vim.fn.winrestview(view)
       end)
     end
@@ -202,11 +240,35 @@ local function open_undo_block(buf, run_id)
   local joinable = previous ~= nil
     and previous.run_id == run_id
     and previous.changedtick == vim.api.nvim_buf_get_changedtick(buf)
+  if not joinable then
+    -- Deliberately not pcall'd: a swallowed failure here merges two runs into
+    -- one undo block, which is the exact outcome this function exists to stop.
+    vim.api.nvim_buf_call(buf, function()
+      vim.cmd('let &undolevels = &undolevels')
+    end)
+    return
+  end
   pcall(vim.api.nvim_buf_call, buf, function()
     -- `undojoin` refuses right after an undo (E790); a fresh block is then the
     -- correct outcome, not a failure.
-    vim.cmd(joinable and 'undojoin' or 'let &undolevels = &undolevels')
+    vim.cmd('undojoin')
   end)
+end
+
+--- The file's exact bytes, or nil and why not.
+--- @return string|nil text
+--- @return string|nil error
+local function read_disk(path)
+  local handle, open_err = io.open(path, 'rb')
+  if handle == nil then
+    return nil, string.format('could not read %s (%s)', path, tostring(open_err))
+  end
+  local text = handle:read('a')
+  handle:close()
+  if text == nil then
+    return nil, string.format('could not read %s', path)
+  end
+  return text, nil
 end
 
 --- Rewrites the file from the buffer so Neovim's stored mtime matches disk.
@@ -222,11 +284,19 @@ local function refresh_mtime(buf)
 end
 
 --- Makes the buffer write back byte for byte. 'fixendofline' would otherwise
---- append a trailing newline the agent deliberately did not write.
+--- append a trailing newline the agent deliberately did not write — so it is
+--- switched off only while that is true, and the user's own value is given
+--- back the moment a change restores the newline.
 local function match_eol(buf, after_text)
   local _, eol = diffs.to_lines(after_text)
   if not eol then
+    if fixeol_saved[buf] == nil then
+      fixeol_saved[buf] = vim.bo[buf].fixendofline
+    end
     vim.bo[buf].fixendofline = false
+  elseif fixeol_saved[buf] ~= nil then
+    vim.bo[buf].fixendofline = fixeol_saved[buf]
+    fixeol_saved[buf] = nil
   end
   vim.bo[buf].endofline = eol
 end
@@ -259,7 +329,7 @@ end
 --- @param change table path, before/after snapshots as the sidecar sends them
 --- @param opts table run_id (string), fade_ms (integer), nofade (boolean)
 --- @return string status one of: applied, unchanged, not-open, conflict,
----   opaque, write-failed
+---   stale-buffer, external-change, opaque, write-failed
 --- @return string|nil detail
 function M.apply(change, opts)
   assert(type(change) == 'table' and type(change.path) == 'string', 'apply needs a change with a path')
@@ -273,6 +343,18 @@ function M.apply(change, opts)
     return 'opaque', 'nvime cannot diff a binary or oversized file'
   end
 
+  -- The forced write below is what suppresses W11/W12, so it also suppresses
+  -- "the file changed since you started editing". Disk must therefore still
+  -- hold one of the two sides of this change — anything else is somebody
+  -- else's newer content, and writing over it would destroy it silently.
+  local on_disk, disk_err = read_disk(change.path)
+  if on_disk == nil then
+    return 'external-change', disk_err
+  end
+  if on_disk ~= after.text and on_disk ~= before.text then
+    return 'external-change', 'the file changed on disk after the agent wrote it — nvime left it alone'
+  end
+
   local current = M.buffer_text(buf)
   if current == after.text then
     -- Already what the agent wrote: nothing to rewrite, but the stored mtime
@@ -283,7 +365,12 @@ function M.apply(change, opts)
     return err == nil and 'unchanged' or 'write-failed', err
   end
   if current ~= before.text then
-    return 'conflict', 'the buffer has unsaved edits the agent did not see'
+    if vim.bo[buf].modified then
+      return 'conflict', 'the buffer has unsaved edits the agent did not see'
+    end
+    -- Saved, yet matching neither side: something outside nvime rewrote the
+    -- file (an approved shell step, another editor) and this buffer is stale.
+    return 'stale-buffer', 'the buffer matches neither side — reload it with :e and re-run'
   end
 
   clear_fade(buf)
@@ -304,13 +391,80 @@ function M.apply(change, opts)
   return 'applied', nil
 end
 
+--- Loaded, file-backed buffers whose file sits under `root`.
+--- @return integer[]
+local function buffers_under(root)
+  local prefix = real(root) .. '/'
+  local found = {}
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].buftype == '' then
+      local name = vim.api.nvim_buf_get_name(buf)
+      if name ~= '' and vim.startswith(real(name), prefix) then
+        found[#found + 1] = buf
+      end
+    end
+  end
+  return found
+end
+
+--- Reconciles buffers under `root` with disk after something nvime could not
+--- record changed files — an approved shell step. A clean buffer is brought up
+--- to date through the same live path a recorded change takes; a dirty one is
+--- named rather than touched, because its unsaved work is the user's.
+---
+--- @param root string project root
+--- @param opts table run_id (string), fade_ms (integer), nofade (boolean)
+--- @return string[] reloaded paths
+--- @return string[] left paths that need the user (unsaved edits, or binary)
+function M.recheck(root, opts)
+  assert(type(root) == 'string' and root ~= '', 'apply.recheck needs a root')
+  assert(type(opts) == 'table' and type(opts.run_id) == 'string', 'apply.recheck needs a run id')
+  local reloaded, left = {}, {}
+  for _, buf in ipairs(buffers_under(root)) do
+    local path = vim.api.nvim_buf_get_name(buf)
+    local on_disk = read_disk(path)
+    local current = M.buffer_text(buf)
+    if on_disk ~= nil and on_disk ~= current then
+      -- Splitting a binary file into buffer lines would corrupt it on write.
+      if vim.bo[buf].modified or on_disk:find('\0', 1, true) ~= nil then
+        left[#left + 1] = path
+      else
+        local change = {
+          path = path,
+          before = { kind = 'text', text = current },
+          after = { kind = 'text', text = on_disk },
+        }
+        local status = M.apply(change, opts)
+        if status == 'applied' or status == 'unchanged' then
+          reloaded[#reloaded + 1] = path
+        else
+          left[#left + 1] = path
+        end
+      end
+    end
+  end
+  return reloaded, left
+end
+
 --- Test hook: forget the per-buffer undo bookkeeping.
 function M.reset()
   marked = {}
+  fixeol_saved = {}
   for buf in pairs(fading) do
     clear_fade(buf)
   end
   fading = {}
 end
+
+-- Per-buffer bookkeeping dies with its buffer; without this both tables grow
+-- for the life of the session and a fade timer outlives what it was drawing on.
+vim.api.nvim_create_autocmd({ 'BufDelete', 'BufWipeout' }, {
+  group = vim.api.nvim_create_augroup('nvime.apply', { clear = true }),
+  callback = function(args)
+    marked[args.buf] = nil
+    fixeol_saved[args.buf] = nil
+    clear_fade(args.buf)
+  end,
+})
 
 return M

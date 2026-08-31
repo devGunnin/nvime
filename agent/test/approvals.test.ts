@@ -56,12 +56,25 @@ describe('ApprovalGate', () => {
     assert.equal(gate.answer('nope', true), false);
   });
 
-  it('refuses to reuse an id that is still parked', async () => {
+  it('denies a reused id instead of throwing into the run', async () => {
     const gate = new ApprovalGate(5_000);
     const waiting = gate.request('a');
-    assert.throws(() => gate.request('a'), /already pending/);
+    const duplicate = await gate.request('a');
+    assert.equal(duplicate.allowed, false);
+    assert.match(duplicate.reason, /already pending/);
+    assert.equal(gate.pending, 1, 'the ask on screen is untouched');
+    assert.equal(gate.answer('a', true), true, 'and answering it still reaches the first caller');
+    assert.deepEqual(await waiting, { allowed: true, reason: 'allowed in the editor' });
+  });
+
+  it('reports whether an id is still on the editor screen', async () => {
+    const gate = new ApprovalGate(5_000);
+    assert.equal(gate.isPending('a'), false);
+    const waiting = gate.request('a');
+    assert.equal(gate.isPending('a'), true);
     gate.answer('a', false);
     await waiting;
+    assert.equal(gate.isPending('a'), false);
   });
 
   it('refuses a nonsensical deadline instead of never timing out', () => {

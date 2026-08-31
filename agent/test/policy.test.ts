@@ -61,6 +61,38 @@ describe('policy: the project-root boundary', () => {
     assert.equal(decision.kind, 'ask', 'a path with no existing leaf still resolves its existing prefix');
   });
 
+  it('asks when `..` follows a symlink that points out of the root', () => {
+    // The reviewer's probe, verbatim: `path.resolve` collapses `vendor/..`
+    // lexically to `<root>/src`, but the kernel climbs out of the link target.
+    symlinkSync(outside, join(root, 'src', 'vendor'));
+    const decision = edit(`${root}/src/vendor/../pwned.txt`);
+    assert.equal(decision.kind, 'ask', 'a `..` after a symlink escapes the root');
+    assert.equal(decision.path, join(dir, 'pwned.txt'), 'and the path it names is the real one');
+  });
+
+  it('asks for the same shape one level up, where `..` lands beside the root', () => {
+    const deep = join(outside, 'deep');
+    mkdirSync(deep, { recursive: true });
+    symlinkSync(deep, join(root, 'link'));
+    const decision = edit(`${root}/link/../pwned.txt`);
+    assert.equal(decision.kind, 'ask');
+    assert.equal(decision.path, join(outside, 'pwned.txt'));
+  });
+
+  it('asks when a chain of symlinks is walked back out of with `..`', () => {
+    mkdirSync(join(outside, 'inner'), { recursive: true });
+    symlinkSync(outside, join(root, 'a'));
+    symlinkSync(join(outside, 'inner'), join(outside, 'b'));
+    const decision = edit(`${root}/a/b/../../pwned.txt`);
+    assert.equal(decision.kind, 'ask', 'each link is followed before the next `..` applies');
+    assert.equal(decision.path, join(dir, 'pwned.txt'));
+  });
+
+  it('still allows a `..` that stays inside the root', () => {
+    const decision = edit(`${root}/src/../src/a.ts`);
+    assert.deepEqual(decision, { kind: 'allow', path: join(root, 'src', 'a.ts') });
+  });
+
   it('does not mistake a sibling whose name starts with the root for a child', () => {
     assert.equal(isWithin('/work/proj', '/work/project/file.ts'), false);
     assert.equal(isWithin('/work/proj', '/work/proj/file.ts'), true);

@@ -102,17 +102,23 @@ local function render_list()
   return lines, rows
 end
 
+--- Each rendered row carries the hunk it belongs to, so `r` works here too —
+--- the status line advertises revert in both views, and used to refuse in this
+--- one with the cursor unambiguously on a hunk.
 local function render_unified()
   local lines, rows = {}, {}
   for index, change in ipairs(view.changes) do
     local before, after, reason = texts(change)
-    local text = reason
-    if before ~= nil then
-      text = diffs.unified(relative(change.path), before, after)
-    end
-    for _, line in ipairs(vim.split(text, '\n', { plain = true })) do
-      lines[#lines + 1] = line
+    if before == nil then
+      lines[#lines + 1] = reason
       rows[#lines] = { change = index }
+    else
+      local text = diffs.unified(relative(change.path), before, after)
+      local map = diffs.unified_rows(text, diffs.hunks(before, after))
+      for at, line in ipairs(vim.split(text, '\n', { plain = true })) do
+        lines[#lines + 1] = line
+        rows[#lines] = { change = index, hunk = map[at] }
+      end
     end
     lines[#lines + 1] = ''
   end

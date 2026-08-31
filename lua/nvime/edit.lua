@@ -46,8 +46,14 @@ local STATUS_LINE = {
   ['not-open'] = { '  changed on disk: %s (%s)', 'NvimeDim' },
   opaque = { '  changed on disk, not diffable: %s (%s)', 'NvimeDim' },
   conflict = { '  ! %s (%s) has unsaved edits — left alone, revert it from <leader>nd', 'NvimeError' },
+  ['stale-buffer'] = { '  ! %s (%s) — your copy is out of date, :e to reload it', 'NvimeError' },
+  ['external-change'] = { '  ! %s (%s) — something else wrote this file; nvime did not overwrite it', 'NvimeError' },
   ['write-failed'] = { '  ! %s (%s) applied in the buffer but could not be refreshed on disk', 'NvimeError' },
 }
+
+--- Statuses that mean the change is on disk but not in the buffer, so the run
+--- summary can tell the user how many need them.
+local UNAPPLIED = { conflict = true, ['stale-buffer'] = true, ['external-change'] = true }
 
 --- `vim.fs.relpath` only exists from 0.11; nvime supports 0.10 onwards.
 local function relative_to_root(path)
@@ -91,7 +97,7 @@ local function on_applied(change)
   if state.tally ~= nil then
     state.tally.hunks = state.tally.hunks + 1
     state.tally.files[change.path] = true
-    if status == 'conflict' then
+    if UNAPPLIED[status] then
       state.tally.conflicts = state.tally.conflicts + 1
     end
   end
@@ -99,6 +105,31 @@ local function on_applied(change)
   surface():interject(string.format(spec[1], relative_to_root(change.path), status), spec[2])
   if detail ~= nil and status ~= 'unchanged' then
     surface():append('    ' .. detail, 'NvimeDim')
+  end
+end
+
+--- An approved shell step changed files nvime has no before/after for. The
+--- buffers are reconciled with disk here so they do not quietly go stale and
+--- turn the next recorded change into a conflict the user did not cause.
+local function on_external_change(params)
+  if state.root == nil then
+    return
+  end
+  local opts = config.get().edit
+  local reloaded, left = apply.recheck(state.root, {
+    run_id = params.runId or state.run_id or 'shell',
+    fade_ms = opts.fade_ms,
+    nofade = opts.nofade,
+  })
+  if #reloaded == 0 and #left == 0 then
+    return
+  end
+  surface():interject('  ' .. (params.reason or 'files changed outside nvime'), 'NvimeDim')
+  for _, path in ipairs(reloaded) do
+    surface():append('    reloaded ' .. relative_to_root(path) .. ' (not in the changeset)', 'NvimeDim')
+  end
+  for _, path in ipairs(left) do
+    surface():append('    ! ' .. relative_to_root(path) .. ' left alone — :e to reload it', 'NvimeError')
   end
 end
 
@@ -131,6 +162,8 @@ local function on_event(name, params)
     surface():interject('  ' .. (params.summary or params.tool), 'NvimeDim')
   elseif name == 'edit.applied' then
     on_applied(params)
+  elseif name == 'edit.external_change' then
+    on_external_change(params)
   elseif name == 'edit.approval' then
     on_approval(params)
   elseif name == 'edit.approval_settled' then

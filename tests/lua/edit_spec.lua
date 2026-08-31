@@ -180,6 +180,36 @@ describe('edit: live application', function()
     cleanup()
   end)
 
+  it('does not blame the user when a shell step, not they, changed the file', function()
+    local _, path = sandbox()
+    open_on(path)
+    edit.send('reformat it')
+    vim.cmd('wincmd p')
+    vim.cmd('edit ' .. vim.fn.fnameescape(path))
+    local buf = vim.api.nvim_get_current_buf()
+
+    -- An approved `prettier --write`: nvime has no before/after for it.
+    local handle = assert(io.open(path, 'wb'))
+    handle:write('def drain():\n    formatted()\n')
+    handle:close()
+    fake.subscriber('edit.external_change', {
+      id = edit.state().request_id,
+      runId = 'r1',
+      root = edit.state().root,
+      reason = 'a shell command ran; nvime did not record what it changed',
+    })
+
+    eq({ 'def drain():', '    formatted()' }, vim.api.nvim_buf_get_lines(buf, 0, -1, false))
+    ok(has_line('reloaded queue.py'), 'and the panel says so, naming it as unrecorded')
+    ok(has_line('not in the changeset'))
+
+    -- The next recorded edit now starts from what the buffer really holds.
+    agent_edits(path, 'def drain():\n    formatted()\n', 'def drain():\n    lock()\n')
+    ok(has_line('updated queue.py'), 'no phantom conflict blaming unsaved edits')
+    ok(not has_line('has unsaved edits'))
+    cleanup()
+  end)
+
   it('reports a file no buffer holds instead of silently doing nothing', function()
     local _, path = sandbox()
     open_on(path)
