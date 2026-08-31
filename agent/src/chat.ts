@@ -1,4 +1,3 @@
-import { relative } from 'node:path';
 import type {
   GetSessionMessagesOptions,
   ListSessionsOptions,
@@ -11,6 +10,7 @@ import { composePrompt, stripContextSections, type ContextBlock } from './contex
 import { subscriptionEnv, type Env } from './env.js';
 import { ProtocolError } from './protocol.js';
 import { SessionStore } from './sessions.js';
+import { readUsage, textDelta, toolCalls, type RunUsage } from './stream.js';
 
 /**
  * Chat is read-only by construction: the model gets research tools and nothing
@@ -31,8 +31,6 @@ export const CHAT_DENIED_TOOLS = [
 
 /** How deep `list` scans the SDK's sessions; a full page means truncation. */
 export const LIST_SCAN_LIMIT = 200;
-
-/** Seam for P2/P3: `edit.*` and `big.*` build their own options here. */
 
 export interface SdkBindings {
   query: (params: { prompt: string; options?: Options }) => AsyncIterable<SDKMessage>;
@@ -56,7 +54,7 @@ export interface ChatDone {
   sessionId: string;
   text: string;
   numTurns: number;
-  usage: { input: number; output: number; cacheRead: number; cacheCreation: number };
+  usage: RunUsage;
   costUsd: number;
 }
 
@@ -193,8 +191,8 @@ export class ChatService {
               'claude is installed but not logged in — run `claude` in a terminal and sign in',
             );
           }
-          for (const summary of toolSummaries(message.message, params.root)) {
-            this.#emit('chat.tool', { id: requestId, ...summary });
+          for (const call of toolCalls(message.message, params.root)) {
+            this.#emit('chat.tool', { id: requestId, tool: call.tool, summary: call.summary });
           }
           continue;
         }
@@ -262,71 +260,6 @@ export class ChatService {
 function toSummary(info: SDKSessionInfo): SessionSummary {
   const title = info.customTitle ?? info.firstPrompt ?? info.summary ?? info.sessionId;
   return { sessionId: info.sessionId, title, lastModified: info.lastModified };
-}
-
-function readUsage(usage: unknown): ChatDone['usage'] {
-  const u = (usage ?? {}) as Record<string, unknown>;
-  const n = (key: string): number => (typeof u[key] === 'number' ? (u[key] as number) : 0);
-  return {
-    input: n('input_tokens'),
-    output: n('output_tokens'),
-    cacheRead: n('cache_read_input_tokens'),
-    cacheCreation: n('cache_creation_input_tokens'),
-  };
-}
-
-/** Text of a `content_block_delta` stream event, or null for every other event. */
-export function textDelta(event: unknown): string | null {
-  const e = event as { type?: string; delta?: { type?: string; text?: string } } | null;
-  if (e === null || e.type !== 'content_block_delta') return null;
-  if (e.delta?.type !== 'text_delta' || typeof e.delta.text !== 'string') return null;
-  return e.delta.text;
-}
-
-/** One dim status line per tool call, e.g. `reading src/foo.py`. */
-export function toolSummaries(
-  message: unknown,
-  cwd: string,
-): Array<{ tool: string; summary: string }> {
-  const content = (message as { content?: unknown } | null)?.content;
-  if (!Array.isArray(content)) return [];
-  const out: Array<{ tool: string; summary: string }> = [];
-  for (const block of content) {
-    const b = block as { type?: string; name?: string; input?: Record<string, unknown> };
-    if (b.type !== 'tool_use' || typeof b.name !== 'string') continue;
-    out.push({ tool: b.name, summary: describeTool(b.name, b.input ?? {}, cwd) });
-  }
-  return out;
-}
-
-function describeTool(name: string, input: Record<string, unknown>, cwd: string): string {
-  const text = (key: string): string | null =>
-    typeof input[key] === 'string' && input[key] !== '' ? (input[key] as string) : null;
-  const shortPath = (value: string): string => relative(cwd, value) || value;
-  switch (name) {
-    case 'Read': {
-      const path = text('file_path');
-      return path === null ? 'reading a file' : `reading ${shortPath(path)}`;
-    }
-    case 'Glob': {
-      const pattern = text('pattern');
-      return pattern === null ? 'listing files' : `globbing ${pattern}`;
-    }
-    case 'Grep': {
-      const pattern = text('pattern');
-      return pattern === null ? 'searching' : `searching for ${pattern}`;
-    }
-    case 'WebFetch': {
-      const url = text('url');
-      return url === null ? 'fetching a page' : `fetching ${url}`;
-    }
-    case 'WebSearch': {
-      const q = text('query');
-      return q === null ? 'searching the web' : `searching the web for ${q}`;
-    }
-    default:
-      return `using ${name}`;
-  }
 }
 
 /** Best-effort text of a stored transcript message; shapes vary by producer. */

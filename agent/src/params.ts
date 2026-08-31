@@ -39,6 +39,12 @@ export function optionalPositiveInt(
   return value;
 }
 
+export function requireBoolean(params: Record<string, unknown>, key: string): boolean {
+  const value = params[key];
+  if (typeof value !== 'boolean') reject(`params.${key} must be a boolean`);
+  return value;
+}
+
 export function requireArray(params: Record<string, unknown>, key: string): unknown[] {
   const value = params[key];
   if (value === undefined || value === null) return [];

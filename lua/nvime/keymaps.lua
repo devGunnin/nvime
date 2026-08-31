@@ -6,16 +6,36 @@
 --- exact failure this bans.
 local M = {}
 
+--- The approval float's keys. `approval.lua` binds exactly this table and
+--- `M.all` lists exactly this table, so the two cannot drift and leave the
+--- leaf-only check blind to a live mapping.
+M.APPROVAL = {
+  { lhs = 'y', allow = true, desc = 'nvime: allow once' },
+  { lhs = 'Y', allow = true, desc = 'nvime: allow once' },
+  { lhs = 'n', allow = false, desc = 'nvime: deny' },
+  { lhs = 'N', allow = false, desc = 'nvime: deny' },
+  { lhs = '<Esc>', allow = false, desc = 'nvime: deny' },
+}
+
 --- @param opts table the resolved config
 --- @return table[] entries with scope, mode, lhs, desc
 function M.all(opts)
   local keymaps = opts.keymaps
-  return {
+  local entries = {
     { scope = 'global', mode = 'n', lhs = keymaps.chat, desc = 'nvime: open chat' },
     { scope = 'global', mode = 'x', lhs = keymaps.send_selection, desc = 'nvime: send the selection' },
+    { scope = 'global', mode = 'n', lhs = keymaps.edit, desc = 'nvime: edit this file' },
+    { scope = 'global', mode = 'x', lhs = keymaps.edit, desc = 'nvime: edit the selection' },
+    { scope = 'global', mode = 'n', lhs = keymaps.changeset, desc = 'nvime: review the changeset' },
     { scope = 'panel-chat', mode = 'n', lhs = '<C-r>', desc = 'nvime: pick a session' },
     { scope = 'panel-chat', mode = 'n', lhs = '<C-c>', desc = 'nvime: stop the running turn' },
     { scope = 'panel-chat', mode = 'n', lhs = 'q', desc = 'nvime: close the chat panel' },
+    { scope = 'panel-edit', mode = 'n', lhs = '<C-c>', desc = 'nvime: stop the edit run' },
+    { scope = 'panel-edit', mode = 'n', lhs = 'q', desc = 'nvime: close the edit panel' },
+    { scope = 'panel-changeset', mode = 'n', lhs = '<CR>', desc = 'nvime: open the file at this hunk' },
+    { scope = 'panel-changeset', mode = 'n', lhs = 'r', desc = 'nvime: revert this hunk' },
+    { scope = 'panel-changeset', mode = 'n', lhs = 'd', desc = 'nvime: toggle the unified diff' },
+    { scope = 'panel-changeset', mode = 'n', lhs = 'q', desc = 'nvime: close the changeset' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<CR>', desc = 'nvime: send the prompt' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<C-r>', desc = 'nvime: pick a session' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<C-c>', desc = 'nvime: stop the running turn' },
@@ -24,6 +44,10 @@ function M.all(opts)
     { scope = 'picker', mode = 'n', lhs = 'q', desc = 'nvime: dismiss' },
     { scope = 'picker', mode = 'n', lhs = '<Esc>', desc = 'nvime: dismiss' },
   }
+  for _, key in ipairs(M.APPROVAL) do
+    entries[#entries + 1] = { scope = 'approval', mode = 'n', lhs = key.lhs, desc = key.desc }
+  end
+  return entries
 end
 
 --- Resolves `<leader>` and friends to the keys Neovim actually matches on.
@@ -69,11 +93,32 @@ function M.apply(opts)
     return entries
   end
   local chat = require('nvime.chat')
+  local edit = require('nvime.edit')
   vim.keymap.set('n', opts.keymaps.chat, chat.open, { silent = true, desc = 'nvime: open chat' })
-  vim.keymap.set('x', opts.keymaps.send_selection, function()
-    chat.send_selection()
-    vim.api.nvim_feedkeys(M.normalize('<Esc>'), 'n', false)
-  end, { silent = true, desc = 'nvime: send the selection' })
+  vim.keymap.set('n', opts.keymaps.edit, edit.instruct, { silent = true, desc = 'nvime: edit this file' })
+  vim.keymap.set('n', opts.keymaps.changeset, function()
+    require('nvime.changeset').open()
+  end, { silent = true, desc = 'nvime: review the changeset' })
+  -- The selection has to be read before leaving visual mode, so each of these
+  -- captures it first and drops back to normal mode afterwards.
+  local function from_selection(fn)
+    return function()
+      fn()
+      vim.api.nvim_feedkeys(M.normalize('<Esc>'), 'n', false)
+    end
+  end
+  vim.keymap.set(
+    'x',
+    opts.keymaps.send_selection,
+    from_selection(chat.send_selection),
+    { silent = true, desc = 'nvime: send the selection' }
+  )
+  vim.keymap.set(
+    'x',
+    opts.keymaps.edit,
+    from_selection(edit.instruct_selection),
+    { silent = true, desc = 'nvime: edit the selection' }
+  )
   return entries
 end
 

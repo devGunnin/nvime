@@ -8,10 +8,16 @@ if vim.fn.has('nvim-0.10') == 0 then
   return
 end
 
---- Subcommands of the single `:Nvime` entry point. P2/P3 add `edit` and `big`.
+--- Subcommands of the single `:Nvime` entry point. P3 adds `big`.
 local subcommands = {
   chat = function()
     require('nvime').chat()
+  end,
+  edit = function()
+    require('nvime').edit()
+  end,
+  diff = function()
+    require('nvime').changeset()
   end,
   cancel = function()
     require('nvime').cancel()

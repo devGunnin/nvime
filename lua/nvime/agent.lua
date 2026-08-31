@@ -53,20 +53,17 @@ local function preflight()
   return nil
 end
 
---- The configured overrides the sidecar needs, or nil when there are none.
+--- The settings the sidecar reads from its environment. `vim.system` merges
+--- this over the inherited environment, so only what nvime configures appears.
 --- `:checkhealth` probes with this too, so it cannot contradict a working chat.
 function M.sidecar_env()
   local opts = config.get()
-  local env = {}
+  local env = { NVIME_APPROVAL_TIMEOUT_MS = tostring(opts.edit.approval_timeout_ms) }
   if opts.agent.claude ~= nil then
     env.NVIME_CLAUDE_PATH = opts.agent.claude
   end
   if opts.agent.model ~= nil then
     env.NVIME_MODEL = opts.agent.model
-  end
-  -- Not `cond and nil or env`: in Lua that always yields the fallback.
-  if next(env) == nil then
-    return nil
   end
   return env
 end
