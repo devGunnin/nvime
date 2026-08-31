@@ -60,23 +60,63 @@ local function block(overrides)
     state = 'open',
     reopened = false,
     signatures = { 'sig1' },
+    rounds = {},
   }, overrides or {})
 end
 
-local function session(blocks)
-  return {
+--- A graded round, as the sidecar records it.
+local function round(grade, overrides)
+  return vim.tbl_extend('force', {
+    at = 1,
+    answer = 'my answer',
+    result = { grade = grade, verdict = 'scored ' .. grade, hint = '', followup = '' },
+  }, overrides or {})
+end
+
+--- Runs `fn` with vim.notify captured, and returns what it said.
+local function with_notices(fn)
+  local seen = {}
+  local real = vim.notify
+  vim.notify = function(message)
+    seen[#seen + 1] = message
+  end
+  local finished, err = pcall(fn)
+  vim.notify = real
+  if not finished then
+    error(err, 0)
+  end
+  return seen
+end
+
+--- True when any captured notice matches `pattern`.
+local function said(seen, pattern)
+  return vim.iter(seen):any(function(message)
+    return message:match(pattern) ~= nil
+  end)
+end
+
+local function session(blocks, overrides)
+  local open = 0
+  for _, entry in ipairs(blocks) do
+    if entry.state == 'open' then
+      open = open + 1
+    end
+  end
+  return vim.tbl_extend('force', {
     id = 'abc123',
     title = 'backoff',
     display = 'reviewing',
     state = 'reviewing',
+    difficulty = 'medium',
     detached = false,
     hasDiff = true,
-    worktree = { path = '/tmp/nvime-wt', baseCommit = 'abcdef', baseBranch = 'main' },
-    counts = { total = #blocks, open = 1, substantial = 1 },
+    worktree = { path = '/tmp/nvime-wt' },
+    base = { commit = 'abcdef', branch = 'main' },
+    counts = { total = #blocks, open = open, substantial = 1, defended = 1 - open },
     blocks = blocks,
     conversation = {},
     transitions = {},
-  }
+  }, overrides or {})
 end
 
 local function open_review(blocks)
@@ -271,3 +311,199 @@ end)
 
 package.loaded['nvime.agent'] = real_agent
 package.loaded['nvime.threads'] = nil
+
+describe('the comprehension gate in the review', function()
+  it('opens a paste-blocked answer box and sends what was typed', function()
+    open_review({ block() })
+    press(threads.view().tree_buf, 'a')
+    local float = compose.current()
+    ok(float ~= nil, 'a opens an answer box')
+    vim.fn.setreg('"', 'the diff, pasted back')
+    local refused = with_notices(function()
+      ok(press(float.buf, 'p'), 'the box binds the puts')
+    end)
+    ok(said(refused, 'type it'), vim.inspect(refused))
+    eq({ '' }, vim.api.nvim_buf_get_lines(float.buf, 0, -1, false), 'a defense is not pasteable')
+
+    vim.api.nvim_buf_set_lines(float.buf, 0, -1, false, { 'it spreads retries across the whole window' })
+    fake.replies['big.answer'] =
+      { result = { session = session({ block({ state = 'resolved', rounds = { round(87) } }) }) } }
+    with_notices(function()
+      press(float.buf, '<CR>')
+    end)
+
+    local sent = vim.iter(fake.requests):find(function(request)
+      return request.method == 'big.answer'
+    end)
+    ok(sent ~= nil, 'the answer reaches the grader')
+    eq('abc123', sent.params.sessionId)
+    eq({ { blockId = 'b1', text = 'it spreads retries across the whole window' } }, sent.params.answers)
+    threads.close()
+  end)
+
+  it('refuses to grade what has nothing to defend', function()
+    open_review({ block({ substantial = false, state = 'resolved' }) })
+    local seen = with_notices(function()
+      press(threads.view().tree_buf, 'a')
+    end)
+    ok(said(seen, 'needs no defense'), vim.inspect(seen))
+    eq(nil, compose.current(), 'and no box opens')
+    threads.close()
+
+    open_review({ block({ state = 'resolved' }) })
+    seen = with_notices(function()
+      press(threads.view().tree_buf, 'a')
+    end)
+    ok(said(seen, 'already cleared'), vim.inspect(seen))
+    threads.close()
+  end)
+
+  it('renders every round: the grade, the hint and the follow-up', function()
+    local rounds = {
+      round(41, {
+        answer = 'it retries',
+        result = { grade = 41, verdict = 'too generic', hint = 'what collides?', followup = 'and self.cap?' },
+      }),
+      round(88, { answer = 'full jitter spreads the whole window' }),
+    }
+    open_review({ block({ state = 'resolved', rounds = rounds }) })
+    local pane = table.concat(pane_text(), '\n')
+    ok(pane:match('── the gate ──') ~= nil, pane)
+    ok(pane:match('you · it retries') ~= nil, pane)
+    ok(pane:match('41 · too generic') ~= nil, pane)
+    ok(pane:match('hint: what collides%?') ~= nil, pane)
+    ok(pane:match('next: and self%.cap%?') ~= nil, pane)
+    ok(pane:match('88 · scored 88') ~= nil, pane)
+    threads.close()
+  end)
+
+  it('says a round was not graded rather than showing a score nobody gave', function()
+    local ungraded = { at = 1, answer = 'my answer', ungraded = 'the grading turn did not return grades' }
+    open_review({ block({ rounds = { ungraded } }) })
+    local pane = table.concat(pane_text(), '\n')
+    ok(pane:match('! the grading turn did not return grades') ~= nil, pane)
+    ok(pane:match('stays open') ~= nil, pane)
+    ok(pane:match('%d+ · ') == nil, 'and no grade is invented')
+    threads.close()
+  end)
+
+  it('carries the pending follow-up into the next answer box', function()
+    local pending = round(30, {
+      result = { grade = 30, verdict = 'vague', hint = 'think about restarts', followup = 'what happens on restart?' },
+    })
+    eq('what happens on restart?', threads.followup(block({ rounds = { pending } })))
+    eq(nil, threads.followup(block({ rounds = { round(90) } })), 'a cleared thread asks nothing')
+    eq(nil, threads.followup(block()))
+
+    open_review({ block({ rounds = { pending } }) })
+    press(threads.view().tree_buf, 'a')
+    local win = compose.current().win
+    ok(vim.wo[win].winbar:match('what happens on restart%?') ~= nil, vim.wo[win].winbar)
+    compose.dismiss()
+    threads.close()
+  end)
+
+  it('reports what a round earned, off the session the sidecar returned', function()
+    local passed = session({ block({ state = 'resolved', rounds = { round(87) } }) })
+    ok(said(
+      with_notices(function()
+        threads.report_grade(passed, 'b1')
+      end),
+      'cleared %(87%)'
+    ))
+
+    local failed = session({
+      block({
+        rounds = { round(41, { result = { grade = 41, verdict = 'v', hint = 'what collides?', followup = 'q' } }) },
+      }),
+    })
+    ok(said(
+      with_notices(function()
+        threads.report_grade(failed, 'b1')
+      end),
+      'what collides%?'
+    ))
+
+    local ungraded = session({ block({ rounds = { { at = 1, answer = 'x', ungraded = 'the CLI died' } } }) })
+    ok(said(
+      with_notices(function()
+        threads.report_grade(ungraded, 'b1')
+      end),
+      'the CLI died'
+    ))
+  end)
+end)
+
+describe('the merge key', function()
+  it('asks the sidecar rather than deciding for itself', function()
+    open_review({ block({ state = 'resolved' }) })
+    fake.replies['big.merge'] = {
+      result = {
+        merged = true,
+        refusals = {},
+        session = session({ block({ state = 'resolved' }) }, {
+          display = 'merged',
+          state = 'merged',
+          merge = { branch = 'nvime/big/backoff', commit = 'deadbeefcafe', baseBranch = 'main' },
+        }),
+      },
+    }
+    with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    local sent = vim.iter(fake.requests):find(function(request)
+      return request.method == 'big.merge'
+    end)
+    ok(sent ~= nil, 'M is a request, not a local decision')
+    eq('abc123', sent.params.sessionId)
+    eq(false, sent.params.cleanup, 'the clone is kept unless the config says otherwise')
+    threads.close()
+  end)
+
+  it('renders every refusal, and names the rebase when the base moved', function()
+    local seen = with_notices(function()
+      threads.report_refusals({
+        { code = 'threads-open', message = '2 threads still need clearing' },
+        { code = 'base-moved', message = 'main has moved since the build started' },
+      })
+    end)
+    ok(said(seen, '2 threads still need clearing'), vim.inspect(seen))
+    ok(said(seen, 'main has moved'), vim.inspect(seen))
+    ok(said(seen, 'press R to rebase'), vim.inspect(seen))
+
+    seen = with_notices(function()
+      threads.report_refusals({ { code = 'dirty-tree', message = '1 tracked file has uncommitted changes' } })
+    end)
+    ok(said(seen, 'uncommitted changes'), vim.inspect(seen))
+    ok(not said(seen, 'press R'), 'the rebase is only offered when the base actually moved')
+  end)
+
+  it('sends R as a rebase on this session', function()
+    open_review({ block() })
+    fake.replies['big.rebase'] = { result = { session = session({ block() }) } }
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    local sent = vim.iter(fake.requests):find(function(request)
+      return request.method == 'big.rebase'
+    end)
+    ok(sent ~= nil)
+    eq('abc123', sent.params.sessionId)
+    threads.close()
+  end)
+
+  it('says what is left before the merge, in the words the gate uses', function()
+    eq(
+      '1/3 defended · 2 open · merge locked',
+      threads.gate_status({ counts = { total = 5, open = 2, substantial = 3, defended = 1 } })
+    )
+    eq(
+      '3/3 defended · M merges into your branch',
+      threads.gate_status({ counts = { total = 5, open = 0, substantial = 3, defended = 3 } })
+    )
+    eq(
+      'merged into main as deadbeef',
+      threads.gate_status({ display = 'merged', merge = { baseBranch = 'main', commit = 'deadbeefcafe' } })
+    )
+  end)
+end)

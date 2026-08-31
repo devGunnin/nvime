@@ -896,3 +896,453 @@ describe('a triage window too small for the whole diff', () => {
     assert.equal(covered.length, 5, 'every file still lands in exactly one thread');
   });
 });
+
+/** A grading turn that answers with the grades it is handed, in one round. */
+function scriptGrades(grades: Array<{ threadId: string; grade: number; followup?: string }>): void {
+  turns.push({
+    frames: [
+      frames.init(),
+      frames.result('graded', {
+        grades: grades.map((entry) => ({
+          threadId: entry.threadId,
+          grade: entry.grade,
+          verdict: `scored ${entry.grade}`,
+          hint: entry.grade >= 70 ? '' : 'what fails without it?',
+          followup: entry.followup ?? (entry.grade >= 70 ? '' : 'and what does the cap protect?'),
+        })),
+      }),
+    ],
+  });
+}
+
+/** A reviewing session with exactly one open substantial thread. */
+async function reviewing(
+  difficulty: 'vibe' | 'easy' | 'medium' | 'extreme' = 'medium',
+  write = 'def main():\n    print("v1")\n',
+): Promise<SessionView> {
+  const created = service.create(repo, 'version flag', difficulty);
+  turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'here it is', spec: SPEC })] });
+  await service.intake(1, { root: repo, id: created.id, message: 'add a --version flag' });
+  await service.approve(repo, created.id);
+  scriptBuild([{ title: 'version flag', substantial: true }], write);
+  return service.build(2, { root: repo, id: created.id });
+}
+
+describe('the comprehension gate', () => {
+  it('clears a thread on a grade at or above the threshold, and records the round', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 70 }]);
+    const graded = await service.answer(3, {
+      root: repo,
+      id: view.id,
+      answers: [{ blockId: thread, text: 'it prints the version and exits before the arg parse' }],
+    });
+
+    const block = graded.blocks[0];
+    assert.equal(block?.state, 'resolved');
+    assert.equal(graded.display, 'mergeable');
+    assert.equal(block?.rounds.length, 1);
+    assert.equal(block?.rounds[0]?.result?.grade, 70);
+    assert.equal(block?.rounds[0]?.answer, 'it prints the version and exits before the arg parse');
+  });
+
+  it('keeps a thread open below the threshold and carries the follow-up into the next round', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 69, followup: 'what happens with no args at all?' }]);
+    const first = await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'it adds a flag' }] });
+    assert.equal(first.blocks[0]?.state, 'open', 'one under the bar is under the bar');
+    assert.equal(first.blocks[0]?.rounds[0]?.result?.followup, 'what happens with no args at all?');
+
+    scriptGrades([{ threadId: thread, grade: 95 }]);
+    await service.answer(4, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'with no args it still parses normally' }] });
+    const second = calls[calls.length - 1]?.prompt ?? '';
+    assert.match(second, /the follow-up they had to address: what happens with no args at all\?/);
+    assert.match(second, /earlier answer: it adds a flag/, 'the grader sees the round it already judged');
+    assert.equal(service.open(repo, view.id).blocks[0]?.state, 'resolved');
+  });
+
+  it('never auto-resolves on a grade it could not read', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    turns.push({ frames: [frames.init(), frames.result('a fine answer, 100/100', { verdict: 'great' })] });
+    const graded = await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'my answer' }] });
+
+    const round = graded.blocks[0]?.rounds[0];
+    assert.equal(graded.blocks[0]?.state, 'open');
+    assert.equal(round?.result, null);
+    assert.match(round?.result === null ? round.ungraded : '', /did not return grades/);
+    assert.equal(round?.answer, 'my answer', 'and the answer they typed is not thrown away');
+    assert.ok(events.some((entry) => entry.event === 'big.notice' && /nothing was graded/.test(String(entry.params.text))));
+  });
+
+  it('leaves a thread the grader skipped open, and says so on the record', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: 'some-other-thread', grade: 100 }]);
+    const graded = await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'my answer' }] });
+    const round = graded.blocks[0]?.rounds[0];
+    assert.equal(graded.blocks[0]?.state, 'open');
+    assert.match(round?.result === null ? round.ungraded : '', /no verdict for this thread/);
+  });
+
+  it('survives a grading turn that fails outright, keeping the answer', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    turns.push({
+      frames: () => {
+        throw new Error('the CLI died');
+      },
+    });
+    const graded = await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'my answer' }] });
+    assert.equal(graded.blocks[0]?.state, 'open');
+    assert.equal(graded.blocks[0]?.rounds[0]?.answer, 'my answer');
+  });
+
+  it('grades read-only, in the build clone, resuming its own session', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 40 }]);
+    await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'first' }] });
+    const first = calls[calls.length - 1]?.options;
+    assert.equal(first?.cwd, view.worktree?.path, 'the grader can check a claim against the code');
+    assert.ok(Array.isArray(first?.tools) && !first.tools.includes('Write'), 'a grader may not write');
+    assert.equal(first?.resume, undefined, 'the first round starts a session rather than resuming one');
+
+    scriptGrades([{ threadId: thread, grade: 90 }]);
+    await service.answer(4, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'second' }] });
+    assert.equal(calls[calls.length - 1]?.options.resume, SESSION, 'later rounds remember what was asked');
+  });
+
+  it('puts the whole round in ONE turn', async () => {
+    const view = await reviewing();
+    turns.push({
+      act: async (options) => {
+        writeFileSync(join(String(options.cwd), 'other.py'), 'x = 1\n');
+      },
+      frames: [frames.init(), frames.result('more')],
+    });
+    turns.push({
+      frames: triageByFile([
+        { title: 'one', files: ['tool.py'], substantial: true },
+        { title: 'two', files: ['other.py'], substantial: true },
+      ]),
+    });
+    const both = await service.revise(3, { root: repo, id: view.id, blockId: view.blocks[0]?.id ?? '', comment: 'more' });
+    assert.equal(both.counts.open, 2);
+
+    const before = calls.length;
+    scriptGrades(both.blocks.map((block) => ({ threadId: block.id, grade: 80 })));
+    const graded = await service.answer(4, {
+      root: repo,
+      id: view.id,
+      answers: both.blocks.map((block) => ({ blockId: block.id, text: `about ${block.title}` })),
+    });
+    assert.equal(calls.length - before, 1, 'a round is one grading turn, however many threads it covers');
+    assert.equal(graded.counts.open, 0);
+    assert.match(calls[calls.length - 1]?.prompt ?? '', /about one/);
+    assert.match(calls[calls.length - 1]?.prompt ?? '', /about two/);
+  });
+
+  it('states the session threshold in the prompt it grades against', async () => {
+    const view = await reviewing('extreme');
+    scriptGrades([{ threadId: view.blocks[0]?.id ?? '', grade: 95 }]);
+    await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: view.blocks[0]?.id ?? '', text: 'x' }] });
+    assert.match(calls[calls.length - 1]?.prompt ?? '', /pass mark for this session is 90/);
+  });
+
+  it('refuses to grade what there is nothing to defend about', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    for (const bad of [
+      { answers: [], match: /nothing to grade/ },
+      { answers: [{ blockId: 'nope', text: 'x' }], match: /no thread 'nope'/ },
+      { answers: [{ blockId: thread, text: '   ' }], match: /is empty/ },
+      { answers: [{ blockId: thread, text: 'x'.repeat(8001) }], match: /at most 8000 characters/ },
+      { answers: [{ blockId: thread, text: 'a' }, { blockId: thread, text: 'b' }], match: /answered twice/ },
+    ]) {
+      await assert.rejects(
+        () => service.answer(3, { root: repo, id: view.id, answers: bad.answers }),
+        (error: unknown) => error instanceof ProtocolError && bad.match.test(error.message),
+        JSON.stringify(bad.answers),
+      );
+    }
+    assert.equal(calls.length, 3, 'none of them reached a grader');
+  });
+
+  it('refuses to grade a thread that is already cleared, or is only trivia', async () => {
+    const created = service.create(repo, 'mixed', 'medium');
+    turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ok', spec: SPEC })] });
+    await service.intake(1, { root: repo, id: created.id, message: 'go' });
+    await service.approve(repo, created.id);
+    turns.push({
+      act: async (options) => {
+        writeFileSync(join(String(options.cwd), 'tool.py'), 'def main():\n    print("v1")\n');
+        writeFileSync(join(String(options.cwd), 'notes.md'), 'a note\n');
+      },
+      frames: [frames.init(), frames.result('built')],
+    });
+    turns.push({
+      frames: triageByFile([
+        { title: 'logic', files: ['tool.py'], substantial: true },
+        { title: 'notes', files: ['notes.md'], substantial: false },
+      ]),
+    });
+    const view = await service.build(2, { root: repo, id: created.id });
+    const trivia = view.blocks.find((block) => !block.substantial)?.id ?? '';
+    await assert.rejects(
+      () => service.answer(3, { root: repo, id: view.id, answers: [{ blockId: trivia, text: 'x' }] }),
+      (error: unknown) => error instanceof ProtocolError && /already cleared/.test(error.message),
+    );
+    // Re-opened by hand, it is open — and still not something to defend.
+    service.toggleBlock(repo, view.id, trivia, false);
+    await assert.rejects(
+      () => service.answer(4, { root: repo, id: view.id, answers: [{ blockId: trivia, text: 'x' }] }),
+      (error: unknown) => error instanceof ProtocolError && /needs no defense/.test(error.message),
+    );
+  });
+
+  it('runs no gate at all on `vibe`, and lets a thread be cleared by hand there', async () => {
+    const view = await reviewing('vibe');
+    assert.equal(view.blocks[0]?.state, 'resolved', 'nothing to defend, so nothing is open');
+    assert.equal(view.display, 'mergeable');
+    await assert.rejects(
+      () => service.answer(3, { root: repo, id: view.id, answers: [{ blockId: view.blocks[0]?.id ?? '', text: 'x' }] }),
+      (error: unknown) => error instanceof ProtocolError && /runs no gate/.test(error.message),
+    );
+    const reopened = service.toggleBlock(repo, view.id, view.blocks[0]?.id ?? '', false);
+    assert.equal(reopened.blocks[0]?.state, 'open');
+    assert.equal(service.toggleBlock(repo, view.id, view.blocks[0]?.id ?? '', true).blocks[0]?.state, 'resolved');
+  });
+
+  it('fixes the difficulty once the spec is approved', async () => {
+    const created = service.create(repo, 'version flag', 'easy');
+    assert.equal(service.setDifficulty(repo, created.id, 'extreme').difficulty, 'extreme');
+    turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ok', spec: SPEC })] });
+    await service.intake(1, { root: repo, id: created.id, message: 'go' });
+    await service.approve(repo, created.id);
+    assert.throws(
+      () => service.setDifficulty(repo, created.id, 'vibe'),
+      (error: unknown) => error instanceof ProtocolError && /fixed once the spec is approved/.test(error.message),
+    );
+  });
+
+  it('carries a defended thread forward across a revision, and re-opens changed content', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 90 }]);
+    await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'I understand it' }] });
+
+    // A revision that adds a second file: the defended hunk is untouched and
+    // keeps its record; the new one has never been defended.
+    turns.push({
+      act: async (options) => {
+        writeFileSync(join(String(options.cwd), 'extra.py'), 'y = 2\n');
+      },
+      frames: [frames.init(), frames.result('added it')],
+    });
+    turns.push({
+      frames: triageByFile([
+        { title: 'version flag', files: ['tool.py'], substantial: true },
+        { title: 'extra', files: ['extra.py'], substantial: true },
+      ]),
+    });
+    const revised = await service.revise(4, { root: repo, id: view.id, blockId: thread, comment: 'add extra.py' });
+
+    const kept = revised.blocks.find((block) => block.files.includes('tool.py'));
+    const fresh = revised.blocks.find((block) => block.files.includes('extra.py'));
+    assert.equal(kept?.state, 'resolved', 'content nobody changed stays defended');
+    assert.equal(kept?.rounds.length, 1, 'and keeps the defense that cleared it');
+    assert.equal(fresh?.state, 'open');
+    assert.deepEqual(fresh?.rounds, []);
+  });
+});
+
+describe('the local merge', () => {
+  /** Clears every open thread so the merge has nothing left to refuse on. */
+  async function cleared(write?: string): Promise<SessionView> {
+    const view = write === undefined ? await reviewing() : await reviewing('medium', write);
+    scriptGrades(view.blocks.filter((block) => block.state === 'open').map((block) => ({ threadId: block.id, grade: 100 })));
+    return service.answer(3, {
+      root: repo,
+      id: view.id,
+      answers: view.blocks.filter((block) => block.state === 'open').map((block) => ({ blockId: block.id, text: 'I understand it' })),
+    });
+  }
+
+  it('lands the reviewed diff on the branch the build started from', async () => {
+    const base = gitIn(repo, 'rev-parse', 'HEAD');
+    const view = await cleared();
+    const result = await service.merge(4, { root: repo, id: view.id });
+
+    assert.equal(result.merged, true);
+    assert.deepEqual(result.refusals, []);
+    assert.equal(result.session.display, 'merged');
+    assert.equal(gitIn(repo, 'rev-parse', 'main'), result.session.merge?.commit);
+    assert.equal(gitIn(repo, `rev-parse`, `${result.session.merge?.commit}^`), base);
+    assert.equal(readFileSync(join(repo, 'tool.py'), 'utf8'), 'def main():\n    print("v1")\n');
+    assert.equal(gitIn(repo, 'status', '--porcelain'), '');
+    assert.match(result.session.merge?.branch ?? '', /^nvime\/big\//);
+    assert.equal(gitIn(repo, 'log', '-1', '--format=%s'), 'version flag');
+  });
+
+  it('refuses while a thread is still open, and touches nothing', async () => {
+    const view = await reviewing();
+    const before = gitIn(repo, 'rev-parse', 'main');
+    const result = await service.merge(4, { root: repo, id: view.id });
+    assert.equal(result.merged, false);
+    assert.deepEqual(result.refusals.map((refusal) => refusal.code), ['threads-open']);
+    assert.equal(gitIn(repo, 'rev-parse', 'main'), before);
+    assert.equal(gitIn(repo, 'branch', '--list', 'nvime/big/version-flag'), '', 'no branch is created either');
+  });
+
+  it('refuses a dirty operator tree before touching anything', async () => {
+    const view = await cleared();
+    writeFileSync(join(repo, 'README.md'), 'edited while reviewing\n');
+    const result = await service.merge(4, { root: repo, id: view.id });
+    assert.deepEqual(result.refusals.map((refusal) => refusal.code), ['dirty-tree']);
+    assert.equal(readFileSync(join(repo, 'README.md'), 'utf8'), 'edited while reviewing\n', 'their edit survives');
+  });
+
+  it('refuses, naming the rebase, when the base branch moved', async () => {
+    const view = await cleared();
+    writeFileSync(join(repo, 'other.txt'), 'someone else\n');
+    execFileSync('git', ['add', '-A'], { cwd: repo });
+    execFileSync('git', ['commit', '-qm', 'meanwhile'], { cwd: repo });
+    const moved = gitIn(repo, 'rev-parse', 'main');
+
+    const result = await service.merge(4, { root: repo, id: view.id });
+    assert.deepEqual(result.refusals.map((refusal) => refusal.code), ['base-moved']);
+    assert.equal(gitIn(repo, 'rev-parse', 'main'), moved);
+  });
+
+  it('will not merge the same change twice', async () => {
+    const view = await cleared();
+    await service.merge(4, { root: repo, id: view.id });
+    const again = await service.merge(5, { root: repo, id: view.id });
+    assert.equal(again.merged, false);
+    // The base moved too — it moved because the first merge landed there.
+    assert.deepEqual(again.refusals.map((refusal) => refusal.code), ['already-merged', 'base-moved']);
+  });
+
+  it('answers what stands in the way without changing anything', async () => {
+    const view = await reviewing();
+    const before = gitIn(repo, 'show-ref');
+    const checked = await service.mergeCheck(repo, view.id);
+    assert.deepEqual(checked.refusals.map((refusal) => refusal.code), ['threads-open']);
+    assert.equal(gitIn(repo, 'show-ref'), before);
+  });
+
+  it('keeps the build clone by default and drops it when asked', async () => {
+    const first = await cleared();
+    const keptPath = first.worktree?.path ?? '';
+    await service.merge(4, { root: repo, id: first.id });
+    assert.equal(existsSync(keptPath), true, 'the build history is not thrown away behind their back');
+
+    turns.length = 0;
+    // A different change: the first one is now in the repo, so building the
+    // same content again would produce no diff and nothing to review.
+    const second = await cleared('def main():\n    print("v2")\n');
+    const droppedPath = second.worktree?.path ?? '';
+    const result = await service.merge(5, { root: repo, id: second.id, cleanup: true });
+    assert.equal(result.merged, true);
+    assert.equal(existsSync(droppedPath), false);
+    assert.equal(service.open(repo, second.id).display, 'merged', 'and the record stays merged, not reset');
+  });
+
+  it('refuses everything that would move a merged change', async () => {
+    const view = await cleared();
+    await service.merge(4, { root: repo, id: view.id });
+    await assert.rejects(
+      () => service.answer(5, { root: repo, id: view.id, answers: [{ blockId: view.blocks[0]?.id ?? '', text: 'x' }] }),
+      (error: unknown) => error instanceof ProtocolError && /not ready to defend/.test(error.message),
+    );
+    assert.throws(
+      () => service.toggleBlock(repo, view.id, view.blocks[0]?.id ?? '', false),
+      (error: unknown) => error instanceof ProtocolError && /already been merged/.test(error.message),
+    );
+  });
+});
+
+describe('rebasing onto a base that moved', () => {
+  /** Moves `main` on by one commit that does not touch what the build changed. */
+  function moveMain(): string {
+    writeFileSync(join(repo, 'other.txt'), 'someone else\n');
+    execFileSync('git', ['add', '-A'], { cwd: repo });
+    execFileSync('git', ['commit', '-qm', 'meanwhile'], { cwd: repo });
+    return gitIn(repo, 'rev-parse', 'main');
+  }
+
+  it('moves the build onto the new base and re-captures against it', async () => {
+    const view = await reviewing();
+    const moved = moveMain();
+    // The deterministic rebase does the move; the agent turn re-verifies.
+    turns.push({ frames: [frames.init(), frames.result('nothing conflicted; tests pass')] });
+    turns.push({ frames: triageByFile([{ title: 'version flag', files: ['tool.py'], substantial: true }]) });
+    const rebased = await service.rebase(4, { root: repo, id: view.id });
+
+    assert.equal(rebased.base?.commit, moved);
+    assert.equal(rebased.display, 'reviewing');
+    assert.equal(gitIn(rebased.worktree?.path ?? '', 'log', '-1', '--format=%s', `${moved}`), 'meanwhile');
+    const diff = service.diff(repo, view.id)?.text ?? '';
+    assert.match(diff, /print\("v1"\)/);
+    assert.ok(!diff.includes('other.txt'), 'what the base already has is not part of the change any more');
+    assert.deepEqual(await service.mergeCheck(repo, view.id).then((checked) => checked.refusals.map((r) => r.code)), [
+      'threads-open',
+    ]);
+  });
+
+  it('re-runs the build verification with the new base named', async () => {
+    const view = await reviewing();
+    moveMain();
+    turns.push({ frames: [frames.init(), frames.result('re-ran the tests')] });
+    turns.push({ frames: triageByFile([{ title: 'version flag', files: ['tool.py'], substantial: true }]) });
+    await service.rebase(4, { root: repo, id: view.id });
+    const prompt = calls[calls.length - 2]?.prompt ?? '';
+    assert.match(prompt, /rebased onto the updated main/);
+    assert.match(prompt, /re-run whatever tests/);
+  });
+
+  it('carries a defended thread through a rebase that did not touch it', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 100 }]);
+    await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'I understand it' }] });
+    moveMain();
+    turns.push({ frames: [frames.init(), frames.result('clean')] });
+    turns.push({ frames: triageByFile([{ title: 'version flag', files: ['tool.py'], substantial: true }]) });
+    const rebased = await service.rebase(5, { root: repo, id: view.id });
+    assert.equal(rebased.blocks[0]?.state, 'resolved', 'unchanged content stays defended');
+    assert.equal(rebased.counts.open, 0);
+  });
+
+  it('re-opens a thread whose content the rebase changed', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 100 }]);
+    await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'I understand it' }] });
+    moveMain();
+    turns.push({
+      // The verification turn changes the code, as fixing what the new base
+      // broke would: the reader has never seen this version of the thread.
+      act: async (options) => {
+        writeFileSync(join(String(options.cwd), 'tool.py'), 'def main():\n    print("v2")\n');
+      },
+      frames: [frames.init(), frames.result('the new base needed a change')],
+    });
+    turns.push({ frames: triageByFile([{ title: 'version flag', files: ['tool.py'], substantial: true }]) });
+    const rebased = await service.rebase(5, { root: repo, id: view.id });
+    assert.equal(rebased.blocks[0]?.state, 'open', 'new bytes are undefended bytes');
+    assert.deepEqual(rebased.blocks[0]?.rounds, []);
+    assert.equal((await service.mergeCheck(repo, view.id)).refusals[0]?.code, 'threads-open');
+  });
+
+  it('refuses when the base has not moved at all', async () => {
+    const view = await reviewing();
+    await assert.rejects(
+      () => service.rebase(4, { root: repo, id: view.id }),
+      (error: unknown) => error instanceof ProtocolError && /has not moved/.test(error.message),
+    );
+  });
+});
