@@ -108,6 +108,20 @@ function M.expand(prompt, root)
   return blocks, warnings
 end
 
+--- The file the current buffer holds, or nil when it has none (a scratch or
+--- special buffer). Edit mode scopes an instruction with it.
+--- @return string|nil
+function M.current_path()
+  if vim.bo.buftype ~= '' then
+    return nil
+  end
+  local name = vim.api.nvim_buf_get_name(0)
+  if name == '' then
+    return nil
+  end
+  return vim.fs.normalize(name)
+end
+
 --- The active visual selection as a context block, or nil outside visual mode.
 --- Reads the live visual marks, so it works from inside the mapping itself.
 --- @return table|nil block

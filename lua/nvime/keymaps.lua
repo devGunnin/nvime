@@ -13,9 +13,21 @@ function M.all(opts)
   return {
     { scope = 'global', mode = 'n', lhs = keymaps.chat, desc = 'nvime: open chat' },
     { scope = 'global', mode = 'x', lhs = keymaps.send_selection, desc = 'nvime: send the selection' },
+    { scope = 'global', mode = 'n', lhs = keymaps.edit, desc = 'nvime: edit this file' },
+    { scope = 'global', mode = 'x', lhs = keymaps.edit, desc = 'nvime: edit the selection' },
+    { scope = 'global', mode = 'n', lhs = keymaps.changeset, desc = 'nvime: review the changeset' },
     { scope = 'panel-chat', mode = 'n', lhs = '<C-r>', desc = 'nvime: pick a session' },
     { scope = 'panel-chat', mode = 'n', lhs = '<C-c>', desc = 'nvime: stop the running turn' },
     { scope = 'panel-chat', mode = 'n', lhs = 'q', desc = 'nvime: close the chat panel' },
+    { scope = 'panel-edit', mode = 'n', lhs = '<C-c>', desc = 'nvime: stop the edit run' },
+    { scope = 'panel-edit', mode = 'n', lhs = 'q', desc = 'nvime: close the edit panel' },
+    { scope = 'panel-changeset', mode = 'n', lhs = '<CR>', desc = 'nvime: open the file at this hunk' },
+    { scope = 'panel-changeset', mode = 'n', lhs = 'r', desc = 'nvime: revert this hunk' },
+    { scope = 'panel-changeset', mode = 'n', lhs = 'd', desc = 'nvime: toggle the unified diff' },
+    { scope = 'panel-changeset', mode = 'n', lhs = 'q', desc = 'nvime: close the changeset' },
+    { scope = 'approval', mode = 'n', lhs = 'y', desc = 'nvime: allow once' },
+    { scope = 'approval', mode = 'n', lhs = 'n', desc = 'nvime: deny' },
+    { scope = 'approval', mode = 'n', lhs = '<Esc>', desc = 'nvime: deny' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<CR>', desc = 'nvime: send the prompt' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<C-r>', desc = 'nvime: pick a session' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<C-c>', desc = 'nvime: stop the running turn' },
@@ -69,11 +81,32 @@ function M.apply(opts)
     return entries
   end
   local chat = require('nvime.chat')
+  local edit = require('nvime.edit')
   vim.keymap.set('n', opts.keymaps.chat, chat.open, { silent = true, desc = 'nvime: open chat' })
-  vim.keymap.set('x', opts.keymaps.send_selection, function()
-    chat.send_selection()
-    vim.api.nvim_feedkeys(M.normalize('<Esc>'), 'n', false)
-  end, { silent = true, desc = 'nvime: send the selection' })
+  vim.keymap.set('n', opts.keymaps.edit, edit.instruct, { silent = true, desc = 'nvime: edit this file' })
+  vim.keymap.set('n', opts.keymaps.changeset, function()
+    require('nvime.changeset').open()
+  end, { silent = true, desc = 'nvime: review the changeset' })
+  -- The selection has to be read before leaving visual mode, so each of these
+  -- captures it first and drops back to normal mode afterwards.
+  local function from_selection(fn)
+    return function()
+      fn()
+      vim.api.nvim_feedkeys(M.normalize('<Esc>'), 'n', false)
+    end
+  end
+  vim.keymap.set(
+    'x',
+    opts.keymaps.send_selection,
+    from_selection(chat.send_selection),
+    { silent = true, desc = 'nvime: send the selection' }
+  )
+  vim.keymap.set(
+    'x',
+    opts.keymaps.edit,
+    from_selection(edit.instruct_selection),
+    { silent = true, desc = 'nvime: edit the selection' }
+  )
   return entries
 end
 

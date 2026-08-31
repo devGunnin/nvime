@@ -95,14 +95,21 @@ local function sidecar_spawn(spawned)
 end
 
 describe('agent.sidecar_env', function()
-  it('is nil when nothing is configured, so the sidecar simply inherits', function()
+  it('carries only the approval deadline when nothing else is configured', function()
     config.setup({})
-    eq(nil, agent.sidecar_env())
+    eq({ NVIME_APPROVAL_TIMEOUT_MS = '60000' }, agent.sidecar_env())
   end)
 
-  it('carries the configured claude path and model', function()
-    config.setup({ agent = { claude = '/opt/homebrew/bin/claude', model = 'claude-opus-5' } })
-    eq({ NVIME_CLAUDE_PATH = '/opt/homebrew/bin/claude', NVIME_MODEL = 'claude-opus-5' }, agent.sidecar_env())
+  it('carries the configured claude path, model and approval deadline', function()
+    config.setup({
+      agent = { claude = '/opt/homebrew/bin/claude', model = 'claude-opus-5' },
+      edit = { approval_timeout_ms = 5000 },
+    })
+    eq({
+      NVIME_APPROVAL_TIMEOUT_MS = '5000',
+      NVIME_CLAUDE_PATH = '/opt/homebrew/bin/claude',
+      NVIME_MODEL = 'claude-opus-5',
+    }, agent.sidecar_env())
     config.setup({})
   end)
 end)

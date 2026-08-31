@@ -12,6 +12,16 @@ local defaults = {
     enabled = false,
     chat = '<leader>nc',
     send_selection = '<leader>ns',
+    edit = '<leader>ne',
+    changeset = '<leader>nd',
+  },
+  edit = {
+    -- How long a fresh hunk stays brightly highlighted before it dims.
+    fade_ms = 1500,
+    -- Keep the highlight until the next change to that buffer instead.
+    nofade = false,
+    -- How long the sidecar holds a tool call waiting for your y/n.
+    approval_timeout_ms = 60000,
   },
   agent = {
     node = 'node',
@@ -56,6 +66,17 @@ local function validate(opts)
   check_type(opts.keymaps.enabled, 'boolean', 'keymaps.enabled')
   check_type(opts.keymaps.chat, 'string', 'keymaps.chat')
   check_type(opts.keymaps.send_selection, 'string', 'keymaps.send_selection')
+  check_type(opts.keymaps.edit, 'string', 'keymaps.edit')
+  check_type(opts.keymaps.changeset, 'string', 'keymaps.changeset')
+  check_type(opts.edit.fade_ms, 'number', 'edit.fade_ms')
+  if opts.edit.fade_ms < 100 then
+    fail('edit.fade_ms must be at least 100')
+  end
+  check_type(opts.edit.nofade, 'boolean', 'edit.nofade')
+  check_type(opts.edit.approval_timeout_ms, 'number', 'edit.approval_timeout_ms')
+  if opts.edit.approval_timeout_ms < 1000 then
+    fail('edit.approval_timeout_ms must be at least 1000')
+  end
   check_type(opts.agent.node, 'string', 'agent.node')
   if opts.agent.claude ~= nil then
     check_type(opts.agent.claude, 'string', 'agent.claude')

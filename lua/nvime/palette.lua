@@ -11,6 +11,10 @@ local FALLBACK = {
   session = '#b294c9',
   error = '#de7681',
   code_bg = nil,
+  add_bg = '#1f3326',
+  change_bg = '#26303f',
+  delete_bg = '#3a2226',
+  fade_bg = '#22242b',
 }
 
 --- First group in `names` that defines `attr`, as a "#rrggbb" string.
@@ -36,6 +40,12 @@ function M.resolve()
     error = pick({ 'DiagnosticError', 'ErrorMsg', 'DiffDelete' }, 'fg') or FALLBACK.error,
     code = pick({ 'String', 'Constant' }, 'fg') or FALLBACK.fg,
     code_bg = pick({ 'CursorLine', 'ColorColumn' }, 'bg') or FALLBACK.code_bg,
+    -- Hunk backgrounds come from the colorscheme's own diff groups, so a live
+    -- edit reads the same as `:diffthis` does in that theme.
+    add_bg = pick({ 'DiffAdd', 'DiffAdded' }, 'bg') or FALLBACK.add_bg,
+    change_bg = pick({ 'DiffChange', 'DiffText' }, 'bg') or FALLBACK.change_bg,
+    delete_bg = pick({ 'DiffDelete', 'DiffRemoved' }, 'bg') or FALLBACK.delete_bg,
+    fade_bg = pick({ 'CursorLine', 'ColorColumn' }, 'bg') or FALLBACK.fade_bg,
   }
 end
 
@@ -55,6 +65,11 @@ local function groups(p)
     NvimeError = { fg = p.error },
     NvimeSession = { fg = p.session },
     NvimeSelected = { fg = p.accent, bold = true },
+    -- Live edit: a fresh hunk, then the dimmer group it fades through.
+    NvimeEditAdd = { bg = p.add_bg },
+    NvimeEditChange = { bg = p.change_bg },
+    NvimeEditDelete = { bg = p.delete_bg },
+    NvimeEditFade = { bg = p.fade_bg },
   }
 end
 

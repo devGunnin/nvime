@@ -300,6 +300,12 @@ function M.pick_session()
   end)
 end
 
+--- Whether a turn is in flight for this surface.
+--- @return boolean
+function M.is_running()
+  return state.request_id ~= nil
+end
+
 --- Test hook: the live chat state.
 function M.state()
   return state

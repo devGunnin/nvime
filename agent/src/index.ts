@@ -63,6 +63,7 @@ function main(): void {
           env: process.env,
           emit: (event, params) => write({ event, params }),
           model: process.env.NVIME_MODEL,
+          approvalTimeoutMs: readApprovalTimeout(process.env.NVIME_APPROVAL_TIMEOUT_MS),
         });
 
   const dispatcher = new Dispatcher(write);
@@ -73,6 +74,20 @@ function main(): void {
 interface Services {
   chat: ChatService | null;
   edit: EditService | null;
+}
+
+/**
+ * The plugin owns this setting; a value it could not have sent is ignored so a
+ * stray environment variable cannot silently disable the approval deadline.
+ */
+function readApprovalTimeout(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === '') return undefined;
+  const ms = Number(raw);
+  if (!Number.isSafeInteger(ms) || ms < 1000) {
+    process.stderr.write(`nvime: ignoring NVIME_APPROVAL_TIMEOUT_MS=${raw}\n`);
+    return undefined;
+  }
+  return ms;
 }
 
 /** Every capability needs the CLI; without it the answer is one clear error. */
