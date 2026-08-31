@@ -9,9 +9,10 @@ local M = {}
 local WIDTH = 72
 local HEIGHT = 6
 
---- A single change that adds more than this many characters is a paste, not
---- typing. Chosen well above any one keystroke and well below a sentence.
-local PASTE_BURST = 24
+--- A single change that adds more than this many CHARACTERS is a paste, not
+--- typing. Above a whole IME phrase commit — a Japanese or Chinese reader
+--- commits a clause as one buffer change — and well below a pasted sentence.
+local PASTE_BURST = 32
 
 local PASTE_REFUSAL = "type it — that's the point"
 
@@ -45,7 +46,9 @@ local function added_chars(before, after)
   local function size(lines)
     local total = 0
     for _, line in ipairs(lines) do
-      total = total + #line
+      -- Characters, not `#line`: in bytes, nine CJK characters look like a
+      -- 27-byte paste and the box refuses to be typed in at all.
+      total = total + vim.fn.strchars(line)
     end
     return total
   end
@@ -57,7 +60,9 @@ end
 --- Mechanism-independent on purpose: bracketed paste, `<C-r>`, `:put`, and any
 --- future route all land here as one change that grew the buffer by more than a
 --- person can type at once. A blocklist of paste KEYS would only cover the
---- routes it happened to name.
+--- routes it happened to name. A burst is what it catches — a paste chopped
+--- small enough walks through, and the README says so rather than claiming
+--- otherwise.
 --- @param before string[]
 --- @param after string[]
 --- @return boolean
@@ -139,12 +144,43 @@ local function block_paste(buf, win)
   end
 end
 
+--- Refuses a bracketed paste at `vim.paste`, before it reaches the buffer.
+---
+--- The watcher above catches it a tick later and undoes it; this catches it
+--- first, so the pasted text is never on screen at all. Scoped to `buf`: every
+--- other buffer is delegated to whatever was installed before, and that is put
+--- back on close — identity-checked, so a wrapper added since is not clobbered.
+--- @param buf integer
+--- @return fun() restore
+local function block_vim_paste(buf)
+  local original = vim.paste
+  local ours = function(lines, phase)
+    if vim.api.nvim_get_current_buf() ~= buf then
+      return original(lines, phase)
+    end
+    -- -1 is a whole paste in one call; 1 is the first chunk of a streamed one.
+    if phase == -1 or phase == 1 then
+      vim.notify('nvime: ' .. PASTE_REFUSAL, vim.log.levels.WARN)
+    end
+    return false
+  end
+  vim.paste = ours
+  return function()
+    if vim.paste == ours then
+      vim.paste = original
+    end
+  end
+end
+
 --- Opens the float. `on_submit(text)` runs at most once, and never with empty
 --- text — an accidental `<CR>` on a blank comment is a dismissal, not a send.
 ---
---- With `no_paste`, the buffer takes typed text only: the put mappings refuse
---- outright and anything that gets past them is undone. There is no escape
---- hatch and none is planned — a defense you pasted is not a defense.
+--- With `no_paste`, the buffer takes typed text only: the put mappings refuse,
+--- `vim.paste` is refused while the box is open, and a burst that arrives by
+--- any other route is undone by a watcher on the buffer. That stops pasting,
+--- which is what it is for. It is not a sandbox: someone determined to get
+--- text in (`:r`, an external tool, small enough chunks) can, and is only
+--- cheating themselves — the grader still grades what they submit.
 --- @param opts table title, hint, on_submit(text), no_paste (boolean), text (string[])
 --- @return integer|nil window handle
 function M.open(opts)
@@ -198,7 +234,12 @@ function M.open(opts)
     -- `<C-r>` in insert mode is a register put; it is the one paste route that
     -- is a single keystroke, so it gets its own refusal rather than a revert.
     bind('i', '<C-r>', refuse)
-    active.detach = block_paste(buf, win)
+    local restore = block_vim_paste(buf)
+    local detach = block_paste(buf, win)
+    active.detach = function()
+      restore()
+      detach()
+    end
   end
 
   vim.cmd('startinsert')

@@ -256,11 +256,19 @@ byte-identical AND rated the same way keep the verdict they had — anything new
 or newly called substantial, comes back open.
 
 **The gate.** `a` on an open substantial thread opens an answer box and asks what
-the change does and why. **Paste is blocked and there is no escape hatch**: the
-put mappings refuse with a reason, and anything that gets past them — bracketed
-paste from the terminal, `:put`, a register put in insert mode — is undone by a
-watcher on the buffer itself, which sees every change whatever made it. Typing
-is allowed; so is undo and redo of what you already typed.
+the change does and why. **Paste is blocked**: the put mappings refuse with a
+reason, `vim.paste` — what bracketed paste from the terminal calls — is refused
+while the box is open, and anything that gets past both, `:put` and a register
+put included, is undone by a watcher on the buffer itself, which sees every
+change whatever made it. The watcher counts *characters*, not bytes, so a CJK or
+IME typist can type an answer at all. Typing is allowed; so is undo and redo of
+what you already typed.
+
+It is a paste block, not a sandbox, and this README will not pretend otherwise.
+The watcher catches a *burst*, so text fed in slowly enough — `:r`, an external
+tool driving the buffer, a paste chopped small — gets through. There is nothing
+worth having on the other side of that: the grader grades the answer you submit,
+so defeating the block buys a low score and another round.
 
 Submitting runs one read-only grading turn for the round, in the build clone so
 the grader can check a claim against the code, resumed across rounds so a
@@ -285,7 +293,20 @@ in it; the next answer has to address the follow-up. There is no round cap and
 no override — `X` refuses to clear a substantial thread by hand. If the grading
 turn fails or answers unusably, the round is recorded **ungraded**: your answer
 is kept, the thread stays open, and the pane says why. A grade nobody gave is
-never inferred.
+never inferred. Rounds after the first ride the grader's resumed session and
+carry only the new answer and its follow-up — the change and the verdicts it
+already gave are in that context, and re-sending them every round is what walks
+a long review into the context ceiling.
+
+If the triage turn rates **every** thread trivial, nothing is graded, and
+`0/0 defended` would be mergeable the moment it was triaged. The diff that turn
+read was written by the build agent, so a comment aimed at triage would disarm
+the whole gate that way. An all-trivia change therefore gets one more thread,
+open: *everything was rated trivial — open the diff and confirm*. Read it
+yourself and clear it with `X`. It holds no hunks, so it hides nothing, and it
+carries no signature, so every re-capture asks again. No setting removes it —
+`vibe` is the one difficulty that runs no gate at all, and that is a choice you
+make per change.
 
 **The merge.** `M` lands the reviewed change on the branch the build started
 from — the only thing nvime ever writes to your repository. It asserts every
@@ -300,10 +321,36 @@ outside the repository — `read-tree` the base, `git apply --cached` (with a
 before the end leaves your index, tree and branches byte for byte as they were.
 Then the branch `nvime/big/<slug>` is created at that commit with an atomic
 create-only `update-ref`, and exactly one command touches your checkout:
-`git merge --ff-only`. If anything fails, the branch is deleted again and the
-rollback is *verified* — the base is back where it was and no tracked file
-changed — and you are told if it could not be. The commit message is the session
-title, authored with your own git identity and nothing else.
+`git merge --ff-only`.
+
+`git merge` moves whatever HEAD points at, not the branch you name it, so HEAD
+itself is re-read immediately before that command — the ref it is **on** and the
+commit it is **at**, both — and again after. A `git checkout -b side` onto a
+second branch at the same tip, or a `git checkout --detach`, made between the
+precondition check and the merge stops it, rather than fast-forwarding the
+reviewed change onto some other ref of yours.
+
+If anything fails, the branch is deleted again and the rollback is *verified*
+against the repository **as this attempt found it**: the base is back where it
+was, HEAD is on the same ref at the same commit, and the tracked changes are the
+ones that were already there. You are told if it could not be. So a tree you had
+already edited is not reported as a failed rollback, and a HEAD that moved can
+never be certified "exactly as it was". The commit message is the session title,
+authored with your own git identity and nothing else.
+
+Once the commit is on your branch nothing can un-land it, so nothing after that
+point is reported as a failed merge. If the record write then fails — a full
+disk, the store removed under a live run — you are told the change **landed** and
+could not be recorded, and the next attempt finds its own commit already on the
+branch and says so. Never "your base moved", which would offer to rebase the
+build onto your own just-landed change.
+
+The commit is built in a private index in nvime's own store, never inside your
+repository, and the lock git writes beside that index is cleared before and
+after every merge: a killed `git apply` used to leave one there and wedge every
+later merge with git's "another git process seems to be running in this
+repository" — about a file in nvime's store, which you have no reason to know
+exists.
 
 Afterwards open buffers are refreshed through the same conflict-aware path edit
 mode uses: a clean buffer is brought up to date live, one with unsaved edits is
@@ -492,10 +539,14 @@ thread list, chips, hunk slicing and request-changes plumbing, the gate overlay
 and its answer box, and the dashboard page).
 
 The paste block is tested by mechanism, not by keystroke: the put mappings, a
-register put in insert mode, `vim.paste` (what bracketed paste calls) and `:put`
-all have to be refused, while character-by-character typing and a redo of it get
-through. The merge tests run against a real scratch repo and assert the
-byte-identical rollback; the lock's compare-and-swap test fails without its fix.
+register put in insert mode, `vim.paste` (what bracketed paste calls, refused
+before the text reaches the buffer at all) and `:put` (undone by the watcher) all
+have to be refused, while character-by-character typing, a redo of it, and a CJK
+or IME phrase commit get through. The merge tests run against a real scratch repo
+and assert the byte-identical rollback — including the case where HEAD moved to a
+second branch at the same commit, which is how a merge lands on the wrong ref
+while every ref it reads still says what it said at the check. The lock's
+compare-and-swap test fails without its fix.
 
 The big-change sidecar tests run against a real scratch git repo: the clone is
 really made, the build agent is mocked at the SDK boundary but its writes

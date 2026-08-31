@@ -62,6 +62,15 @@ describe('paste detection', function()
     ok(compose.is_paste({ '' }, { string.rep('x', 40) }), 'forty characters at once is not typing')
     ok(compose.is_paste({ '' }, { 'a', 'b', 'c' }), 'three lines at once is not typing')
   end)
+
+  it('counts characters, not bytes, so a CJK or IME typist can answer at all', function()
+    -- Nine Japanese characters are 27 bytes. Measured in bytes the box refuses
+    -- to be typed in at all, and an IME commits a whole phrase as one change.
+    eq(false, compose.is_paste({ '' }, { 'こんにちは世界です' }), 'nine characters is typing')
+    eq(false, compose.is_paste({ '' }, { '这个改动修复了一个竞态条件' }), 'an IME phrase commit is typing')
+    eq(false, compose.is_paste({ '' }, { 'électricité générale' }), 'accented latin is not a paste either')
+    ok(compose.is_paste({ '' }, { string.rep('あ', 40) }), 'forty characters is still a paste')
+  end)
 end)
 
 describe('the answer box', function()
@@ -92,22 +101,33 @@ describe('the answer box', function()
     compose.dismiss()
   end)
 
-  it('undoes a paste that arrives by any other route', function()
+  it('refuses a bracketed paste before it ever reaches the buffer', function()
     -- `vim.paste` is what bracketed paste from the terminal calls, and it goes
-    -- nowhere near the mappings above. The guard watches the BUFFER instead.
+    -- nowhere near the mappings above. Refused there, the text is never on
+    -- screen at all — the buffer watcher would only undo it a tick later.
     open_answer()
     local buf = compose.current().buf
     vim.api.nvim_set_current_buf(buf)
     local said = with_notices(function()
-      vim.paste({ 'def next_delay(self, attempt):', '    base = min(self.cap, 2 ** attempt)' }, -1)
-      settle()
+      eq(
+        false,
+        vim.paste({ 'def next_delay(self, attempt):', '    base = 2 ** attempt' }, -1),
+        'the paste is cancelled'
+      )
+      eq({ '' }, text_of(buf), 'and nothing was inserted to undo')
     end)
-    eq({ '' }, text_of(buf), 'the pasted text does not survive')
     ok(#said > 0 and said[1]:match('type it') ~= nil, vim.inspect(said))
     compose.dismiss()
+
+    -- Scoped and restored: every other buffer pastes exactly as it always did.
+    local plain = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_current_buf(plain)
+    vim.paste({ 'pasted freely' }, -1)
+    eq({ 'pasted freely' }, vim.api.nvim_buf_get_lines(plain, 0, -1, false))
+    vim.api.nvim_buf_delete(plain, { force = true })
   end)
 
-  it('undoes a `:put` from a register, which no mapping can intercept', function()
+  it('undoes a `:put` from a register, which neither a mapping nor vim.paste sees', function()
     open_answer()
     local buf = compose.current().buf
     vim.api.nvim_set_current_buf(buf)
