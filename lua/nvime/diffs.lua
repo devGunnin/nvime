@@ -102,6 +102,10 @@ function M.unified_rows(unified, hunks)
       b_line = b_line + 1
     elseif line:sub(1, 1) == '-' then
       map[index] = hunk_at(hunks, b_line, true)
+    elseif line:sub(1, 1) == '\\' then
+      -- `\ No newline at end of file` is a marker, not a line of either side;
+      -- counting it desynced every b-side row after it.
+      map[index] = nil
     elseif line ~= '' then
       b_line = b_line + 1
     end

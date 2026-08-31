@@ -4,7 +4,14 @@ import { ApprovalGate, DEFAULT_APPROVAL_TIMEOUT_MS } from './approvals.js';
 import type { SdkBindings } from './chat.js';
 import { composePrompt, type ContextBlock } from './context.js';
 import { subscriptionEnv, type Env } from './env.js';
-import { classifyTool, FILE_PATH_KEYS, READ_ONLY_TOOLS, realPathOf, SHELL_TOOLS } from './policy.js';
+import {
+  classifyTool,
+  FILE_PATH_KEYS,
+  READ_ONLY_TOOLS,
+  realPathOf,
+  SHELL_TOOLS,
+  tryRealPathOf,
+} from './policy.js';
 import { ProtocolError } from './protocol.js';
 import { readSnapshot, sameSnapshot, snapshotBytes, type Snapshot } from './snapshot.js';
 import {
@@ -278,13 +285,18 @@ export class EditService {
     };
   }
 
-  /** The real path a tool will change, or null when it changes no file. */
+  /**
+   * The real path a tool will change, or null when it changes no file. A path
+   * that will not resolve is also null: `classifyTool` denies that same tool
+   * call with the reason, so there is nothing coming that needs a snapshot.
+   */
   #targetOf(tool: string, input: Record<string, unknown>): string | null {
     const key = FILE_PATH_KEYS[tool];
     if (key === undefined) return null;
     const raw = input[key];
     if (typeof raw !== 'string' || raw === '') return null;
-    return realPathOf(raw);
+    const resolved = tryRealPathOf(raw);
+    return resolved.ok ? resolved.path : null;
   }
 
   /**

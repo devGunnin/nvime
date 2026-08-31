@@ -188,8 +188,14 @@ end
 --- live-application path an agent change takes.
 --- @return string|nil error
 local function land(path, current, text)
-  if apply.buffer_for(path) == nil then
+  local buf = apply.buffer_for(path)
+  if buf == nil then
     return write_file(path, text)
+  end
+  -- `current` is the buffer, so disk matches neither side of the revert and
+  -- `apply.apply` would blame an external writer for the user's own edits.
+  if vim.bo[buf].modified then
+    return 'the buffer has unsaved edits — save or undo them first'
   end
   local status, detail = apply.apply(
     { path = path, before = { kind = 'text', text = current }, after = { kind = 'text', text = text } },

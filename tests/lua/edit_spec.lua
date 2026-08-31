@@ -210,6 +210,28 @@ describe('edit: live application', function()
     cleanup()
   end)
 
+  it('tells the user when a shell step deleted a file they have open', function()
+    local _, path = sandbox()
+    open_on(path)
+    edit.send('clean the build')
+    vim.cmd('wincmd p')
+    vim.cmd('edit ' .. vim.fn.fnameescape(path))
+    local buf = vim.api.nvim_get_current_buf()
+    eq(0, vim.fn.delete(path))
+
+    fake.subscriber('edit.external_change', {
+      id = edit.state().request_id,
+      runId = 'r1',
+      root = edit.state().root,
+      reason = 'a shell command ran; nvime did not record what it changed',
+    })
+    ok(has_line('queue.py'), 'the panel names the file')
+    ok(has_line('gone from disk'), 'and says what happened to it')
+    eq({ 'def drain():', '    pass' }, vim.api.nvim_buf_get_lines(buf, 0, -1, false), 'the buffer is untouched')
+    vim.cmd('silent! bwipeout! ' .. buf)
+    cleanup()
+  end)
+
   it('reports a file no buffer holds instead of silently doing nothing', function()
     local _, path = sandbox()
     open_on(path)

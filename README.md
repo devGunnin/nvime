@@ -152,13 +152,22 @@ Paths are resolved one component at a time, the way the kernel resolves them,
 so a `..` that follows a symlink out of the project (`node_modules/.pnpm`
 links, `docs -> ../shared-docs`, a dotfiles `config -> ~/.config`) climbs out
 of the link's target and is asked about — it does not collapse back to a path
-that looks like it is inside the root.
+that looks like it is inside the root. A symlink whose target does not exist
+*yet* is followed the same way, through its link text: a committed
+`deploy -> ~/.bashrc.d/x.sh` is a write to your home directory, and the ask
+says so. A path that cannot be resolved at all (a symlink loop, a directory
+you may not traverse) refuses that one tool call rather than the run.
+
+The ask names where the write really lands whenever that differs from the path
+the agent typed, so a `src/vendor/../secret.txt` you would have to decode
+through a symlink is shown resolved as well as verbatim.
 
 **A shell step is not silent.** An approved `Bash` call can change files nvime
 has no before/after for. When one finishes, nvime reconciles the buffers under
 the root with disk: clean ones are brought up to date (and said to be *not* in
-the changeset, because they are not), and any with unsaved edits are named
-rather than touched.
+the changeset, because they are not), and every other one is named with the
+reason rather than touched — unsaved edits, a binary file, or a file the step
+deleted out from under a buffer that still holds it.
 
 #### What edit mode does not confine
 

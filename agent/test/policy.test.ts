@@ -88,6 +88,68 @@ describe('policy: the project-root boundary', () => {
     assert.equal(decision.path, join(dir, 'pwned.txt'));
   });
 
+  it('asks about a symlink whose target does not exist yet, outside the root', () => {
+    // One committed file in a repo: `deploy -> ~/.bashrc.d/x.sh`. The kernel
+    // follows it and creates the target; treating it as "absent" allowed the
+    // write with no approval at all.
+    const landing = join(outside, 'not-created-yet.sh');
+    symlinkSync(landing, join(root, 'deploy'));
+    const decision = edit(join(root, 'deploy'));
+    assert.equal(decision.kind, 'ask', 'a dangling link out of the root is still a write out of the root');
+    assert.equal(decision.path, landing, 'and the ask names where the bytes would land');
+  });
+
+  it('asks about a dangling symlink nested deep in the path', () => {
+    mkdirSync(join(root, 'a', 'b'), { recursive: true });
+    symlinkSync(join(outside, 'gone'), join(root, 'a', 'b', 'link'));
+    const decision = edit(join(root, 'a', 'b', 'link', 'x.txt'));
+    assert.equal(decision.kind, 'ask');
+    assert.equal(decision.path, join(outside, 'gone', 'x.txt'));
+  });
+
+  it('follows a dangling symlink written as a relative target', () => {
+    symlinkSync('../elsewhere/new.txt', join(root, 'rel'));
+    const decision = edit(join(root, 'rel'));
+    assert.equal(decision.kind, 'ask');
+    assert.equal(decision.path, join(outside, 'new.txt'), 'link text is resolved from the link, not the cwd');
+  });
+
+  it('walks a chain of links to the file that does not exist at the end of it', () => {
+    symlinkSync(join(root, 'hop2'), join(root, 'hop1'));
+    symlinkSync(join(outside, 'final.txt'), join(root, 'hop2'));
+    const decision = edit(join(root, 'hop1'));
+    assert.equal(decision.kind, 'ask');
+    assert.equal(decision.path, join(outside, 'final.txt'));
+  });
+
+  it('still allows a dangling symlink that points back inside the root', () => {
+    const target = join(root, 'src', 'todo.ts');
+    symlinkSync(target, join(root, 'later'));
+    assert.deepEqual(edit(join(root, 'later')), { kind: 'allow', path: target });
+  });
+
+  it('still allows a component that is genuinely absent rather than a link', () => {
+    const target = join(root, 'src', 'brand', 'new.ts');
+    assert.deepEqual(edit(target), { kind: 'allow', path: target });
+  });
+
+  it('denies a path the kernel cannot resolve instead of throwing', () => {
+    symlinkSync(join(root, 'b'), join(root, 'a'));
+    symlinkSync(join(root, 'a'), join(root, 'b'));
+    const decision = edit(join(root, 'a'));
+    assert.equal(decision.kind, 'deny', 'one bad path must not take the whole run down');
+    assert.match(decision.kind === 'deny' ? decision.reason : '', /could not resolve/);
+  });
+
+  it('denies a dangling symlink that resolves back through itself', () => {
+    // `a -> b/../a` with `b` missing: every hop raises ENOENT rather than
+    // ELOOP, so nothing but nvime's own hop budget ends the walk.
+    symlinkSync(`${root}/b/../a`, join(root, 'a'));
+    const decision = edit(join(root, 'a'));
+    assert.equal(decision.kind, 'deny');
+    assert.match(decision.kind === 'deny' ? decision.reason : '', /could not resolve/);
+  });
+
   it('still allows a `..` that stays inside the root', () => {
     const decision = edit(`${root}/src/../src/a.ts`);
     assert.deepEqual(decision, { kind: 'allow', path: join(root, 'src', 'a.ts') });

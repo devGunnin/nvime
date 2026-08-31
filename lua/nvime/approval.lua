@@ -60,12 +60,14 @@ end
 ---
 --- The decision and its keys sit at the top, where they stay visible however
 --- long the payload below them is; the payload itself follows in full.
---- @param request table approvalId, tool, summary, reason, detail
+--- @param request table approvalId, tool, summary, reason, detail, path
 --- @param width integer columns available inside the border
 --- @return string[] lines
---- @return integer|nil warn 1-based row of the truncation banner, if any
+--- @return integer[] alerts 1-based rows to paint as errors
 function M.render(request, width)
   assert(type(request) == 'table', 'approval.render needs a request')
+  assert(type(width) == 'number' and width > 0, 'approval.render needs a positive width')
+  local body_width = math.max(width - #INDENT, 8)
   local lines = {
     ' claude wants to:',
     INDENT .. (request.summary or request.tool or 'run a tool'),
@@ -73,43 +75,54 @@ function M.render(request, width)
     ' nvime will not allow that on its own:',
     INDENT .. (request.reason or 'outside the agreed scope'),
     '',
-    ' y  allow once      n  deny',
   }
+  local alerts = {}
   local detail = request.detail
-  if type(detail) ~= 'table' or type(detail.text) ~= 'string' or detail.text == '' then
-    return lines, nil
+  local shown = type(detail) == 'table' and type(detail.text) == 'string' and detail.text or nil
+
+  -- The sidecar already resolved where the write really lands. Without this
+  -- the user authorizes a path they would have to walk a symlink to decode.
+  if type(request.path) == 'string' and request.path ~= '' and request.path ~= shown then
+    lines[#lines + 1] = ' !! it really lands on:'
+    alerts[#alerts + 1] = #lines
+    for _, line in ipairs(wrapped(request.path, body_width)) do
+      lines[#lines + 1] = INDENT .. line
+    end
+    lines[#lines + 1] = ''
   end
-  local body = wrapped(detail.text, math.max(width - #INDENT, 8))
+
+  lines[#lines + 1] = ' y  allow once      n  deny'
+  if shown == nil or shown == '' then
+    return lines, alerts
+  end
+  local body = wrapped(shown, body_width)
   lines[#lines + 1] = string.format(
     ' the exact %s — %d line%s, %d byte%s:',
     detail.kind or 'value',
     #body,
     #body == 1 and '' or 's',
-    detail.bytes or #detail.text,
-    (detail.bytes or #detail.text) == 1 and '' or 's'
+    detail.bytes or #shown,
+    (detail.bytes or #shown) == 1 and '' or 's'
   )
-  local warn = nil
   if detail.truncated then
-    lines[#lines + 1] =
-      string.format(' !! TRUNCATED — nvime can only show you %d of %d bytes', #detail.text, detail.bytes)
-    warn = #lines
+    lines[#lines + 1] = string.format(' !! TRUNCATED — nvime can only show you %d of %d bytes', #shown, detail.bytes)
+    alerts[#alerts + 1] = #lines
   end
   for _, line in ipairs(body) do
     lines[#lines + 1] = INDENT .. line
   end
-  return lines, warn
+  return lines, alerts
 end
 
 --- Opens the float for `ask` and wires the approval keys to `answer`.
 local function show(ask, answer)
   local width = math.min(WIDTH, math.max(vim.o.columns - 4, 20))
-  local lines, warn = M.render(ask.request, width)
+  local lines, alerts = M.render(ask.request, width)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  if warn ~= nil then
-    vim.api.nvim_buf_set_extmark(buf, vim.api.nvim_create_namespace('nvime.approval'), warn - 1, 0, {
-      line_hl_group = 'NvimeError',
-    })
+  local ns = vim.api.nvim_create_namespace('nvime.approval')
+  for _, row in ipairs(alerts) do
+    vim.api.nvim_buf_set_extmark(buf, ns, row - 1, 0, { line_hl_group = 'NvimeError' })
   end
   vim.bo[buf].modifiable = false
   vim.bo[buf].bufhidden = 'wipe'

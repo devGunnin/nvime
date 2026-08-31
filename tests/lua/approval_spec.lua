@@ -149,6 +149,58 @@ describe('approval: the payload the user is asked to authorize', function()
     eq(path, (payload({ approvalId = 'a1', tool = 'Write', detail = { kind = 'path', text = path, bytes = #path } })))
   end)
 
+  --- The frame the real EditService emits for a write through a symlinked
+  --- directory. `detail.text` is the raw string the agent asked for and reads
+  --- as in-project; `path` is what the sidecar resolved it to. The shape is
+  --- pinned on the sidecar side by agent/test/edit.test.ts.
+  local function symlinked_out_frame()
+    return {
+      approvalId = 'a1',
+      tool = 'Write',
+      summary = 'writing src/secret.txt',
+      reason = 'writes outside the project root',
+      detail = {
+        kind = 'path',
+        text = '/tmp/nvime-probe/project/src/vendor/../secret.txt',
+        truncated = false,
+        bytes = 48,
+      },
+      path = '/tmp/nvime-probe-elsewhere/secret.txt',
+    }
+  end
+
+  it('shows where an out-of-root write really lands, not only the path that was typed', function()
+    local frame = symlinked_out_frame()
+    local shown, alerts = approval.render(frame, 72)
+    local text = table.concat(shown, '\n')
+    ok(text:find(frame.path, 1, true) ~= nil, 'the destination the sidecar computed is on screen')
+    ok(text:find(frame.detail.text, 1, true) ~= nil, 'and the raw path is still shown verbatim')
+    eq(1, #alerts, 'the destination is flagged, not buried')
+    ok(shown[alerts[1]]:find('really lands', 1, true) ~= nil, 'got: ' .. tostring(shown[alerts[1]]))
+  end)
+
+  it('puts the destination in the float on screen, above the y/n keys', function()
+    fresh()
+    local frame = symlinked_out_frame()
+    approval.ask(frame, function() end)
+    local text = rendered()
+    ok(text:find(frame.path, 1, true) ~= nil, 'the float itself carries it')
+    ok(text:find(frame.path, 1, true) < text:find('allow once', 1, true), 'before the decision keys')
+    approval.dismiss_all()
+  end)
+
+  it('does not repeat the path when it is already the one on the wire', function()
+    local path = '/etc/passwd'
+    local shown = approval.render({
+      approvalId = 'a1',
+      tool = 'Write',
+      reason = 'writes outside the project root',
+      detail = { kind = 'path', text = path, truncated = false, bytes = #path },
+      path = path,
+    }, 72)
+    ok(table.concat(shown, '\n'):find('really lands', 1, true) == nil, 'nothing new to say')
+  end)
+
   it('still renders an ask that carries no payload', function()
     local shown = approval.render({ approvalId = 'a1', tool = 'Bash', summary = 'running ls' }, 72)
     ok(table.concat(shown, '\n'):find('running ls', 1, true) ~= nil)

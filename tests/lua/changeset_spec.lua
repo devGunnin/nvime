@@ -209,6 +209,23 @@ describe('changeset.revert', function()
     cleanup()
   end)
 
+  it('blames the buffer, not disk, when unsaved edits block the revert', function()
+    local _, path = open_over(BEFORE, AFTER)
+    vim.cmd('wincmd p')
+    vim.cmd('edit ' .. vim.fn.fnameescape(path))
+    local buf = vim.api.nvim_get_current_buf()
+    -- A line outside the hunk, so the refusal is about the dirty buffer alone.
+    vim.api.nvim_buf_set_lines(buf, 0, 1, false, { 'ONE' })
+
+    local ok_revert, reason = changeset.revert(changeset.view().rows[hunk_row(1)])
+    eq(false, ok_revert)
+    ok(reason:find('unsaved edits', 1, true) ~= nil, 'got: ' .. tostring(reason))
+    ok(reason:find('on disk', 1, true) == nil, 'nothing wrote disk — do not send the user looking there')
+    eq(AFTER, disk(path), 'and the refusal really did leave the file alone')
+    vim.cmd('silent! bwipeout! ' .. buf)
+    cleanup()
+  end)
+
   it('asks for a hunk rather than guessing when the cursor is on a file row', function()
     open_over(BEFORE, AFTER)
     local ok_revert, reason = changeset.revert({ change = 1 })

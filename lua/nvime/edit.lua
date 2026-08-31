@@ -128,8 +128,8 @@ local function on_external_change(params)
   for _, path in ipairs(reloaded) do
     surface():append('    reloaded ' .. relative_to_root(path) .. ' (not in the changeset)', 'NvimeDim')
   end
-  for _, path in ipairs(left) do
-    surface():append('    ! ' .. relative_to_root(path) .. ' left alone — :e to reload it', 'NvimeError')
+  for _, entry in ipairs(left) do
+    surface():append('    ! ' .. relative_to_root(entry.path) .. ' — ' .. entry.reason, 'NvimeError')
   end
 end
 

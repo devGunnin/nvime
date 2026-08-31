@@ -407,40 +407,71 @@ local function buffers_under(root)
   return found
 end
 
+--- Brings one out-of-date buffer up to date.
+--- @return string|nil reason nil once reloaded, else why nvime would not
+local function reconcile(buf, path, current, on_disk, opts)
+  if vim.bo[buf].modified then
+    return 'unsaved edits — save them, or :e to reload it'
+  end
+  -- Splitting a binary file into buffer lines would corrupt it on write.
+  if on_disk:find('\0', 1, true) ~= nil then
+    return 'binary — :e to reload it'
+  end
+  local change = {
+    path = path,
+    before = { kind = 'text', text = current },
+    after = { kind = 'text', text = on_disk },
+  }
+  local status, detail = M.apply(change, opts)
+  if status == 'applied' or status == 'unchanged' then
+    return nil
+  end
+  return detail or status
+end
+
+--- Why a buffer whose file nvime could not read needs the user, or nil when
+--- it does not: `:e newfile` leaves an empty buffer over a file that never
+--- existed, and calling that a deletion would cry wolf on every shell step.
+local function unreadable_reason(buf, path, read_err)
+  if vim.uv.fs_stat(path) ~= nil then
+    return read_err or 'could not be read'
+  end
+  local empty = vim.api.nvim_buf_line_count(buf) == 1 and vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1] == ''
+  if empty and not vim.bo[buf].modified then
+    return nil
+  end
+  return 'gone from disk — the buffer still holds the old contents'
+end
+
 --- Reconciles buffers under `root` with disk after something nvime could not
 --- record changed files — an approved shell step. A clean buffer is brought up
---- to date through the same live path a recorded change takes; a dirty one is
---- named rather than touched, because its unsaved work is the user's.
+--- to date through the same live path a recorded change takes; anything else
+--- is named with its reason rather than touched, a file the step DELETED very
+--- much included.
 ---
 --- @param root string project root
 --- @param opts table run_id (string), fade_ms (integer), nofade (boolean)
 --- @return string[] reloaded paths
---- @return string[] left paths that need the user (unsaved edits, or binary)
+--- @return table[] left { path, reason } for each buffer nvime would not touch
 function M.recheck(root, opts)
   assert(type(root) == 'string' and root ~= '', 'apply.recheck needs a root')
   assert(type(opts) == 'table' and type(opts.run_id) == 'string', 'apply.recheck needs a run id')
   local reloaded, left = {}, {}
   for _, buf in ipairs(buffers_under(root)) do
     local path = vim.api.nvim_buf_get_name(buf)
-    local on_disk = read_disk(path)
     local current = M.buffer_text(buf)
-    if on_disk ~= nil and on_disk ~= current then
-      -- Splitting a binary file into buffer lines would corrupt it on write.
-      if vim.bo[buf].modified or on_disk:find('\0', 1, true) ~= nil then
-        left[#left + 1] = path
-      else
-        local change = {
-          path = path,
-          before = { kind = 'text', text = current },
-          after = { kind = 'text', text = on_disk },
-        }
-        local status = M.apply(change, opts)
-        if status == 'applied' or status == 'unchanged' then
-          reloaded[#reloaded + 1] = path
-        else
-          left[#left + 1] = path
-        end
+    local on_disk, read_err = read_disk(path)
+    local reason = nil
+    if on_disk == nil then
+      reason = unreadable_reason(buf, path, read_err)
+    elseif on_disk ~= current then
+      reason = reconcile(buf, path, current, on_disk, opts)
+      if reason == nil then
+        reloaded[#reloaded + 1] = path
       end
+    end
+    if reason ~= nil then
+      left[#left + 1] = { path = path, reason = reason }
     end
   end
   return reloaded, left

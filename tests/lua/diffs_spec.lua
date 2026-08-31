@@ -207,6 +207,36 @@ describe('diffs.unified_rows', function()
     eq(nil, map[3], 'the @@ header')
   end)
 
+  --- Rows of the rendered diff whose text starts with a backslash: the
+  --- `\ No newline at end of file` marker vim.diff emits mid-hunk.
+  local function marker_rows(before, after)
+    local text = diffs.unified('f', before, after)
+    local rows = {}
+    for at, line in ipairs(vim.split(text, '\n', { plain = true })) do
+      if line:sub(1, 1) == '\\' then
+        rows[#rows + 1] = at
+      end
+    end
+    return rows
+  end
+
+  it('does not count the no-newline marker as a line of the new file', function()
+    -- The marker lands BETWEEN `-b` and the added lines when the "before" side
+    -- is the one lacking the newline; counting it dropped `+d` off its hunk.
+    local before, after = 'a\nb', 'a\nB\nc\nd\n'
+    local rows, map = mapped(before, after)
+    eq(1, #marker_rows(before, after), 'the probe needs the marker to be there at all')
+    eq({ { '-b', 1 }, { '+B', 1 }, { '+c', 1 }, { '+d', 1 } }, rows)
+    eq(nil, map[marker_rows(before, after)[1]], 'and the marker itself belongs to no hunk')
+  end)
+
+  it('keeps the mapping straight on a later hunk after the marker', function()
+    local before = 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj'
+    local after = 'A\nb\nc\nd\ne\nf\ng\nh\ni\nJ\nz\n'
+    eq(2, #diffs.hunks(before, after), 'the probe needs a hunk on each side of the marker')
+    eq({ { '-a', 1 }, { '+A', 1 }, { '-j', 2 }, { '+J', 2 }, { '+z', 2 } }, (mapped(before, after)))
+  end)
+
   it('reports nothing at all for a diff with no hunks', function()
     eq({}, diffs.unified_rows('', {}))
   end)
