@@ -31,8 +31,10 @@ function M.open(items, opts)
   for _, label in ipairs(labels) do
     width = math.max(width, vim.fn.strdisplaywidth(label))
   end
-  width = math.min(math.max(width + 2, 30), math.floor(vim.o.columns * 0.8))
-  local height = math.min(#items, MAX_HEIGHT)
+  -- Clamp to the terminal: a float taller or wider than the screen would place
+  -- at a negative row/col and `nvim_open_win` throws out of an RPC callback.
+  width = math.min(math.max(width + 2, 30), math.max(math.floor(vim.o.columns * 0.8), 1))
+  local height = math.max(math.min(#items, MAX_HEIGHT, vim.o.lines - 2), 1)
 
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, labels)
@@ -43,8 +45,8 @@ function M.open(items, opts)
     relative = 'editor',
     width = width,
     height = height,
-    row = math.floor((vim.o.lines - height) / 2),
-    col = math.floor((vim.o.columns - width) / 2),
+    row = math.max(math.floor((vim.o.lines - height) / 2), 0),
+    col = math.max(math.floor((vim.o.columns - width) / 2), 0),
     style = 'minimal',
     border = 'rounded',
     title = opts.title or 'nvime',
