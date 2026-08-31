@@ -23,17 +23,21 @@ end
 function Splitter:push(chunk)
   self.buffer = self.buffer .. chunk
   local lines = {}
+  -- Scan with an index and slice once: re-slicing per frame is O(n^2) on a
+  -- chunk carrying many streamed deltas, and this runs in a fast event context.
+  local start = 1
   while true do
-    local nl = self.buffer:find('\n', 1, true)
+    local nl = self.buffer:find('\n', start, true)
     if nl == nil then
       break
     end
-    local line = vim.trim(self.buffer:sub(1, nl - 1))
-    self.buffer = self.buffer:sub(nl + 1)
+    local line = vim.trim(self.buffer:sub(start, nl - 1))
+    start = nl + 1
     if line ~= '' then
       lines[#lines + 1] = line
     end
   end
+  self.buffer = self.buffer:sub(start)
   if #self.buffer > MAX_LINE_BYTES then
     self.buffer = ''
     return lines, 'sidecar output exceeded the line limit without a newline'
@@ -49,6 +53,10 @@ end
 local Client = {}
 Client.__index = Client
 
+--- Request ids are unique per Neovim session, not per client: a respawned
+--- sidecar restarting at 1 would collide with an id a caller is still tracking.
+local next_id = 0
+
 --- @param opts table cmd (string[]), cwd, env, on_event(name, params), on_exit(code, stderr)
 function M.new(opts)
   assert(type(opts.cmd) == 'table' and #opts.cmd > 0, 'rpc.new needs a non-empty cmd')
@@ -60,7 +68,6 @@ function M.new(opts)
     env = opts.env,
     on_event = opts.on_event,
     on_exit = opts.on_exit,
-    next_id = 0,
     pending = {},
     stderr = {},
     splitter = M.new_splitter(),
@@ -99,29 +106,60 @@ function Client:start()
   return true, nil
 end
 
---- Sends a request; `cb(err, result)` is always called exactly once, including
---- when the sidecar dies with the request still in flight.
+--- Sends a request; `cb(err, result)` is always called exactly once — on the
+--- reply, when the sidecar dies in flight, or when the deadline passes.
 --- @param method string
 --- @param params table|nil
 --- @param cb fun(err: table|nil, result: any)
+--- @param timeout_ms integer|nil deadline; nil for a streaming turn, which has none
 --- @return integer|nil request id, usable with `chat.cancel`
-function Client:request(method, params, cb)
+function Client:request(method, params, cb, timeout_ms)
   assert(type(method) == 'string' and method ~= '', 'rpc.request needs a method name')
   assert(type(cb) == 'function', 'rpc.request needs a callback')
+  assert(
+    timeout_ms == nil or (type(timeout_ms) == 'number' and timeout_ms > 0),
+    'rpc.request needs a positive timeout or none'
+  )
   if self.proc == nil then
     cb({ code = 'internal', message = 'the nvime sidecar is not running' }, nil)
     return nil
   end
-  self.next_id = self.next_id + 1
-  local id = self.next_id
-  self.pending[id] = cb
+  next_id = next_id + 1
+  local id = next_id
+
+  local done, timer = false, nil
+  local function settle(err, result)
+    if done then
+      return
+    end
+    done = true
+    self.pending[id] = nil
+    if timer ~= nil then
+      timer:stop()
+      timer:close()
+      timer = nil
+    end
+    cb(err, result)
+  end
+  self.pending[id] = settle
+  if timeout_ms ~= nil then
+    timer = vim.uv.new_timer()
+    timer:start(timeout_ms, 0, function()
+      vim.schedule(function()
+        settle({
+          code = 'internal',
+          message = string.format('the sidecar did not answer %s within %dms', method, timeout_ms),
+        }, nil)
+      end)
+    end)
+  end
+
   local line = vim.json.encode({ id = id, method = method, params = params or vim.empty_dict() })
   local written, err = pcall(function()
     self.proc:write(line .. '\n')
   end)
   if not written then
-    self.pending[id] = nil
-    cb({ code = 'internal', message = 'could not write to the sidecar', detail = tostring(err) }, nil)
+    settle({ code = 'internal', message = 'could not write to the sidecar', detail = tostring(err) }, nil)
     return nil
   end
   return id

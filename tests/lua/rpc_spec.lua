@@ -74,3 +74,73 @@ describe('rpc.new', function()
     ok(seen ~= nil and seen.code == 'internal', 'the callback must fire with an error')
   end)
 end)
+
+--- A client with a stub process, so requests can be sent without spawning node.
+local function client_with_writes()
+  local written = {}
+  local client = rpc.new({ cmd = { 'node' }, on_event = function() end, on_exit = function() end })
+  client.proc = {
+    write = function(_, line)
+      written[#written + 1] = line
+    end,
+  }
+  return client, written
+end
+
+describe('rpc request ids', function()
+  it('never reissues an id a respawned sidecar could collide with', function()
+    local first = client_with_writes()
+    local second = client_with_writes()
+    local a = first:request('ping', nil, function() end)
+    local b = second:request('ping', nil, function() end)
+    ok(a ~= nil and b ~= nil)
+    ok(b > a, 'a fresh client must not restart the counter at 1')
+  end)
+end)
+
+describe('rpc request deadline', function()
+  it('settles a request the sidecar never answers', function()
+    local client = client_with_writes()
+    local seen = {}
+    client:request('chat.list', nil, function(err)
+      seen.err, seen.called = err, true
+    end, 20)
+    vim.wait(2000, function()
+      return seen.called == true
+    end, 10)
+    ok(seen.called, 'the callback must fire rather than hang forever')
+    ok(seen.err ~= nil and seen.err.message:find('chat.list') ~= nil, 'and name what timed out')
+  end)
+
+  it('does not fire once the reply has arrived', function()
+    local client = client_with_writes()
+    local calls = 0
+    local id = client:request('chat.list', nil, function()
+      calls = calls + 1
+    end, 20)
+    client:_dispatch(string.format('{"id":%d,"ok":true,"result":{}}', id))
+    vim.wait(200, function()
+      return false
+    end, 10)
+    eq(1, calls, 'exactly once, deadline or not')
+  end)
+
+  it('leaves a streaming turn without one', function()
+    local client = client_with_writes()
+    local calls = 0
+    client:request('chat.send', nil, function()
+      calls = calls + 1
+    end)
+    vim.wait(120, function()
+      return false
+    end, 10)
+    eq(0, calls, 'a turn may take minutes; only the user stops it')
+  end)
+
+  it('refuses a nonsensical deadline', function()
+    local client = client_with_writes()
+    t.throws(function()
+      client:request('ping', nil, function() end, 0)
+    end, 'positive timeout')
+  end)
+end)
