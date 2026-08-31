@@ -1,0 +1,238 @@
+--- Newline-delimited JSON client for the nvime sidecar.
+---
+--- Every process interaction is callback-driven (`vim.system`), so nothing here
+--- ever blocks the editor. Frames arrive in a fast event context; the decode is
+--- pure Lua and the user callbacks are handed to `vim.schedule`.
+local M = {}
+
+--- A run-on line means the peer desynchronized, not that it is chatty.
+local MAX_LINE_BYTES = 16 * 1024 * 1024
+local MAX_STDERR_LINES = 50
+
+--- Reassembles whole lines out of arbitrarily chunked output.
+local Splitter = {}
+Splitter.__index = Splitter
+
+function M.new_splitter()
+  return setmetatable({ buffer = '' }, Splitter)
+end
+
+--- @param chunk string
+--- @return string[] complete lines
+--- @return string|nil error when the buffer grew past the line limit
+function Splitter:push(chunk)
+  self.buffer = self.buffer .. chunk
+  local lines = {}
+  while true do
+    local nl = self.buffer:find('\n', 1, true)
+    if nl == nil then
+      break
+    end
+    local line = vim.trim(self.buffer:sub(1, nl - 1))
+    self.buffer = self.buffer:sub(nl + 1)
+    if line ~= '' then
+      lines[#lines + 1] = line
+    end
+  end
+  if #self.buffer > MAX_LINE_BYTES then
+    self.buffer = ''
+    return lines, 'sidecar output exceeded the line limit without a newline'
+  end
+  return lines, nil
+end
+
+--- @return integer bytes held back waiting for a newline
+function Splitter:pending()
+  return #self.buffer
+end
+
+local Client = {}
+Client.__index = Client
+
+--- @param opts table cmd (string[]), cwd, env, on_event(name, params), on_exit(code, stderr)
+function M.new(opts)
+  assert(type(opts.cmd) == 'table' and #opts.cmd > 0, 'rpc.new needs a non-empty cmd')
+  assert(type(opts.on_event) == 'function', 'rpc.new needs an on_event callback')
+  assert(type(opts.on_exit) == 'function', 'rpc.new needs an on_exit callback')
+  return setmetatable({
+    cmd = opts.cmd,
+    cwd = opts.cwd,
+    env = opts.env,
+    on_event = opts.on_event,
+    on_exit = opts.on_exit,
+    next_id = 0,
+    pending = {},
+    stderr = {},
+    splitter = M.new_splitter(),
+    proc = nil,
+  }, Client)
+end
+
+function Client:is_running()
+  return self.proc ~= nil
+end
+
+--- @return boolean ok
+--- @return string|nil error
+function Client:start()
+  if self.proc ~= nil then
+    return true, nil
+  end
+  local ok, proc = pcall(vim.system, self.cmd, {
+    cwd = self.cwd,
+    env = self.env,
+    stdin = true,
+    stdout = function(err, data)
+      self:_on_stdout(err, data)
+    end,
+    stderr = function(err, data)
+      self:_on_stderr(err, data)
+    end,
+    text = true,
+  }, function(result)
+    self:_on_exit(result)
+  end)
+  if not ok then
+    return false, tostring(proc)
+  end
+  self.proc = proc
+  return true, nil
+end
+
+--- Sends a request; `cb(err, result)` is always called exactly once, including
+--- when the sidecar dies with the request still in flight.
+--- @param method string
+--- @param params table|nil
+--- @param cb fun(err: table|nil, result: any)
+--- @return integer|nil request id, usable with `chat.cancel`
+function Client:request(method, params, cb)
+  assert(type(method) == 'string' and method ~= '', 'rpc.request needs a method name')
+  assert(type(cb) == 'function', 'rpc.request needs a callback')
+  if self.proc == nil then
+    cb({ code = 'internal', message = 'the nvime sidecar is not running' }, nil)
+    return nil
+  end
+  self.next_id = self.next_id + 1
+  local id = self.next_id
+  self.pending[id] = cb
+  local line = vim.json.encode({ id = id, method = method, params = params or vim.empty_dict() })
+  local written, err = pcall(function()
+    self.proc:write(line .. '\n')
+  end)
+  if not written then
+    self.pending[id] = nil
+    cb({ code = 'internal', message = 'could not write to the sidecar', detail = tostring(err) }, nil)
+    return nil
+  end
+  return id
+end
+
+function Client:stop()
+  local proc = self.proc
+  if proc == nil then
+    return
+  end
+  -- Ask first; the sidecar exits on its own when stdin closes.
+  self:request('shutdown', nil, function() end)
+  pcall(function()
+    proc:write(nil)
+  end)
+  vim.defer_fn(function()
+    if self.proc == proc then
+      pcall(function()
+        proc:kill('sigterm')
+      end)
+    end
+  end, 1000)
+end
+
+function Client:_on_stdout(err, data)
+  if err ~= nil then
+    self:_fail_all({ code = 'internal', message = 'sidecar stdout error', detail = tostring(err) })
+    return
+  end
+  if data == nil then
+    return
+  end
+  local lines, overflow = self.splitter:push(data)
+  for _, line in ipairs(lines) do
+    self:_dispatch(line)
+  end
+  if overflow ~= nil then
+    self:_fail_all({ code = 'internal', message = overflow })
+  end
+end
+
+--- `luanil` matters: without it a JSON `null` decodes to `vim.NIL`, a userdata
+--- that is truthy in Lua and blows up the first time a caller indexes it.
+local DECODE_OPTS = { luanil = { object = true, array = true } }
+
+function Client:_dispatch(line)
+  local ok, frame = pcall(vim.json.decode, line, DECODE_OPTS)
+  if not ok or type(frame) ~= 'table' then
+    self:_fail_all({ code = 'internal', message = 'undecodable frame from the sidecar', detail = line })
+    return
+  end
+  if frame.event ~= nil then
+    local name, params = frame.event, frame.params or {}
+    vim.schedule(function()
+      self.on_event(name, params)
+    end)
+    return
+  end
+  local cb = self.pending[frame.id]
+  if cb == nil then
+    return
+  end
+  self.pending[frame.id] = nil
+  -- Not `cond and nil or fallback`: in Lua that always yields the fallback.
+  local err = nil
+  if frame.ok ~= true then
+    err = frame.error or { code = 'internal', message = 'the sidecar reported an unnamed failure' }
+  end
+  local result = frame.result
+  vim.schedule(function()
+    cb(err, result)
+  end)
+end
+
+function Client:_on_stderr(_, data)
+  if data == nil or data == '' then
+    return
+  end
+  for _, line in ipairs(vim.split(data, '\n', { plain = true, trimempty = true })) do
+    self.stderr[#self.stderr + 1] = line
+    if #self.stderr > MAX_STDERR_LINES then
+      table.remove(self.stderr, 1)
+    end
+  end
+end
+
+function Client:_on_exit(result)
+  self.proc = nil
+  local code = result and result.code or -1
+  local tail = table.concat(self.stderr, '\n')
+  self:_fail_all({
+    code = 'internal',
+    message = string.format('the nvime sidecar exited (code %d)', code),
+    detail = tail ~= '' and tail or nil,
+  })
+  vim.schedule(function()
+    self.on_exit(code, tail)
+  end)
+end
+
+--- No request is ever left hanging: a dead sidecar fails everything in flight.
+function Client:_fail_all(err)
+  local pending = self.pending
+  self.pending = {}
+  for _, cb in pairs(pending) do
+    vim.schedule(function()
+      cb(err, nil)
+    end)
+  end
+end
+
+M.Client = Client
+
+return M
