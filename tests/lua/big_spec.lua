@@ -9,7 +9,7 @@ local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
 local fake = { requests = {}, replies = {}, subscriber = nil }
 
 function fake.request(method, params, cb, opts)
-  fake.requests[#fake.requests + 1] = { method = method, params = params }
+  fake.requests[#fake.requests + 1] = { method = method, params = params, opts = opts }
   if opts ~= nil and opts.on_sent ~= nil then
     opts.on_sent(#fake.requests)
   end
@@ -64,6 +64,7 @@ local function session(overrides)
     state = 'drafting',
     display = 'drafting',
     detached = false,
+    heldElsewhere = false,
     worktreeExists = false,
     hasDiff = false,
     counts = { total = 0, open = 0, substantial = 0 },
@@ -240,6 +241,10 @@ describe('big change session states', function()
     eq('building', big.describe(session({ display = 'building' })))
     eq('building (detached — sidecar gone)', big.describe(session({ display = 'building', detached = true })))
     eq(
+      'building (in another editor)',
+      big.describe(session({ display = 'building', detached = false, heldElsewhere = true }))
+    )
+    eq(
       'reviewing · 2 of 5 threads open',
       big.describe(session({ display = 'reviewing', counts = { total = 5, open = 2, substantial = 3 } }))
     )
@@ -268,6 +273,65 @@ describe('big change session states', function()
     ok(lines[1]:match('building') ~= nil, 'the picker leads with the state: ' .. lines[1])
     ok(lines[2]:match('mergeable') ~= nil, lines[2])
     vim.api.nvim_win_close(win, true)
+    cleanup()
+  end)
+
+  it('sends the two long git operations without the control deadline', function()
+    local _, path = sandbox()
+    open_on(path)
+    local live = big.state()
+    live.session = session({ spec = SPEC })
+    fake.replies['big.approve'] = { result = { session = session({ display = 'building', spec = SPEC }) } }
+    big.approve()
+    -- The clone is off the approve path now, but discard still removes a whole
+    -- checkout, and a 15s control deadline would abandon both mid-way.
+    local approve = sent('big.approve')
+    ok(approve.opts ~= nil and approve.opts.no_deadline == true, 'approve must outlive the control deadline')
+
+    live.session = session({ state = 'building', display = 'building', detached = true })
+    fake.replies['big.discard'] = { result = { discarded = true } }
+    big.discard()
+    local discard = sent('big.discard')
+    ok(discard.opts ~= nil and discard.opts.no_deadline == true, 'discard must too')
+    cleanup()
+  end)
+
+  it('re-reads the session when approval fails, so the panel does not keep a stale view', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ spec = SPEC })
+    fake.replies['big.approve'] = { err = { message = 'timed out' } }
+    fake.replies['big.open'] = { result = { session = session({ state = 'building', display = 'building' }) } }
+    big.send('approve')
+    ok(sent('big.open') ~= nil, 'the sidecar may have approved anyway; the panel must go and look')
+    eq('building', big.state().session.display)
+    cleanup()
+  end)
+
+  it('re-triages a built change instead of running the build agent again', function()
+    local _, path = sandbox()
+    open_on(path)
+    local live = big.state()
+    live.session = session({ state = 'triaging', display = 'triaging', detached = true })
+    big.send('what happened')
+    ok(has_line('type `retriage`'), 'a build that was never sorted names re-sorting as its exit')
+
+    fake.replies['big.capture'] = { result = { session = session({ display = 'reviewing', hasDiff = true }) } }
+    big.send('retriage')
+    ok(sent('big.capture') ~= nil, '`retriage` sorts the diff again')
+    eq(nil, sent('big.build'), 'and never re-runs the build agent over finished work')
+    cleanup()
+  end)
+
+  it('offers nothing on a session another editor is driving', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ state = 'building', display = 'building', heldElsewhere = true })
+    big.send('resume')
+    eq(nil, sent('big.build'), 'resuming would run a second build agent in the same clone')
+    big.send('discard')
+    eq(nil, sent('big.discard'), 'discarding would delete the clone under a live build')
+    ok(has_line('another editor is driving this'))
     cleanup()
   end)
 

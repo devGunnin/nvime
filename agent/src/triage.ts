@@ -178,33 +178,42 @@ function assertCoversExactlyOnce(blocks: readonly TriageBlock[], diff: ParsedDif
 
 /**
  * Re-applies review state after a revision re-captured the diff. A block whose
- * content the reviewer has already seen keeps its verdict; anything with a
- * hunk that is new or was still open comes back open.
+ * content the reviewer has already seen, AT THE SAME RATING, keeps its verdict;
+ * anything new, re-rated, or still open comes back open.
  *
- * Deliberately conservative: an unknown signature means unreviewed content, so
- * the block opens even if the rest of it was cleared.
+ * Deliberately conservative: an unknown key means unreviewed content, so the
+ * block opens even if the rest of it was cleared. The rating is part of the key
+ * because a re-rating is new information — bytes auto-resolved as trivia in an
+ * earlier round must not arrive resolved once triage calls them substantial,
+ * which would clear a substantial thread nobody defended and hand the merge
+ * predicate a thread the review gate never saw.
  */
 export function carryForward(previous: readonly TriageBlock[], next: readonly TriageBlock[]): TriageBlock[] {
   const prior = new Map<string, BlockState>();
   for (const block of previous) {
     for (const signature of block.signatures) {
+      const key = priorKey(signature, block.substantial);
       // An open block wins: the same content cleared in one place and open in
       // another has not been cleared.
-      if (block.state === 'open' || !prior.has(signature)) prior.set(signature, block.state);
+      if (block.state === 'open' || !prior.has(key)) prior.set(key, block.state);
     }
   }
   return next.map((block) => {
-    const carried = carriedState(block.signatures, prior);
+    const carried = carriedState(block, prior);
     if (carried === null) return block;
     return { ...block, state: carried, reopened: carried === 'open' && !block.substantial };
   });
 }
 
-/** The state a block inherits, or null when any of its content is new. */
-function carriedState(signatures: readonly string[], prior: ReadonlyMap<string, BlockState>): BlockState | null {
+function priorKey(signature: string, substantial: boolean): string {
+  return `${substantial ? 'sub' : 'triv'}:${signature}`;
+}
+
+/** The state a block inherits, or null when any of its content is new to it. */
+function carriedState(block: TriageBlock, prior: ReadonlyMap<string, BlockState>): BlockState | null {
   let state: BlockState = 'resolved';
-  for (const signature of signatures) {
-    const seen = prior.get(signature);
+  for (const signature of block.signatures) {
+    const seen = prior.get(priorKey(signature, block.substantial));
     if (seen === undefined) return null;
     if (seen === 'open') state = 'open';
   }

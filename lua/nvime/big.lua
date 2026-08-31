@@ -1,4 +1,4 @@
---- Big Change mode: the intake conversation, the worktree build, and the
+--- Big Change mode: the intake conversation, the build in a clone, and the
 --- handoff to the review threads.
 ---
 --- The sidecar owns the session record and reconciles it against disk, so this
@@ -54,6 +54,9 @@ function M.describe(session)
     return 'no big change selected'
   end
   local label = session.display or 'drafting'
+  if session.heldElsewhere and (label == 'building' or label == 'triaging') then
+    return label .. ' (in another editor)'
+  end
   if session.detached and (label == 'building' or label == 'triaging') then
     return label .. ' (detached — sidecar gone)'
   end
@@ -96,23 +99,35 @@ local function render_spec(spec)
   self:blank()
 end
 
---- What the user can do next, given where the session is. Shown after every
---- transition so the panel never leaves them guessing at the keystroke.
-local function render_next_step()
-  local session = state.session
+--- What the user can do next, given where the session is. A session another
+--- editor is driving offers nothing: resuming or discarding it from here would
+--- pull the build out from under the editor that owns it.
+--- @param session table a SessionView
+--- @return string|nil
+function M.next_step(session)
   if session == nil then
-    return
+    return nil
+  end
+  if session.heldElsewhere then
+    return 'another editor is driving this — watch it there, or <C-r> to pick a different change'
   end
   local hints = {
     drafting = session.spec ~= nil and 'answer, revise, or type `approve` to build it'
       or 'answer the question to sharpen the spec',
     building = session.detached and 'type `resume` to pick the build back up, or `discard` to throw it away'
       or 'building — <C-c> stops it',
-    triaging = 'sorting the diff into threads',
+    triaging = session.detached and 'the build is done but not sorted — type `retriage`, or `discard`'
+      or 'sorting the diff into threads',
     reviewing = '<C-t> opens the review threads',
     mergeable = '<C-t> opens the review threads',
   }
-  local hint = hints[session.display]
+  return hints[session.display]
+end
+
+--- Shown after every transition so the panel never leaves them guessing at the
+--- keystroke.
+local function render_next_step()
+  local hint = M.next_step(state.session)
   if hint ~= nil then
     surface():append('  ' .. hint, 'NvimeActivity')
     surface():blank()
@@ -140,7 +155,8 @@ local function on_event(name, params)
   elseif name == 'big.notice' then
     surface():interject('  ' .. params.text, 'NvimeError')
   elseif name == 'big.state' then
-    surface():interject('  → ' .. params.state, 'NvimeSession')
+    local note = params.note ~= nil and params.note ~= '' and (' · ' .. params.note) or ''
+    surface():interject('  → ' .. params.state .. note, 'NvimeSession')
   elseif name == 'rpc.error' then
     show_error(params.error or { message = 'the sidecar rejected a frame' })
   end
@@ -239,63 +255,79 @@ function M.ask(text)
   end)
 end
 
---- Freezes the spec, creates the worktree, and starts the build.
+--- Freezes the spec and records the base commit; `M.build` makes the clone.
 function M.approve()
   assert(state.session ~= nil, 'big.approve needs a selected session')
   local id = state.session.id
-  surface():append('— approved; building in a worktree —', 'NvimeSession')
+  surface():append('— approved; building in a clone of the repo —', 'NvimeSession')
   agent.request('big.approve', { root = state.root, sessionId = id }, function(err, result)
     if err ~= nil then
       show_error(err)
+      -- The sidecar may have approved and moved on before the reply was lost;
+      -- keeping the drafting view would route the next prompt back to intake.
+      M.refresh()
       return
     end
     adopt(result.session)
     local base = result.session.worktree or {}
-    surface():append(string.format('  worktree %s', base.path or '?'), 'NvimeDim')
+    surface():append(string.format('  clone %s', base.path or '?'), 'NvimeDim')
     surface():append(
-      string.format('  base     %s on %s', (base.baseCommit or '?'):sub(1, 8), base.baseBranch or '-'),
+      string.format('  base  %s on %s', (base.baseCommit or '?'):sub(1, 8), base.baseBranch or '-'),
       'NvimeDim'
     )
     surface():blank()
     M.build()
-  end)
+  end, { no_deadline = true })
+end
+
+--- Reports what a finished build or re-triage produced, and opens the review.
+local function settle_threads(session)
+  surface():append(
+    string.format(
+      '— %d thread%s, %d open —',
+      session.counts.total,
+      session.counts.total == 1 and '' or 's',
+      session.counts.open
+    ),
+    'NvimeDim'
+  )
+  surface():blank()
+  render_next_step()
+  if session.counts.total > 0 then
+    M.open_threads()
+  end
 end
 
 --- Runs (or resumes) the build, then captures and triages what it produced.
 function M.build()
   assert(state.session ~= nil, 'big.build needs a selected session')
-  stream('big.build', { root = state.root, sessionId = state.session.id }, function(session)
-    surface():append(
-      string.format(
-        '— %d thread%s, %d open —',
-        session.counts.total,
-        session.counts.total == 1 and '' or 's',
-        session.counts.open
-      ),
-      'NvimeDim'
-    )
-    surface():blank()
-    render_next_step()
-    if session.counts.total > 0 then
-      M.open_threads()
-    end
-  end)
+  stream('big.build', { root = state.root, sessionId = state.session.id }, settle_threads)
 end
 
---- Throws the worktree and the record away. Only ever on an explicit `discard`.
+--- `retriage`: sorts an already-built change into threads again, without
+--- re-running the build agent over work it has already done.
+function M.capture()
+  assert(state.session ~= nil, 'big.capture needs a selected session')
+  stream('big.capture', { root = state.root, sessionId = state.session.id }, settle_threads)
+end
+
+--- Throws the clone and the record away. Only ever on an explicit `discard`.
 function M.discard()
   assert(state.session ~= nil, 'big.discard needs a selected session')
   local title = state.session.title
   agent.request('big.discard', { root = state.root, sessionId = state.session.id }, function(err)
     if err ~= nil then
       show_error(err)
+      -- The refusal may be "another editor is driving it"; re-read so the
+      -- panel shows that rather than still offering `discard`.
+      M.refresh()
       return
     end
     state.session = nil
     refresh_status()
     surface():append('— discarded ' .. title .. ' —', 'NvimeDim')
     surface():blank()
-  end)
+  end, { no_deadline = true })
 end
 
 --- The panel's prompt. What it means depends on where the session is, and the
@@ -328,16 +360,27 @@ function M.send(text)
   end
 end
 
---- The two answers a detached build accepts. Anything else is refused rather
---- than guessed at: both of them are expensive to get wrong.
+--- The answers a build in progress accepts. Anything else is refused rather
+--- than guessed at: all of them are expensive to get wrong. A session another
+--- editor holds accepts none of them.
 --- @param word string the prompt, trimmed and lowercased
 function M.resume_or_discard(word)
-  if word == 'resume' then
-    M.build()
+  local session = state.session
+  local hint = M.next_step(session) or 'the build is running — <C-c> stops it'
+  if session ~= nil and session.heldElsewhere then
+    surface():append('  ' .. hint, 'NvimeActivity')
+    surface():blank()
+    return
+  end
+  -- A detached `triaging` session has already been built; picking it back up
+  -- means sorting the diff again, not running the build agent a second time.
+  local pick_up = (session ~= nil and session.display == 'triaging') and M.capture or M.build
+  if word == 'resume' or (word == 'retriage' and pick_up == M.capture) then
+    pick_up()
   elseif word == 'discard' then
     M.discard()
-  elseif state.session ~= nil and state.session.detached then
-    surface():append('  type `resume` to pick the build back up, or `discard` to throw it away', 'NvimeActivity')
+  elseif session ~= nil and session.detached then
+    surface():append('  ' .. hint, 'NvimeActivity')
     surface():blank()
   else
     surface():append('  the build is running — <C-c> stops it', 'NvimeActivity')

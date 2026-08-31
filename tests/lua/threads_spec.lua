@@ -265,6 +265,20 @@ describe('review thread actions', function()
     threads.close()
   end)
 
+  it('does not let a session title be evaluated as vimscript in the winbar', function()
+    -- A winbar evaluates `%{expr}` on every redraw, and the title is the first
+    -- line of the user's own prompt — routinely pasted from an issue.
+    eq('%%{execute("let g:pwned = 1")}', threads.escape_winbar('%{execute("let g:pwned = 1")}'))
+    open_review({ block() })
+    local view = threads.view()
+    view.session.title = 'backoff %{execute("let g:nvime_pwned = 1")}'
+    threads.reload(view.session)
+    vim.g.nvime_pwned = nil
+    vim.cmd('redraw')
+    eq(nil, vim.g.nvime_pwned, 'a title must render as text, never run')
+    threads.close()
+  end)
+
   it('refuses to open a review that has no captured diff', function()
     threads.close()
     fake.requests = {}

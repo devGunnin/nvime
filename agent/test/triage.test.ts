@@ -24,19 +24,24 @@ function diffOf(files: Array<{ path: string; hunks: number }>): ReturnType<typeo
 
 const ids = (blocks: readonly TriageBlock[]): string[][] => blocks.map((block) => block.hunkIds);
 
+/** Hunk ids are content hashes, so tests name them by position in the diff. */
+const hunkIds = (diff: ReturnType<typeof parseUnifiedDiff>): string[] => diff.hunks.map((hunk) => hunk.id);
+
 describe('normalizeBlocks', () => {
   const diff = diffOf([
     { path: 'a.txt', hunks: 2 },
     { path: 'b.txt', hunks: 1 },
   ]);
+  // a.txt hunk 1, a.txt hunk 2, b.txt hunk 1.
+  const [a1 = '', a2 = '', b1 = ''] = hunkIds(diff);
 
   it('keeps a grouping that already covers every hunk exactly once', () => {
     const raw: RawBlock[] = [
-      { title: 'core', hunkIds: ['h1.1', 'h2.1'], substantial: true, rationale: 'logic' },
-      { title: 'imports', hunkIds: ['h1.2'], substantial: false, rationale: 'mechanical' },
+      { title: 'core', hunkIds: [a1, b1], substantial: true, rationale: 'logic' },
+      { title: 'imports', hunkIds: [a2], substantial: false, rationale: 'mechanical' },
     ];
     const blocks = normalizeBlocks(raw, diff);
-    assert.deepEqual(ids(blocks), [['h1.1', 'h2.1'], ['h1.2']]);
+    assert.deepEqual(ids(blocks), [[a1, b1], [a2]]);
     assert.deepEqual(blocks[0]?.files, ['a.txt', 'b.txt']);
     assert.equal(blocks[0]?.state, 'open', 'substance starts open');
     assert.equal(blocks[1]?.state, 'resolved', 'trivia auto-resolves but stays listed');
@@ -44,41 +49,41 @@ describe('normalizeBlocks', () => {
 
   it('gives a hunk claimed twice to its first claimant only', () => {
     const raw: RawBlock[] = [
-      { title: 'first', hunkIds: ['h1.1'], substantial: true, rationale: '' },
-      { title: 'second', hunkIds: ['h1.1', 'h1.2'], substantial: true, rationale: '' },
-      { title: 'third', hunkIds: ['h2.1'], substantial: true, rationale: '' },
+      { title: 'first', hunkIds: [a1], substantial: true, rationale: '' },
+      { title: 'second', hunkIds: [a1, a2], substantial: true, rationale: '' },
+      { title: 'third', hunkIds: [b1], substantial: true, rationale: '' },
     ];
-    assert.deepEqual(ids(normalizeBlocks(raw, diff)), [['h1.1'], ['h1.2'], ['h2.1']]);
+    assert.deepEqual(ids(normalizeBlocks(raw, diff)), [[a1], [a2], [b1]]);
   });
 
   it('drops ids that are not in the diff, and the block if that empties it', () => {
     const raw: RawBlock[] = [
-      { title: 'ghost', hunkIds: ['h9.9'], substantial: true, rationale: '' },
-      { title: 'real', hunkIds: ['h1.1', 'h1.2', 'h2.1', 'nope'], substantial: true, rationale: '' },
+      { title: 'ghost', hunkIds: ['hdeadbeefdead'], substantial: true, rationale: '' },
+      { title: 'real', hunkIds: [a1, a2, b1, 'nope'], substantial: true, rationale: '' },
     ];
     const blocks = normalizeBlocks(raw, diff);
     assert.equal(blocks.length, 1);
-    assert.deepEqual(blocks[0]?.hunkIds, ['h1.1', 'h1.2', 'h2.1']);
+    assert.deepEqual(blocks[0]?.hunkIds, [a1, a2, b1]);
   });
 
   it('gathers hunks triage forgot into one open unsorted block', () => {
-    const raw: RawBlock[] = [{ title: 'partial', hunkIds: ['h1.1'], substantial: false, rationale: '' }];
+    const raw: RawBlock[] = [{ title: 'partial', hunkIds: [a1], substantial: false, rationale: '' }];
     const blocks = normalizeBlocks(raw, diff);
     const unsorted = blocks[blocks.length - 1];
     assert.equal(unsorted?.title, 'unsorted');
     assert.equal(unsorted?.substantial, true, 'unplaced hunks are never auto-resolved');
-    assert.deepEqual(unsorted?.hunkIds, ['h1.2', 'h2.1']);
+    assert.deepEqual(unsorted?.hunkIds, [a2, b1]);
   });
 
   it('covers every hunk exactly once whatever it is handed', () => {
     for (const raw of [
       [],
       [{ title: 'x', hunkIds: [], substantial: true, rationale: '' }],
-      [{ title: 'x', hunkIds: ['h1.1', 'h1.1', 'h1.1'], substantial: true, rationale: '' }],
-      [{ title: 'x', hunkIds: ['h2.1', 'h1.2', 'h1.1'], substantial: false, rationale: '' }],
+      [{ title: 'x', hunkIds: [a1, a1, a1], substantial: true, rationale: '' }],
+      [{ title: 'x', hunkIds: [b1, a2, a1], substantial: false, rationale: '' }],
     ] satisfies RawBlock[][]) {
       const seen = normalizeBlocks(raw, diff).flatMap((block) => block.hunkIds);
-      assert.deepEqual([...seen].sort(), ['h1.1', 'h1.2', 'h2.1'], `coverage broke for ${JSON.stringify(raw)}`);
+      assert.deepEqual([...seen].sort(), [a1, a2, b1].sort(), `coverage broke for ${JSON.stringify(raw)}`);
     }
   });
 });
@@ -114,8 +119,9 @@ describe('fallbackBlocks', () => {
       { path: 'a.txt', hunks: 2 },
       { path: 'b.txt', hunks: 1 },
     ]);
+    const [a1 = '', a2 = '', b1 = ''] = hunkIds(diff);
     const blocks = normalizeBlocks(fallbackBlocks(diff), diff);
-    assert.deepEqual(ids(blocks), [['h1.1', 'h1.2'], ['h2.1']]);
+    assert.deepEqual(ids(blocks), [[a1, a2], [b1]]);
     assert.ok(blocks.every((block) => block.substantial && block.state === 'open'));
   });
 });
@@ -125,10 +131,11 @@ describe('carryForward', () => {
     { path: 'a.txt', hunks: 1 },
     { path: 'b.txt', hunks: 1 },
   ]);
+  const [a1 = '', b1 = ''] = hunkIds(diff);
   const first = normalizeBlocks(
     [
-      { title: 'a', hunkIds: ['h1.1'], substantial: true, rationale: '' },
-      { title: 'b', hunkIds: ['h2.1'], substantial: false, rationale: '' },
+      { title: 'a', hunkIds: [a1], substantial: true, rationale: '' },
+      { title: 'b', hunkIds: [b1], substantial: false, rationale: '' },
     ],
     diff,
   );
@@ -137,8 +144,8 @@ describe('carryForward', () => {
     const cleared = first.map((block) => ({ ...block, state: 'resolved' as const }));
     const next = normalizeBlocks(
       [
-        { title: 'a again', hunkIds: ['h1.1'], substantial: true, rationale: '' },
-        { title: 'b again', hunkIds: ['h2.1'], substantial: false, rationale: '' },
+        { title: 'a again', hunkIds: [a1], substantial: true, rationale: '' },
+        { title: 'b again', hunkIds: [b1], substantial: false, rationale: '' },
       ],
       diff,
     );
@@ -155,7 +162,7 @@ describe('carryForward', () => {
     ]);
     const cleared = first.map((block) => ({ ...block, state: 'resolved' as const }));
     const next = normalizeBlocks(
-      [{ title: 'mixed', hunkIds: ['h1.1', 'h2.1'], substantial: true, rationale: '' }],
+      [{ title: 'mixed', hunkIds: hunkIds(revised), substantial: true, rationale: '' }],
       revised,
     );
     assert.equal(carryForward(cleared, next)[0]?.state, 'open', 'unseen content must be reviewed');
@@ -167,14 +174,39 @@ describe('carryForward', () => {
     );
     const next = normalizeBlocks(
       [
-        { title: 'a', hunkIds: ['h1.1'], substantial: true, rationale: '' },
-        { title: 'b', hunkIds: ['h2.1'], substantial: false, rationale: '' },
+        { title: 'a', hunkIds: [a1], substantial: true, rationale: '' },
+        { title: 'b', hunkIds: [b1], substantial: false, rationale: '' },
       ],
       diff,
     );
     const carried = carryForward(reopened, next);
     assert.equal(carried[1]?.state, 'open');
     assert.equal(carried[1]?.reopened, true);
+  });
+
+  it('never auto-resolves a thread the latest triage rated substantial', () => {
+    // Round 1 called these bytes formatting, so they auto-resolved. Round 2
+    // corrects itself — "this import change actually alters behavior" — and the
+    // correction must not arrive already cleared: nobody defended it, and
+    // `mergeable` is built on exactly this flag.
+    const trivial = normalizeBlocks([{ title: 'churn', hunkIds: [a1], substantial: false, rationale: '' }], diff);
+    assert.equal(trivial[0]?.state, 'resolved');
+    const rerated = normalizeBlocks([{ title: 'churn', hunkIds: [a1], substantial: true, rationale: '' }], diff);
+    const carried = carryForward(trivial, rerated);
+    assert.equal(carried[0]?.substantial, true);
+    assert.equal(carried[0]?.state, 'open', 'a re-rating is new information, not a carried verdict');
+  });
+
+  it('does not carry a substantial clearance down onto the same bytes rated trivial', () => {
+    const cleared = normalizeBlocks(
+      [{ title: 'core', hunkIds: [a1], substantial: true, rationale: '' }],
+      diff,
+    ).map((block) => ({ ...block, state: 'resolved' as const }));
+    const next = normalizeBlocks([{ title: 'core', hunkIds: [a1], substantial: false, rationale: '' }], diff);
+    // Trivia auto-resolves anyway, so the verdict is the same; what matters is
+    // that it came from this round's rating and not from the other one.
+    assert.equal(carryForward(cleared, next)[0]?.state, 'resolved');
+    assert.equal(carryForward(cleared, next)[0]?.reopened, false);
   });
 
   it('counts what is left to review', () => {

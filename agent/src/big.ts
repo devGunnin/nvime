@@ -10,16 +10,19 @@ import {
   parseIntakeOutput,
 } from './bigprompts.js';
 import {
+  clearCapture,
   reconcile,
   transition,
   type BigSession,
   type BigSpec,
   type BigState,
   type BigStore,
+  type BigWorktree,
+  type Reality,
 } from './bigstore.js';
 import type { EmitEvent, SdkBindings } from './chat.js';
 import { subscriptionEnv, type Env } from './env.js';
-import { addWorktree, captureDiff, readHead, removeWorktree } from './git.js';
+import { captureDiff, cloneAt, readHead, removeClone } from './git.js';
 import { classifyBuildTool, READ_ONLY_TOOLS, realPathOf } from './policy.js';
 import { ProtocolError } from './protocol.js';
 import { readUsage, textDelta, toolCalls, type RunUsage } from './stream.js';
@@ -38,18 +41,20 @@ import { parseUnifiedDiff, renderForTriage, type ParsedDiff } from './unidiff.js
 
 /**
  * Big Change mode: interrogate the request into a spec, build it alone in a
- * detached worktree, then split the resulting diff into review threads.
+ * disposable clone of the repo, then split the resulting diff into review
+ * threads.
  *
  * Three agent turns, three different sets of powers, each set by SDK options
  * rather than by what the prompt asks for:
  *   * intake  — read-only, the same isolation chat runs under.
- *   * build   — free inside its worktree, refused outside it.
+ *   * build   — free inside its clone, refused outside it.
  *   * triage  — read-only again, and reads only the diff it is handed.
  *
  * The record on disk is the source of truth for where a session is, and it is
  * reconciled against the filesystem on every read: a build the editor did not
  * live to see the end of comes back as "building, nobody driving", never as
- * "built".
+ * "built". A lock file beside the record says whether that "nobody" is real,
+ * because another Neovim on the same store may be the one driving it.
  */
 
 /** Read-only, exactly as chat: intake and triage may look and nothing else. */
@@ -87,6 +92,7 @@ export interface SessionSummary {
   title: string;
   display: DisplayState;
   detached: boolean;
+  heldElsewhere: boolean;
   updatedAt: number;
   counts: TriageCounts;
 }
@@ -97,6 +103,8 @@ export type DisplayState = BigState | 'mergeable';
 export interface SessionView extends BigSession {
   display: DisplayState;
   detached: boolean;
+  /** Another editor holds a live claim: read-only here, not ours to resume. */
+  heldElsewhere: boolean;
   worktreeExists: boolean;
   hasDiff: boolean;
   counts: TriageCounts;
@@ -166,6 +174,7 @@ export class BigService {
         title: view.title,
         display: view.display,
         detached: view.detached,
+        heldElsewhere: view.heldElsewhere,
         updatedAt: view.updatedAt,
         counts: view.counts,
       };
@@ -179,10 +188,11 @@ export class BigService {
   /**
    * The captured diff for the thread view, with an index into it: the editor
    * slices the text by offset rather than being sent every hunk body twice.
-   * Null before a capture.
+   * Null before a capture, and null for a diff that is not the one this
+   * session's threads describe.
    */
   diff(root: string, id: string): CapturedDiff | null {
-    const text = this.#store.readDiff(root, id);
+    const text = this.#store.readVerifiedDiff(this.#store.require(root, id));
     if (text === null) return null;
     const hunks = parseUnifiedDiff(text).hunks.map((hunk) => ({
       id: hunk.id,
@@ -226,7 +236,12 @@ export class BigService {
     return this.#view(session);
   }
 
-  /** Freezes the spec and builds the worktree. The build itself is `build`. */
+  /**
+   * Freezes the spec and records where the build will happen. Two `rev-parse`
+   * reads and one record write — the clone itself is made by `build`, which
+   * runs without a deadline, because a full checkout of a large repository is
+   * exactly the case this feature exists for and would time the editor out.
+   */
   async approve(root: string, id: string): Promise<SessionView> {
     const session = this.#store.require(root, id);
     if (session.state !== 'drafting') {
@@ -236,15 +251,18 @@ export class BigService {
       throw new ProtocolError('bad_request', 'there is no spec to approve yet — keep answering the questions');
     }
     if (this.#store.hasWorktree(session)) {
-      throw new ProtocolError('bad_request', 'this big change already has a worktree');
+      throw new ProtocolError('bad_request', 'this big change already has a build clone');
     }
     const head = await readHead(session.repoRoot);
-    const path = this.#store.worktreePathFor(session.repoRoot, session.id);
-    mkdirSync(dirname(path), { recursive: true });
-    await addWorktree(session.repoRoot, path, head.commit);
-    session.worktree = { path, baseCommit: head.commit, baseBranch: head.branch, createdAt: Date.now() };
+    session.worktree = {
+      path: this.#store.worktreePathFor(session.repoRoot, session.id),
+      baseCommit: head.commit,
+      baseBranch: head.branch,
+      createdAt: Date.now(),
+      ready: false,
+    };
     session.approvedAt = Date.now();
-    transition(session, 'building', `worktree at ${head.commit.slice(0, 8)}`);
+    transition(session, 'building', `base ${head.commit.slice(0, 8)}`);
     this.#store.save(session);
     return this.#view(session);
   }
@@ -252,24 +270,25 @@ export class BigService {
   /**
    * Drives the build, then captures and triages what it produced. Called again
    * on a session whose build was cut short, it resumes the same SDK session in
-   * the same worktree rather than starting over on top of half a change.
+   * the same clone rather than starting over on top of half a change.
    */
   async build(requestId: number, params: { root: string; id: string }): Promise<SessionView> {
     const session = this.#requireBuildable(params.root, params.id);
     const spec = session.spec;
     if (spec === null) throw new ProtocolError('bad_request', 'this big change has no approved spec');
     const worktree = session.worktree;
-    if (worktree === null) throw new ProtocolError('bad_request', 'this big change has no worktree');
+    if (worktree === null) throw new ProtocolError('bad_request', 'this big change has no build clone');
 
     if (session.state !== 'building') transition(session, 'building', 'rebuilding');
     this.#store.save(session);
 
     return this.#run(requestId, session, 'build', async () => {
+      await this.#ensureClone(requestId, session, worktree);
       const resume = session.buildSessionId;
       const prompt =
         resume === null
           ? composeBuildPrompt(spec, worktree.path)
-          : 'The previous run was interrupted. Check what is already in this worktree and finish the change.';
+          : 'The previous run was interrupted. Check what is already in this working directory and finish the change.';
       const result = await this.#turn(requestId, {
         prompt,
         cwd: worktree.path,
@@ -299,11 +318,12 @@ export class BigService {
     this.#reconcileOrThrow(session);
     const worktree = session.worktree;
     if (worktree === null || !this.#store.hasWorktree(session)) {
-      throw new ProtocolError('bad_request', 'this big change has no worktree to revise');
+      throw new ProtocolError('bad_request', 'this big change has no build clone to revise');
     }
     if (session.buildSessionId === null) {
       throw new ProtocolError('bad_request', 'nothing has been built yet to request changes on');
     }
+    this.#refuseIfHeldElsewhere(session);
     const block = session.blocks.find((entry) => entry.id === params.blockId);
     if (block === undefined) throw new ProtocolError('bad_request', `no thread '${params.blockId}'`);
 
@@ -340,15 +360,20 @@ export class BigService {
     return this.#view(session);
   }
 
-  /** Throws away the worktree and the record. Only ever on an explicit ask. */
+  /** Throws away the clone and the record. Only ever on an explicit ask. */
   async discard(root: string, id: string): Promise<{ discarded: boolean }> {
     const session = this.#store.require(root, id);
     if (this.#runningByKey.has(keyOf(session))) {
       throw new ProtocolError('busy', 'this big change is still running — stop it first');
     }
-    if (session.worktree !== null && this.#store.hasWorktree(session)) {
-      await removeWorktree(session.repoRoot, session.worktree.path);
+    // A discard from here would pull the clone out from under another editor's
+    // live build, which dies with an opaque git failure and then re-saves the
+    // record this just destroyed.
+    const held = this.#store.foreignLock(session);
+    if (held !== null) {
+      throw new ProtocolError('busy', `this big change is running in another editor (${held.what}) — stop it there`);
     }
+    if (session.worktree !== null) await removeClone(session.worktree.path);
     this.#store.destroy(root, id);
     return { discarded: true };
   }
@@ -364,14 +389,51 @@ export class BigService {
 
   #requireBuildable(root: string, id: string): BigSession {
     const session = this.#store.require(root, id);
+    // Reconcile first: a clone that vanished is already back at `drafting` by
+    // the time this looks, so the check below is about approval, not disk.
     this.#reconcileOrThrow(session);
     if (session.state === 'drafting') {
       throw new ProtocolError('bad_request', 'approve the spec before building');
     }
-    if (!this.#store.hasWorktree(session)) {
-      throw new ProtocolError('bad_request', 'the build worktree is gone — approve again to rebuild');
+    if (session.worktree === null) {
+      throw new ProtocolError('bad_request', 'the build clone is gone — approve again to rebuild');
     }
+    this.#refuseIfHeldElsewhere(session);
     return session;
+  }
+
+  /**
+   * Refuses before the caller writes anything. `#run` would refuse too, but
+   * only after a transition and a save have already landed on a record another
+   * editor is actively working.
+   */
+  #refuseIfHeldElsewhere(session: BigSession): void {
+    const held = this.#store.foreignLock(session);
+    if (held !== null) {
+      throw new ProtocolError('busy', `this big change is running in another editor (${held.what})`);
+    }
+  }
+
+  /**
+   * Makes the build's clone if it is not there yet. Off `approve`'s request
+   * path on purpose: this is a full checkout, and it is bounded by the git
+   * timeout rather than by the editor's control deadline.
+   */
+  async #ensureClone(requestId: number, session: BigSession, worktree: BigWorktree): Promise<void> {
+    if (worktree.ready && this.#store.hasWorktree(session)) return;
+    this.#emit('big.state', {
+      id: requestId,
+      session: session.id,
+      state: 'building',
+      note: 'cloning the repo at the approved commit',
+    });
+    // A half-made clone from an interrupted approval would fail `git clone`
+    // on a non-empty destination; there is nothing in it worth keeping.
+    await removeClone(worktree.path);
+    mkdirSync(dirname(worktree.path), { recursive: true });
+    await cloneAt(session.repoRoot, worktree.path, worktree.baseCommit);
+    worktree.ready = true;
+    this.#store.save(session);
   }
 
   /** Applies the disk's version of events to the record before acting on it. */
@@ -380,43 +442,56 @@ export class BigService {
     if (result.changed) this.#store.save(session);
   }
 
-  #realityOf(session: BigSession): { worktreeExists: boolean; diffExists: boolean; running: boolean } {
+  #realityOf(session: BigSession): Reality {
     return {
       worktreeExists: this.#store.hasWorktree(session),
       diffExists: this.#store.hasDiff(session),
       running: this.#runningByKey.has(keyOf(session)),
+      // The store is shared by every open Neovim, so "nobody is driving this"
+      // is a claim about the machine, not about this process.
+      heldElsewhere: this.#store.foreignLock(session) !== null,
     };
   }
 
   /**
-   * Captures the worktree's diff and splits it into threads. A triage turn
-   * that fails or answers unusably falls back to one block per file — the
-   * hunks are never dropped, and the reason is put on screen and into the
-   * fallback's own rationale rather than swallowed.
+   * Captures the clone's diff and splits it into threads. A triage turn that
+   * fails or answers unusably falls back to one block per file — the hunks are
+   * never dropped, and the reason is put on screen and into the fallback's own
+   * rationale rather than swallowed.
+   *
+   * The capture is disowned before it is taken and re-owned together with the
+   * blocks in one record write. Anything that goes wrong in between therefore
+   * leaves a `triaging` session with NO threads and no reviewable diff, which
+   * is re-triaged; it can never leave one build's threads over another
+   * build's hunks, which would show a reviewer content nobody sorted and hide
+   * content that was.
    */
   async #captureAndTriage(requestId: number, session: BigSession): Promise<SessionView> {
     const worktree = session.worktree;
-    if (worktree === null) throw new ProtocolError('bad_request', 'this big change has no worktree');
+    if (worktree === null || !worktree.ready) {
+      throw new ProtocolError('bad_request', 'this big change has nothing built to capture');
+    }
+    const previous = session.blocks;
+    clearCapture(session);
     transition(session, 'triaging', 'capturing the diff');
     this.#emit('big.state', { id: requestId, session: session.id, state: 'triaging' });
     this.#store.save(session);
 
     const text = await captureDiff(worktree.path, worktree.baseCommit);
-    this.#store.writeDiff(session, text);
+    const diffId = this.#store.stageDiff(session, text);
+    const bytes = Buffer.byteLength(text, 'utf8');
     const parsed = parseUnifiedDiff(text);
 
     if (parsed.hunks.length === 0) {
-      session.blocks = [];
       transition(session, 'reviewing', 'the build changed nothing');
-      this.#store.save(session);
+      this.#store.commitCapture(session, { id: diffId, bytes, blocks: [] });
       return this.#view(session);
     }
 
-    const previous = session.blocks;
     const raw = await this.#triageBlocks(requestId, session, parsed);
-    session.blocks = carryForward(previous, normalizeBlocks(raw, parsed));
-    transition(session, 'reviewing', `${session.blocks.length} thread(s) from ${parsed.hunks.length} hunk(s)`);
-    this.#store.save(session);
+    const blocks = carryForward(previous, normalizeBlocks(raw, parsed));
+    transition(session, 'reviewing', `${blocks.length} thread(s) from ${parsed.hunks.length} hunk(s)`);
+    this.#store.commitCapture(session, { id: diffId, bytes, blocks });
     return this.#view(session);
   }
 
@@ -457,6 +532,10 @@ export class BigService {
     if (this.#runningByKey.has(key)) {
       throw new ProtocolError('busy', `this big change is already running (${what})`);
     }
+    // On disk as well as in memory: the in-process map cannot see the second
+    // Neovim, which shares this store and would otherwise build in the same
+    // clone and discard the session out from under this run.
+    const lock = this.#store.acquireLock(session, what);
     const run: Run = { requestId, key, abort: new AbortController() };
     this.#running.set(requestId, run);
     this.#runningByKey.set(key, requestId);
@@ -467,6 +546,7 @@ export class BigService {
     } finally {
       this.#running.delete(requestId);
       this.#runningByKey.delete(key);
+      lock.release();
     }
   }
 
@@ -606,6 +686,7 @@ export class BigService {
       ...session,
       display: mergeable ? 'mergeable' : session.state,
       detached: result.detached,
+      heldElsewhere: result.heldElsewhere,
       worktreeExists: this.#store.hasWorktree(session),
       hasDiff: this.#store.hasDiff(session),
       counts,

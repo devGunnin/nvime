@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { rm } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { ProtocolError } from './protocol.js';
 import { GIT_TIMEOUT_MS } from './timeouts.js';
@@ -51,6 +52,11 @@ function detailOf(cause: unknown, args: readonly string[]): string {
   return `${base}: ${error.message ?? String(cause)}`;
 }
 
+/** A commit a git argument may name. Everything else is a caller's bug. */
+function isCommitId(value: string): boolean {
+  return /^[0-9a-f]{7,40}$/i.test(value);
+}
+
 export interface RepoHead {
   commit: string;
   /** The branch HEAD was on, or null when the repo is already detached. */
@@ -66,24 +72,34 @@ export async function readHead(repoRoot: string): Promise<RepoHead> {
 }
 
 /**
- * A detached worktree at `commit`. Detached on purpose: the build must not
- * move, or lock, any branch the user might be sitting on.
+ * The build's own repository at `commit`, HEAD detached.
+ *
+ * A clone, not `git worktree add`. A worktree's `.git` file points into the
+ * operator's repository, and the build runs shell unattended — one
+ * `git update-ref`, `git gc --prune=now` or `git reflog expire` inside it
+ * reaches their refs and objects. `--local` hardlinks the object database, so
+ * this costs a checkout and almost no disk, and the clone owns its own refs.
+ *
+ * Nothing here touches the source repository: `clone` only reads it, and no
+ * registration is left behind for a later `worktree prune` to have to clean up.
  */
-export async function addWorktree(repoRoot: string, dir: string, commit: string): Promise<void> {
-  // A worktree directory deleted from underneath git stays registered, and the
-  // add then fails on a path nothing is using. Pruning first makes re-approving
-  // a session whose worktree was removed by hand work instead of wedging it.
-  await git(repoRoot, ['worktree', 'prune']);
-  await git(repoRoot, ['worktree', 'add', '--detach', dir, commit]);
+export async function cloneAt(repoRoot: string, dir: string, commit: string): Promise<void> {
+  if (!isCommitId(commit)) throw new ProtocolError('bad_request', `'${commit}' is not a commit id`);
+  await git(repoRoot, ['clone', '--local', '--no-checkout', repoRoot, dir]);
+  // `origin` points back at the operator's repository, and a push would write
+  // their refs. The build has no reason to reach the source at all.
+  await git(dir, ['remote', 'remove', 'origin']);
+  await git(dir, ['checkout', '--detach', commit]);
 }
 
 /**
- * Drops a worktree and the registration pointing at it. `--force` is required
- * because a build leaves uncommitted work behind by design; this is only ever
- * called on an explicit discard, never as cleanup after a failure.
+ * Throws the build's clone away. It is an ordinary directory with no
+ * registration anywhere, so removing it is a removal and nothing more. Only
+ * ever called on an explicit discard, or to clear a half-made clone.
  */
-export async function removeWorktree(repoRoot: string, dir: string): Promise<void> {
-  await git(repoRoot, ['worktree', 'remove', '--force', dir]);
+export async function removeClone(dir: string): Promise<void> {
+  if (dir === '') throw new TypeError('removeClone needs a directory');
+  await rm(dir, { recursive: true, force: true });
 }
 
 /**
@@ -97,12 +113,12 @@ export async function removeWorktree(repoRoot: string, dir: string): Promise<voi
  * committed anyway (it is told not to, and cannot be stopped from it) is still
  * captured in full.
  */
-export async function captureDiff(worktreeDir: string, baseCommit: string): Promise<string> {
-  if (!/^[0-9a-f]{7,40}$/i.test(baseCommit)) {
+export async function captureDiff(buildDir: string, baseCommit: string): Promise<string> {
+  if (!isCommitId(baseCommit)) {
     throw new ProtocolError('bad_request', `'${baseCommit}' is not a commit id`);
   }
-  await git(worktreeDir, ['add', '-A', '-N']);
-  const { stdout } = await git(worktreeDir, ['diff', '--no-ext-diff', '--find-renames', baseCommit]);
+  await git(buildDir, ['add', '-A', '-N']);
+  const { stdout } = await git(buildDir, ['diff', '--no-ext-diff', '--find-renames', baseCommit]);
   if (Buffer.byteLength(stdout, 'utf8') > MAX_DIFF_BYTES) {
     throw new ProtocolError(
       'agent_error',

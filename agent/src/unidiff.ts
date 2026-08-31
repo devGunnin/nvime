@@ -14,7 +14,12 @@ import { createHash } from 'node:crypto';
 export type FileStatus = 'added' | 'deleted' | 'modified' | 'renamed';
 
 export interface DiffHunk {
-  /** Unique within one capture; the model refers to hunks by this. */
+  /**
+   * Content-addressed and unique within one capture; the model refers to hunks
+   * by this. Derived from `signature`, never from position: an id held over
+   * from an older capture must fail to resolve rather than quietly land on
+   * whatever hunk now sits in that slot.
+   */
   id: string;
   /** Path on the "b" side, or the "a" side for a deletion. */
   file: string;
@@ -70,6 +75,7 @@ export function parseUnifiedDiff(text: string): ParsedDiff {
   if (typeof text !== 'string') throw new TypeError('parseUnifiedDiff needs a string');
   const lines = text.split('\n');
   const files: FileDraft[] = [];
+  const ids = new Set<string>();
   let current: FileDraft | null = null;
   let at = 0;
 
@@ -86,14 +92,14 @@ export function parseUnifiedDiff(text: string): ParsedDiff {
       continue;
     }
     if (line.startsWith('@@')) {
-      at = readHunk(lines, at, current, files.length);
+      at = readHunk(lines, at, current, ids);
       continue;
     }
     applyHeaderLine(line, current);
     at += 1;
   }
 
-  files.forEach((file, index) => fillEmptyFile(file, index + 1));
+  for (const file of files) fillEmptyFile(file, ids);
   const hunks = files.flatMap((file) => file.hunks);
   return { files, hunks };
 }
@@ -181,13 +187,29 @@ function applyHeaderLine(line: string, file: FileDraft): void {
     file.path = unquote(line.slice('rename to '.length));
   } else if (line.startsWith('Binary files ') || line.startsWith('GIT binary patch')) file.binary = true;
   else if (line.startsWith('--- ')) {
-    const path = strip(unquote(line.slice(4)));
+    const path = headerPath(line.slice(4));
     if (path !== '/dev/null') file.oldPath = path;
   } else if (line.startsWith('+++ ')) {
-    const path = strip(unquote(line.slice(4)));
+    const path = headerPath(line.slice(4));
     if (path !== '/dev/null') file.path = path;
     else file.path = file.oldPath;
   }
+}
+
+/**
+ * The path out of a `---`/`+++` line. git appends a literal TAB after an
+ * unquoted path that contains a space; everything from that tab on belongs to
+ * git, not to the filename, and left in it corrupts every path with a space.
+ * A quoted path ends at its closing quote instead — a real tab inside a name
+ * is escaped there, so the two cases cannot be confused.
+ */
+function headerPath(raw: string): string {
+  if (raw.startsWith('"')) {
+    const end = closingQuote(raw);
+    if (end > 0) return strip(unquote(raw.slice(0, end + 1)));
+  }
+  const tab = raw.indexOf('\t');
+  return strip(unquote(tab === -1 ? raw : raw.slice(0, tab)));
 }
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
@@ -197,7 +219,7 @@ const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
  * The two line counters are the authority on where the hunk ends; content that
  * looks like a header stops nothing while either still has lines owed.
  */
-function readHunk(lines: string[], start: number, file: FileDraft, fileNumber: number): number {
+function readHunk(lines: string[], start: number, file: FileDraft, ids: Set<string>): number {
   const header = lines[start] ?? '';
   const match = HUNK_HEADER.exec(header);
   if (match === null) return start + 1;
@@ -227,19 +249,21 @@ function readHunk(lines: string[], start: number, file: FileDraft, fileNumber: n
     at += 1;
   }
   file.hunks.push(
-    makeHunk({
-      id: `h${fileNumber}.${file.hunks.length + 1}`,
-      file: file.path,
-      header,
-      oldStart: Number(match[1]),
-      oldCount,
-      newStart: Number(match[3]),
-      newCount,
-      lines: body,
-      offset: start,
-      lineCount: at - start,
-      synthetic: false,
-    }),
+    makeHunk(
+      {
+        file: file.path,
+        header,
+        oldStart: Number(match[1]),
+        oldCount,
+        newStart: Number(match[3]),
+        newCount,
+        lines: body,
+        offset: start,
+        lineCount: at - start,
+        synthetic: false,
+      },
+      ids,
+    ),
   );
   return at;
 }
@@ -249,28 +273,47 @@ function readHunk(lines: string[], start: number, file: FileDraft, fileNumber: n
  * change — still gets one, so it appears in the thread list. Dropping it would
  * mean a file changed that the reviewer is never shown.
  */
-function fillEmptyFile(file: FileDraft, fileNumber: number): void {
+function fillEmptyFile(file: FileDraft, ids: Set<string>): void {
   if (file.hunks.length > 0) return;
   const what = file.binary ? 'binary content changed' : `${file.status}, no textual change`;
   file.hunks.push(
-    makeHunk({
-      id: `h${fileNumber}.1`,
-      file: file.path,
-      header: `@@ ${file.path} @@`,
-      oldStart: 0,
-      oldCount: 0,
-      newStart: 0,
-      newCount: 0,
-      lines: [what],
-      offset: -1,
-      lineCount: 0,
-      synthetic: true,
-    }),
+    makeHunk(
+      {
+        file: file.path,
+        header: `@@ ${file.path} @@`,
+        oldStart: 0,
+        oldCount: 0,
+        newStart: 0,
+        newCount: 0,
+        lines: [what],
+        offset: -1,
+        lineCount: 0,
+        synthetic: true,
+      },
+      ids,
+    ),
   );
 }
 
-function makeHunk(hunk: Omit<DiffHunk, 'signature'>): DiffHunk {
-  return { ...hunk, signature: signatureOf(hunk.file, hunk.lines) };
+function makeHunk(hunk: Omit<DiffHunk, 'id' | 'signature'>, ids: Set<string>): DiffHunk {
+  const signature = signatureOf(hunk.file, hunk.lines);
+  return { ...hunk, id: hunkId(signature, ids), signature };
+}
+
+/** How much of a hunk's signature its id carries. */
+const HUNK_ID_HEX = 12;
+
+/**
+ * The id for a hunk of this content, unique within one capture. Two hunks with
+ * byte-identical content in the same file are distinguished by a counter —
+ * they are genuinely interchangeable, so which gets the suffix does not matter.
+ */
+function hunkId(signature: string, ids: Set<string>): string {
+  const base = `h${signature.slice(0, HUNK_ID_HEX)}`;
+  let id = base;
+  for (let n = 2; ids.has(id); n += 1) id = `${base}_${n}`;
+  ids.add(id);
+  return id;
 }
 
 /**

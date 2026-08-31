@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { basename, join } from 'node:path';
 import { ProtocolError } from './protocol.js';
 import type { TriageBlock } from './triage.js';
@@ -10,11 +10,16 @@ import type { TriageBlock } from './triage.js';
  *
  *   <root>/<repo-slug>/<session-id>/session.json   the record
  *   <root>/<repo-slug>/<session-id>/diff.patch     the captured diff
- *   <root>/<repo-slug>/<session-id>/wt/            the build worktree
+ *   <root>/<repo-slug>/<session-id>/lock.json      who is driving it, if anyone
+ *   <root>/<repo-slug>/<session-id>/wt/            the build's clone of the repo
  *
- * Outside the repo on purpose — a worktree inside the tree it is built from
+ * Outside the repo on purpose — a build tree inside the tree it is built from
  * would show up in its own diff. The diff lives beside the record rather than
  * inside it so listing sessions stays cheap when one of them holds megabytes.
+ *
+ * The store is shared by every Neovim the user has open on the machine, so
+ * "who is driving this session" cannot live in one process's memory: the lock
+ * file is what a second editor reads to know the build is not its to resume.
  */
 
 export interface BigSpec {
@@ -44,6 +49,12 @@ export interface BigWorktree {
   baseCommit: string;
   baseBranch: string | null;
   createdAt: number;
+  /**
+   * False between approval and the clone that `build` makes. It separates
+   * "the clone has not been made yet" from "the clone was made and is gone",
+   * which look identical on disk and mean opposite things.
+   */
+  ready: boolean;
 }
 
 export interface BigTurn {
@@ -69,6 +80,12 @@ export interface BigSession {
   intakeSessionId: string | null;
   buildSessionId: string | null;
   worktree: BigWorktree | null;
+  /**
+   * Identity of the diff `blocks` describe, written in the same record write
+   * as they are. `diff.patch` on disk that hashes to something else is a diff
+   * these blocks were never triaged against, and is refused rather than shown.
+   */
+  diffId: string | null;
   diffCapturedAt: number | null;
   diffBytes: number;
   blocks: TriageBlock[];
@@ -76,6 +93,12 @@ export interface BigSession {
 
 /** Session ids index a directory, so the charset is a boundary check. */
 const SESSION_ID = /^[a-z0-9]{1,32}$/;
+
+/** A lock whose heartbeat is older than this is treated as abandoned. */
+export const LOCK_STALE_MS = 15_000;
+
+/** How often the holder proves it is still there. Well under the stale bound. */
+export const LOCK_HEARTBEAT_MS = 3_000;
 
 /** Conversation kept per session; older turns fall off rather than grow forever. */
 export const MAX_CONVERSATION_TURNS = 200;
@@ -94,6 +117,12 @@ export function repoSlug(repoRoot: string): string {
 
 export class BigStore {
   readonly #root: string;
+  /**
+   * Who this handle is, for the run claim. Identity is the HANDLE, not the
+   * process: one sidecar owns exactly one store, and two handles are two
+   * independent claimants whether or not they share a process.
+   */
+  readonly #owner: string = randomBytes(8).toString('hex');
 
   constructor(root: string) {
     if (root === '') throw new TypeError('BigStore needs a root directory');
@@ -116,6 +145,10 @@ export class BigStore {
     return join(this.dirFor(repoRoot, id), 'diff.patch');
   }
 
+  lockPathFor(repoRoot: string, id: string): string {
+    return join(this.dirFor(repoRoot, id), 'lock.json');
+  }
+
   create(repoRoot: string, title: string): BigSession {
     if (title.trim() === '') throw new ProtocolError('bad_request', 'a big change needs a title');
     const now = Date.now();
@@ -134,6 +167,7 @@ export class BigStore {
       intakeSessionId: null,
       buildSessionId: null,
       worktree: null,
+      diffId: null,
       diffCapturedAt: null,
       diffBytes: 0,
       blocks: [],
@@ -208,12 +242,31 @@ export class BigStore {
     writeAtomic(join(dir, 'session.json'), JSON.stringify(session, null, 2));
   }
 
-  writeDiff(session: BigSession, diff: string): void {
+  /**
+   * Puts the captured text on disk and returns its identity. The RECORD still
+   * disowns it: only `commitCapture` makes it the session's diff, so a failure
+   * during triage leaves a session with no threads rather than threads that
+   * describe an older build.
+   */
+  stageDiff(session: BigSession, diff: string): string {
     const dir = this.dirFor(session.repoRoot, session.id);
     mkdirSync(dir, { recursive: true });
     writeAtomic(join(dir, 'diff.patch'), diff);
+    return diffIdOf(diff);
+  }
+
+  /**
+   * The diff's identity and the blocks describing it, in ONE record write.
+   * They are a single fact — "this is the change, split up this way" — and a
+   * record that carried half of it would render one build's threads over
+   * another build's hunks.
+   */
+  commitCapture(session: BigSession, capture: { id: string; bytes: number; blocks: TriageBlock[] }): void {
+    session.diffId = capture.id;
     session.diffCapturedAt = Date.now();
-    session.diffBytes = Buffer.byteLength(diff, 'utf8');
+    session.diffBytes = capture.bytes;
+    session.blocks = capture.blocks;
+    this.save(session);
   }
 
   readDiff(repoRoot: string, id: string): string | null {
@@ -228,17 +281,179 @@ export class BigStore {
     }
   }
 
+  /**
+   * The captured diff, but only when it is the one this session's blocks were
+   * triaged against. Serving any other text would show a reviewer hunks nobody
+   * sorted into the threads they are reading.
+   */
+  readVerifiedDiff(session: BigSession): string | null {
+    if (session.diffCapturedAt === null || session.diffId === null) return null;
+    const text = this.readDiff(session.repoRoot, session.id);
+    if (text === null) return null;
+    if (diffIdOf(text) !== session.diffId) {
+      process.stderr.write(`nvime: the captured diff for ${session.id} is not the one its threads describe\n`);
+      return null;
+    }
+    return text;
+  }
+
   /** Deletes the whole session directory. The worktree must already be gone. */
   destroy(repoRoot: string, id: string): void {
     rmSync(this.dirFor(repoRoot, id), { recursive: true, force: true });
   }
 
+  /** True when the build's clone is really on disk (a clone with no `.git` is gone). */
   hasWorktree(session: BigSession): boolean {
     return session.worktree !== null && existsSync(join(session.worktree.path, '.git'));
   }
 
   hasDiff(session: BigSession): boolean {
     return session.diffCapturedAt !== null && existsSync(this.diffPathFor(session.repoRoot, session.id));
+  }
+
+  // ---- the cross-process run claim -----------------------------------------
+
+  /** Whoever last claimed this session, live or not, or null when nobody has. */
+  readLock(session: BigSession): BigLock | null {
+    return readLockAt(this.lockPathFor(session.repoRoot, session.id));
+  }
+
+  /**
+   * A live claim held by someone else — another editor is driving this session,
+   * so it is read-only here and neither resumable nor discardable.
+   */
+  foreignLock(session: BigSession): BigLock | null {
+    const lock = this.readLock(session);
+    if (lock === null || !isLockLive(lock)) return null;
+    return lock.owner === this.#owner ? null : lock;
+  }
+
+  /**
+   * Claims the session for one run. Exclusive creation decides the race; a
+   * claim whose holder stopped heartbeating (a killed sidecar) is reclaimed,
+   * which is what keeps a crash from wedging the session forever.
+   *
+   * @throws ProtocolError `busy` when another live run holds it.
+   */
+  acquireLock(session: BigSession, what: string): SessionLock {
+    const path = this.lockPathFor(session.repoRoot, session.id);
+    mkdirSync(this.dirFor(session.repoRoot, session.id), { recursive: true });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const claim: BigLock = {
+        owner: this.#owner,
+        pid: process.pid,
+        host: hostname(),
+        what,
+        startedAt: Date.now(),
+        heartbeatAt: Date.now(),
+      };
+      if (tryClaim(path, claim)) return heartbeat(path, claim);
+      const held = readLockAt(path);
+      if (held !== null && isLockLive(held)) {
+        throw new ProtocolError('busy', `this big change is running in another editor (${held.what})`);
+      }
+      // Abandoned, or released between the two calls: clear it and try once more.
+      rmSync(path, { force: true });
+    }
+    throw new ProtocolError('busy', 'this big change is being claimed by another editor');
+  }
+}
+
+/** One store handle's claim on a session, refreshed until it is released. */
+export interface BigLock {
+  /** The claiming handle. Two editors never share one. */
+  owner: string;
+  /** For liveness only: a claim from a dead process is reclaimable at once. */
+  pid: number;
+  host: string;
+  /** What the holder is doing, so the other editor can say so. */
+  what: string;
+  startedAt: number;
+  heartbeatAt: number;
+}
+
+export interface SessionLock {
+  release(): void;
+}
+
+function readLockAt(path: string): BigLock | null {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+      process.stderr.write(`nvime: cannot read ${path}: ${String(cause)}\n`);
+    }
+    return null;
+  }
+  try {
+    const lock = JSON.parse(text) as BigLock;
+    if (typeof lock.pid !== 'number' || typeof lock.heartbeatAt !== 'number') throw new Error('unexpected shape');
+    return lock;
+  } catch (cause) {
+    process.stderr.write(`nvime: ignoring an unreadable big-change lock ${path}: ${String(cause)}\n`);
+    return null;
+  }
+}
+
+/** True when this process took the claim; false when someone already holds it. */
+function tryClaim(path: string, claim: BigLock): boolean {
+  try {
+    writeFileSync(path, JSON.stringify(claim), { flag: 'wx', mode: 0o600 });
+    return true;
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw cause;
+  }
+}
+
+function heartbeat(path: string, claim: BigLock): SessionLock {
+  const timer = setInterval(() => {
+    // Atomic: a reader must never see a half-written claim and mistake it for
+    // an abandoned one, which would hand a second editor the same session.
+    try {
+      writeAtomic(path, JSON.stringify({ ...claim, heartbeatAt: Date.now() }));
+    } catch (cause) {
+      // The session directory went away under a live run — a discard from
+      // elsewhere. Say so and stop; the run itself will fail on its own work.
+      process.stderr.write(`nvime: lost the big-change lock ${path}: ${String(cause)}\n`);
+      clearInterval(timer);
+    }
+  }, LOCK_HEARTBEAT_MS);
+  // The sidecar must still be able to exit while a lock is held.
+  timer.unref();
+  return {
+    release: () => {
+      clearInterval(timer);
+      // Only ours: a claim reclaimed as stale while this run was wedged now
+      // belongs to another editor, and deleting it would unlock their build.
+      const held = readLockAt(path);
+      if (held === null || held.owner === claim.owner) rmSync(path, { force: true });
+    },
+  };
+}
+
+/**
+ * Whether a claim still has someone behind it. The heartbeat is the authority
+ * — it is the only signal that works across machines. A dead pid on THIS host
+ * is checked too, so a killed sidecar's session is usable again immediately
+ * instead of after the stale window.
+ */
+export function isLockLive(lock: BigLock): boolean {
+  if (Date.now() - lock.heartbeatAt > LOCK_STALE_MS) return false;
+  if (lock.host !== hostname()) return true;
+  return isPidAlive(lock.pid);
+}
+
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    // EPERM means it exists and belongs to someone else; ESRCH means it is gone.
+    return (cause as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
 
@@ -250,6 +465,19 @@ function writeAtomic(path: string, text: string): void {
 
 function newId(): string {
   return Date.now().toString(36) + randomBytes(3).toString('hex');
+}
+
+/** Identity of a captured diff: the same bytes, the same id, always. */
+export function diffIdOf(diff: string): string {
+  return createHash('sha256').update(diff, 'utf8').digest('hex').slice(0, 32);
+}
+
+/** Disowns the capture and everything derived from it, in one place. */
+export function clearCapture(session: BigSession): void {
+  session.blocks = [];
+  session.diffId = null;
+  session.diffCapturedAt = null;
+  session.diffBytes = 0;
 }
 
 function requireId(id: string): string {
@@ -268,41 +496,50 @@ export interface Reality {
   diffExists: boolean;
   /** Whether THIS sidecar is driving the session right now. */
   running: boolean;
+  /** Whether another process holds a live claim on it. */
+  heldElsewhere: boolean;
 }
 
 export interface Reconciled {
   /** True when the record was corrected and must be written back. */
   changed: boolean;
-  /** A build or triage the record claims, that no live run is behind. */
+  /** A build or triage the record claims, that no live run anywhere is behind. */
   detached: boolean;
+  /** Another editor is driving it: read-only here, and not ours to resume. */
+  heldElsewhere: boolean;
 }
 
 /**
  * Makes the record agree with the disk. A session is only ever claimed to be
  * further along than the evidence supports if this function has a bug:
  *
- *   * the worktree is gone   → nothing was built; back to drafting.
- *   * no captured diff       → nothing to review; back to building.
+ *   * the clone is gone      → nothing was built; back to drafting.
+ *   * reviewing, no diff     → nothing to review; back to triaging.
  *   * building, nothing live → still building, but nobody is driving it.
+ *
+ * `triaging` with no captured diff is honest rather than wrong: the build is
+ * done and the split is not, so it renders no threads and is re-triaged, not
+ * rebuilt.
  */
 export function reconcile(session: BigSession, reality: Reality): Reconciled {
-  if (session.state === 'drafting') return { changed: false, detached: false };
-  if (!reality.worktreeExists) {
-    transition(session, 'drafting', 'the build worktree is gone — approve again to rebuild');
+  const live = reality.running || reality.heldElsewhere;
+  const held = reality.heldElsewhere;
+  if (session.state === 'drafting') return { changed: false, detached: false, heldElsewhere: held };
+  // An approved session whose clone `build` has not made yet: its absence from
+  // disk is expected, not evidence that a build was lost.
+  const pending = session.worktree !== null && !session.worktree.ready;
+  if (!pending && !reality.worktreeExists) {
+    transition(session, 'drafting', 'the build clone is gone — approve again to rebuild');
     session.worktree = null;
     session.buildSessionId = null;
-    session.blocks = [];
-    session.diffCapturedAt = null;
-    session.diffBytes = 0;
-    return { changed: true, detached: false };
+    clearCapture(session);
+    return { changed: true, detached: false, heldElsewhere: held };
   }
-  if ((session.state === 'reviewing' || session.state === 'triaging') && !reality.diffExists) {
-    transition(session, 'building', 'no captured diff — the build did not finish');
-    session.blocks = [];
-    session.diffCapturedAt = null;
-    session.diffBytes = 0;
-    return { changed: true, detached: !reality.running };
+  if (session.state === 'reviewing' && !reality.diffExists) {
+    transition(session, 'triaging', 'no captured diff — the triage did not finish');
+    clearCapture(session);
+    return { changed: true, detached: !live, heldElsewhere: held };
   }
-  const detached = !reality.running && (session.state === 'building' || session.state === 'triaging');
-  return { changed: false, detached };
+  const detached = !live && (session.state === 'building' || session.state === 'triaging');
+  return { changed: false, detached, heldElsewhere: held };
 }

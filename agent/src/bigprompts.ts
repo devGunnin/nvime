@@ -5,7 +5,7 @@ import type { TriageBlock } from './triage.js';
  * What each big-change turn is told and what shape its answer must take.
  *
  * Prompt text steers; it never enforces. The read-only intake turn is
- * read-only because of its tool list, and the build stays in the worktree
+ * read-only because of its tool list, and the build's writes stay in its clone
  * because of `classifyBuildTool` — not because either was asked nicely.
  */
 
@@ -59,10 +59,10 @@ export function composeIntakeOpening(title: string, request: string): string {
 export function composeBuildPrompt(spec: BigSpec, worktree: string): string {
   return [
     'Implement the following change completely, in this working directory.',
-    `You are in a disposable git worktree at ${worktree}; it is yours to change freely.`,
+    `You are in a disposable clone of the repository at ${worktree}; it is yours to change freely.`,
     'Run whatever tests the project already has, and fix what you break.',
     'Do NOT commit and do NOT push — the change is reviewed as a working tree.',
-    'Do not write outside this worktree.',
+    'Do not write outside this directory.',
     '',
     renderSpec(spec),
     '',
@@ -79,7 +79,7 @@ export function composeRevisionPrompt(block: TriageBlock, comment: string): stri
     'Their comment:',
     comment,
     '',
-    'Revise the worktree accordingly. Keep the rest of the change intact, run the tests again,',
+    'Revise this working directory accordingly. Keep the rest of the change intact, run the tests again,',
     'and still do not commit. Then say in one or two sentences what you changed.',
   ].join('\n');
 }

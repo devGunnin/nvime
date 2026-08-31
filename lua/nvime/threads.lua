@@ -120,12 +120,20 @@ local function write(buf, lines)
   vim.bo[buf].modifiable = false
 end
 
+--- A winbar evaluates `%{expr}` as vimscript on every redraw, and a session
+--- title is the user's own prompt text — often pasted from an issue.
+--- @param text string
+--- @return string
+function M.escape_winbar(text)
+  return (tostring(text):gsub('%%', '%%%%'))
+end
+
 local function status()
   if not win_valid(view.tree_win) then
     return
   end
   local counts = (view.session or {}).counts or { open = 0, total = 0 }
-  local title = (view.session or {}).title or 'big change'
+  local title = M.escape_winbar((view.session or {}).title or 'big change')
   vim.wo[view.tree_win].winbar = string.format('%%#NvimeSession#%s · %d of %d open', title, counts.open, counts.total)
   if win_valid(view.pane_win) then
     vim.wo[view.pane_win].winbar = '%#NvimeDim#a answer · r request changes · X re-open · ]t/[t · M merge'
@@ -237,7 +245,7 @@ local function request_changes()
     title = ' request changes · ' .. block.title .. ' ',
     hint = '<CR> send (i_<C-s>) · <Esc> cancel',
     on_submit = function(comment)
-      notify('revising the worktree — this runs for as long as the change takes')
+      notify('revising the change — this runs for as long as it takes')
       agent.request('big.revise', {
         root = view.root,
         sessionId = view.session.id,
@@ -249,12 +257,16 @@ local function request_changes()
           return
         end
         M.reload(result.session)
-      end)
+      end, {
+        -- A revision re-runs the build agent; it is bounded by <C-c> and by
+        -- the sidecar, never by the editor's control deadline.
+        no_deadline = true,
+      })
     end,
   })
 end
 
---- `<CR>`: open the worktree's copy of this thread's first file.
+--- `<CR>`: open the build clone's copy of this thread's first file.
 local function open_file()
   local block = current_block()
   local worktree = (view.session or {}).worktree
@@ -267,7 +279,7 @@ local function open_file()
   end
   local path = worktree.path .. '/' .. file
   if vim.fn.filereadable(path) == 0 then
-    notify(file .. ' is not in the worktree (it was deleted, or renamed away)', vim.log.levels.WARN)
+    notify(file .. ' is not in the build clone (it was deleted, or renamed away)', vim.log.levels.WARN)
     return
   end
   vim.cmd('tabedit ' .. vim.fn.fnameescape(path))
@@ -307,7 +319,7 @@ local KEYS = {
   },
   { lhs = 'X', fn = toggle, desc = 'nvime: re-open or clear a trivial thread' },
   { lhs = 'r', fn = request_changes, desc = 'nvime: request changes' },
-  { lhs = '<CR>', fn = open_file, desc = 'nvime: open this file in the worktree' },
+  { lhs = '<CR>', fn = open_file, desc = 'nvime: open this file in the build clone' },
   {
     lhs = 'a',
     fn = function()

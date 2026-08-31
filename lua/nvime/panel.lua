@@ -117,7 +117,10 @@ local function set_winbar(self)
     return
   end
   local left = self.spinner == nil and '' or (SPINNER[self.spinner_frame] .. ' ')
-  vim.wo[self.win].winbar = '%#NvimeSession#' .. left .. (self.status_text or self.title)
+  -- Escaped: a winbar evaluates `%{expr}` as vimscript every redraw, and the
+  -- status text carries a session title the user typed or pasted.
+  local text = tostring(self.status_text or self.title):gsub('%%', '%%%%')
+  vim.wo[self.win].winbar = '%#NvimeSession#' .. left .. text
 end
 
 --- Reclaims a leftover buffer of the same name (the user wiped half a panel);

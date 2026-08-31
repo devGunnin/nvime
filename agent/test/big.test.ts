@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -38,10 +38,43 @@ const frames = {
     }) as unknown as SDKMessage,
 };
 
-/** One scripted agent turn: what it does, then what it yields. */
+/**
+ * One scripted agent turn: what it does, then what it yields. `frames` may be a
+ * function of the prompt, which is how a triage turn answers with the hunk ids
+ * it was actually shown — they are content hashes, not positions.
+ */
 interface Turn {
   act?: (options: Options) => Promise<void>;
-  frames: SDKMessage[];
+  frames: SDKMessage[] | ((prompt: string) => SDKMessage[]);
+}
+
+/** The hunks a triage prompt showed: `[<id>] <status> <path>`. */
+function shownHunks(prompt: string): Array<{ id: string; file: string }> {
+  return [...prompt.matchAll(/^\[(h[0-9a-f_]+)\] \S+ (.+)$/gm)].map((match) => ({
+    id: match[1] ?? '',
+    file: match[2] ?? '',
+  }));
+}
+
+/**
+ * A triage answer written in terms of the FILES the prompt showed. Hunk ids
+ * are content hashes, so a test can neither spell them nor rely on their order.
+ */
+function triageByFile(groups: Array<{ title: string; files: string[]; substantial: boolean }>) {
+  return (prompt: string): SDKMessage[] => {
+    const shown = shownHunks(prompt);
+    return [
+      frames.init(),
+      frames.result('triaged', {
+        blocks: groups.map((group) => ({
+          title: group.title,
+          hunkIds: shown.filter((hunk) => group.files.includes(hunk.file)).map((hunk) => hunk.id),
+          substantial: group.substantial,
+          rationale: '',
+        })),
+      }),
+    ];
+  };
 }
 
 interface Event {
@@ -65,9 +98,17 @@ function gitInit(dir: string): void {
   run('init', '-q', '-b', 'main');
   run('config', 'user.email', 'nvime@example.invalid');
   run('config', 'user.name', 'nvime tests');
-  writeFileSync(join(dir, 'tool.py'), 'def main():\n    print("hi")\n');
+  writeFileSync(join(dir, 'README.md'), 'scratch\n');
   run('add', '-A');
   run('commit', '-qm', 'initial');
+  writeFileSync(join(dir, 'tool.py'), 'def main():\n    print("hi")\n');
+  run('add', '-A');
+  run('commit', '-qm', 'add the tool');
+}
+
+/** One git command, trimmed. Used to check what the build did and did not do. */
+function gitIn(dir: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
 }
 
 beforeEach(() => {
@@ -87,7 +128,7 @@ beforeEach(() => {
         assert.ok(turn !== undefined, `no scripted turn for: ${prompt.slice(0, 60)}`);
         return (async function* () {
           if (turn.act !== undefined) await turn.act(options);
-          for (const frame of turn.frames) yield frame;
+          for (const frame of typeof turn.frames === 'function' ? turn.frames(prompt) : turn.frames) yield frame;
         })();
       },
     },
@@ -137,8 +178,11 @@ async function approved(): Promise<SessionView> {
   return service.approve(repo, created.id);
 }
 
-/** A build that writes one file, then a triage turn returning `structured`. */
-function scriptBuild(structured: unknown, write = 'def main():\n    print("v1")\n'): void {
+/** A build that writes tool.py, then a triage turn grouping what it produced. */
+function scriptBuild(
+  groups: Array<{ title: string; substantial: boolean }>,
+  write = 'def main():\n    print("v1")\n',
+): void {
   turns.push({
     act: async (options) => {
       const target = join(String(options.cwd), 'tool.py');
@@ -146,7 +190,7 @@ function scriptBuild(structured: unknown, write = 'def main():\n    print("v1")\
     },
     frames: [frames.init(), frames.delta('working'), frames.result('built it')],
   });
-  turns.push({ frames: [frames.init(), frames.result('triaged', structured)] });
+  turns.push({ frames: triageByFile(groups.map((group) => ({ ...group, files: ['tool.py'] }))) });
 }
 
 describe('big intake', () => {
@@ -196,19 +240,76 @@ describe('big intake', () => {
   });
 });
 
-describe('big worktree lifecycle', () => {
-  it('creates a detached worktree outside the repo at the recorded base commit', async () => {
+describe('big build isolation', () => {
+  it('approves without a checkout, then builds in a clone at the recorded base', async () => {
     const view = await approved();
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
     assert.equal(view.state, 'building');
     assert.equal(view.worktree?.baseCommit, head);
     assert.equal(view.worktree?.baseBranch, 'main');
-    assert.ok(view.worktree !== null && existsSync(join(view.worktree.path, 'tool.py')));
-    assert.ok(!view.worktree.path.startsWith(repo + '/'), 'a worktree inside the repo appears in its own diff');
-    const inside = execFileSync('git', ['-C', view.worktree.path, 'rev-parse', '--abbrev-ref', 'HEAD'], {
-      encoding: 'utf8',
-    }).trim();
-    assert.equal(inside, 'HEAD', 'detached, so no branch the user might be on is moved');
+    // Approval runs under the editor's control deadline, so it does no
+    // checkout at all; the clone is the build's first act.
+    assert.equal(view.worktree?.ready, false);
+    assert.equal(existsSync(view.worktree?.path ?? ''), false);
+
+    scriptBuild([{ title: 'version flag', substantial: true }]);
+    const built = await service.build(2, { root: repo, id: view.id });
+    const clone = built.worktree?.path ?? '';
+    assert.equal(built.worktree?.ready, true);
+    assert.ok(existsSync(join(clone, 'tool.py')));
+    assert.ok(!clone.startsWith(repo + '/'), 'a build tree inside the repo appears in its own diff');
+    assert.equal(gitIn(clone, 'rev-parse', '--abbrev-ref', 'HEAD'), 'HEAD', 'detached, on the recorded commit');
+    assert.equal(gitIn(clone, 'rev-parse', 'HEAD'), head);
+  });
+
+  it('gives the build its own ref store, so a git command in it cannot rewrite the operator branch', async () => {
+    const view = await approved();
+    const older = gitIn(repo, 'rev-parse', 'HEAD~1');
+    const before = gitIn(repo, 'rev-parse', 'refs/heads/main');
+    let inside = '';
+    turns.push({
+      act: async (options) => {
+        // The reviewer's probe: one allowed Bash call, doing something an agent
+        // "tidying git state" would do on its own.
+        await useTool(options, 'Bash', { command: 'git update-ref refs/heads/main' }, () => {
+          execFileSync('git', ['update-ref', 'refs/heads/main', older], { cwd: String(options.cwd) });
+        });
+        inside = gitIn(String(options.cwd), 'rev-parse', 'refs/heads/main');
+      },
+      frames: [frames.init(), frames.result('built it')],
+    });
+    turns.push({ frames: triageByFile([]) });
+    await service.build(2, { root: repo, id: view.id });
+
+    assert.equal(inside, older, 'the build really did rewrite a branch — in its own repository');
+    assert.equal(gitIn(repo, 'rev-parse', 'refs/heads/main'), before, "the operator's branch never moved");
+    assert.equal(gitIn(repo, 'status', '--porcelain'), '', "and their working tree is untouched");
+  });
+
+  it('leaves no remote pointing back at the repository it was cloned from', async () => {
+    const view = await approved();
+    scriptBuild([{ title: 'x', substantial: true }]);
+    const built = await service.build(2, { root: repo, id: view.id });
+    assert.equal(gitIn(built.worktree?.path ?? '', 'remote'), '', 'a push from the build must have nowhere to go');
+  });
+
+  it('registers nothing in the operator repo, so approving cannot break their other worktrees', async () => {
+    // A worktree of theirs whose directory is temporarily away — an unmounted
+    // volume, a locked home, a renamed path. A repo-global `worktree prune`
+    // deletes its admin directory and leaves it unusable.
+    const theirs = join(root, 'operator-wt');
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', theirs], { cwd: repo });
+    const away = join(root, 'operator-wt-away');
+    renameSync(theirs, away);
+
+    const view = await approved();
+    scriptBuild([{ title: 'x', substantial: true }]);
+    await service.build(2, { root: repo, id: view.id });
+
+    renameSync(away, theirs);
+    assert.equal(gitIn(theirs, 'rev-parse', '--is-inside-work-tree'), 'true', 'their worktree still works');
+    const registered = gitIn(repo, 'worktree', 'list', '--porcelain');
+    assert.ok(!registered.includes(store.root), 'the build is not a worktree of their repo at all');
   });
 
   it('refuses to approve a spec that does not exist yet', async () => {
@@ -219,33 +320,36 @@ describe('big worktree lifecycle', () => {
     );
   });
 
-  it('discards the worktree and the record together', async () => {
+  it('discards the clone and the record together', async () => {
     const view = await approved();
-    const path = view.worktree?.path ?? '';
+    scriptBuild([{ title: 'x', substantial: true }]);
+    const built = await service.build(2, { root: repo, id: view.id });
+    const path = built.worktree?.path ?? '';
+    assert.equal(existsSync(path), true);
     assert.deepEqual(await service.discard(repo, view.id), { discarded: true });
     assert.equal(existsSync(path), false);
     assert.equal(store.read(repo, view.id), null);
   });
 
-  it('re-approves a session whose worktree directory was deleted by hand', async () => {
+  it('re-approves a session whose build directory was deleted by hand', async () => {
     const first = await approved();
-    // Still registered with git, and the add would fail on the stale entry.
+    scriptBuild([{ title: 'x', substantial: true }]);
+    await service.build(2, { root: repo, id: first.id });
     rmSync(first.worktree?.path ?? '', { recursive: true, force: true });
     assert.equal(service.open(repo, first.id).display, 'drafting');
+
     const second = await service.approve(repo, first.id);
     assert.equal(second.display, 'building');
-    assert.ok(second.worktree !== null && existsSync(join(second.worktree.path, 'tool.py')));
+    scriptBuild([{ title: 'x', substantial: true }]);
+    const rebuilt = await service.build(4, { root: repo, id: first.id });
+    assert.ok(rebuilt.worktree !== null && existsSync(join(rebuilt.worktree.path, 'tool.py')));
   });
 });
 
 describe('big build and triage', () => {
   it('captures the real diff and groups it into the threads triage asked for', async () => {
     const approvedView = await approved();
-    scriptBuild({
-      blocks: [
-        { title: 'version flag', hunkIds: ['h1.1'], substantial: true, rationale: 'behavior' },
-      ],
-    });
+    scriptBuild([{ title: 'version flag', substantial: true }]);
     const view = await service.build(2, { root: repo, id: approvedView.id });
     assert.equal(view.display, 'reviewing');
     assert.equal(view.hasDiff, true);
@@ -359,15 +463,10 @@ describe('big review threads', () => {
       frames: [frames.init(), frames.result('built it')],
     });
     turns.push({
-      frames: [
-        frames.init(),
-        frames.result('t', {
-          blocks: [
-            { title: 'behavior', hunkIds: ['h1.1'], substantial: true, rationale: '' },
-            { title: 'notes', hunkIds: ['h2.1'], substantial: false, rationale: 'docs' },
-          ],
-        }),
-      ],
+      frames: triageByFile([
+        { title: 'behavior', files: ['tool.py'], substantial: true },
+        { title: 'notes', files: ['notes.md'], substantial: false },
+      ]),
     });
     const built = await service.build(2, { root: repo, id: approvedView.id });
     assert.equal(built.blocks[1]?.state, 'resolved');
@@ -381,15 +480,10 @@ describe('big review threads', () => {
       frames: [frames.init(), frames.result('revised')],
     });
     turns.push({
-      frames: [
-        frames.init(),
-        frames.result('t', {
-          blocks: [
-            { title: 'behavior', hunkIds: ['h1.1'], substantial: true, rationale: '' },
-            { title: 'notes', hunkIds: ['h2.1'], substantial: false, rationale: 'docs' },
-          ],
-        }),
-      ],
+      frames: triageByFile([
+        { title: 'behavior', files: ['tool.py'], substantial: true },
+        { title: 'notes', files: ['notes.md'], substantial: false },
+      ]),
     });
     const revised = await service.revise(3, {
       root: repo,
@@ -405,11 +499,7 @@ describe('big review threads', () => {
 
   it('re-opens an auto-resolved thread and refuses to clear a substantial one by hand', async () => {
     const approvedView = await approved();
-    scriptBuild({
-      blocks: [
-        { title: 'behavior', hunkIds: ['h1.1'], substantial: true, rationale: '' },
-      ],
-    });
+    scriptBuild([{ title: 'behavior', substantial: true }]);
     const view = await service.build(2, { root: repo, id: approvedView.id });
     assert.throws(
       () => service.toggleBlock(repo, view.id, 'b1', true),
@@ -418,6 +508,51 @@ describe('big review threads', () => {
     const reopened = service.toggleBlock(repo, view.id, 'b1', false);
     assert.equal(reopened.blocks[0]?.state, 'open');
     assert.throws(() => service.toggleBlock(repo, view.id, 'nope', false), ProtocolError);
+  });
+
+  it('re-opens content a later triage promotes to substantial, however it was cleared before', async () => {
+    const approvedView = await approved();
+    turns.push({
+      act: async (options) => {
+        const dir = String(options.cwd);
+        writeFileSync(join(dir, 'tool.py'), 'def main():\n    print("v1")\n');
+        writeFileSync(join(dir, 'notes.md'), 'notes\n');
+      },
+      frames: [frames.init(), frames.result('built it')],
+    });
+    turns.push({
+      frames: triageByFile([
+        { title: 'behavior', files: ['tool.py'], substantial: true },
+        { title: 'notes', files: ['notes.md'], substantial: false },
+      ]),
+    });
+    const built = await service.build(2, { root: repo, id: approvedView.id });
+    assert.equal(built.blocks[1]?.state, 'resolved', 'trivia auto-resolved in round 1');
+
+    // notes.md is untouched by the revision, but triage corrects its own
+    // rating. `mergeable` is built on `substantial`, so a thread that arrives
+    // resolved here is a thread the review gate never saw.
+    turns.push({
+      act: async (options) => {
+        writeFileSync(join(String(options.cwd), 'tool.py'), 'def main():\n    print("v2")\n');
+      },
+      frames: [frames.init(), frames.result('revised')],
+    });
+    turns.push({
+      frames: triageByFile([
+        { title: 'behavior', files: ['tool.py'], substantial: true },
+        { title: 'notes', files: ['notes.md'], substantial: true },
+      ]),
+    });
+    const revised = await service.revise(3, {
+      root: repo,
+      id: approvedView.id,
+      blockId: 'b1',
+      comment: 'use v2',
+    });
+    assert.equal(revised.blocks[1]?.substantial, true);
+    assert.equal(revised.blocks[1]?.state, 'open', 'nobody defended it, so it must not arrive cleared');
+    assert.notEqual(revised.display, 'mergeable');
   });
 });
 
@@ -430,8 +565,10 @@ describe('big state honesty', () => {
     assert.equal(reopened.hasDiff, false);
   });
 
-  it('sends a session whose worktree was deleted back to drafting', async () => {
+  it('sends a session whose build clone was deleted back to drafting', async () => {
     const view = await approved();
+    scriptBuild([{ title: 'x', substantial: true }]);
+    await service.build(2, { root: repo, id: view.id });
     rmSync(view.worktree?.path ?? '', { recursive: true, force: true });
     const reopened = service.open(repo, view.id);
     assert.equal(reopened.display, 'drafting');
@@ -445,23 +582,27 @@ describe('big state honesty', () => {
 
   it('never claims a review is ready when the captured diff is gone', async () => {
     const approvedView = await approved();
-    scriptBuild({ blocks: [{ title: 'x', hunkIds: ['h1.1'], substantial: true, rationale: '' }] });
+    scriptBuild([{ title: 'x', substantial: true }]);
     const view = await service.build(2, { root: repo, id: approvedView.id });
     assert.equal(view.display, 'reviewing');
     rmSync(store.diffPathFor(repo, view.id));
     const reopened = service.open(repo, view.id);
-    assert.equal(reopened.display, 'building');
+    // Back to triaging, not to building: the build is done, only the split is
+    // missing, so it is re-sorted rather than re-run.
+    assert.equal(reopened.display, 'triaging');
     assert.deepEqual(reopened.blocks, []);
+    assert.equal(reopened.hasDiff, false);
+    assert.equal(service.diff(repo, view.id), null);
   });
 
   it('resumes an interrupted build in the same worktree instead of starting over', async () => {
     const approvedView = await approved();
-    scriptBuild({ blocks: [] }, 'def main():\n    print("half")\n');
+    scriptBuild([], 'def main():\n    print("half")\n');
     await service.build(2, { root: repo, id: approvedView.id });
     assert.match(calls[1]?.prompt ?? '', /Implement the following change completely/);
     assert.equal(calls[1]?.options.resume, undefined, 'the first build starts a session');
 
-    scriptBuild({ blocks: [] }, 'def main():\n    print("done")\n');
+    scriptBuild([], 'def main():\n    print("done")\n');
     await service.build(3, { root: repo, id: approvedView.id });
     assert.equal(calls[3]?.options.resume, SESSION, 'the second run continues the same build session');
     assert.match(calls[3]?.prompt ?? '', /previous run was interrupted/);
@@ -482,7 +623,7 @@ describe('big state honesty', () => {
 
   it('is mergeable only once every thread is cleared', async () => {
     const approvedView = await approved();
-    scriptBuild({ blocks: [{ title: 'docs', hunkIds: ['h1.1'], substantial: false, rationale: 'comments' }] });
+    scriptBuild([{ title: 'docs', substantial: false }]);
     const view = await service.build(2, { root: repo, id: approvedView.id });
     assert.equal(view.display, 'mergeable');
     assert.equal(service.toggleBlock(repo, view.id, 'b1', false).display, 'reviewing');
@@ -500,6 +641,133 @@ describe('big state honesty', () => {
     turns.push({ frames: [frames.init(), frames.result('t', { blocks: [] })] });
     await service.build(2, { root: repo, id: approvedView.id });
     assert.ok(rejected instanceof ProtocolError && rejected.code === 'busy');
+  });
+});
+
+describe('a capture that does not finish', () => {
+  /** Builds a.txt and b.txt, triaged into one thread per file. */
+  async function twoFiles(): Promise<SessionView> {
+    const view = await approved();
+    turns.push({
+      act: async (options) => {
+        const dir = String(options.cwd);
+        writeFileSync(join(dir, 'a.txt'), 'A change\n');
+        writeFileSync(join(dir, 'b.txt'), 'B change\n');
+      },
+      frames: [frames.init(), frames.result('built it')],
+    });
+    turns.push({
+      frames: triageByFile([
+        { title: 'A change', files: ['a.txt'], substantial: true },
+        { title: 'B change', files: ['b.txt'], substantial: true },
+      ]),
+    });
+    return service.build(2, { root: repo, id: view.id });
+  }
+
+  it('renders no threads at all rather than the previous build\'s over a newer diff', async () => {
+    const built = await twoFiles();
+    assert.equal(built.blocks.length, 2);
+
+    // The revision adds a file ahead of b.txt and edits b.txt, then the triage
+    // turn is stopped. Nothing may survive that describes the older build.
+    turns.push({
+      act: async (options) => {
+        const dir = String(options.cwd);
+        writeFileSync(join(dir, 'aaa.txt'), 'brand new secret\n');
+        writeFileSync(join(dir, 'b.txt'), 'B changed again\n');
+      },
+      frames: [frames.init(), frames.result('revised')],
+    });
+    turns.push({
+      act: async () => {
+        throw new ProtocolError('cancelled', 'the big change was stopped');
+      },
+      frames: [],
+    });
+    await assert.rejects(
+      () => service.revise(3, { root: repo, id: built.id, blockId: 'b1', comment: 'again' }),
+      (error: unknown) => error instanceof ProtocolError && error.code === 'cancelled',
+    );
+
+    const after = service.open(repo, built.id);
+    assert.deepEqual(after.blocks, [], 'threads that describe a build nobody captured must not survive');
+    assert.equal(after.hasDiff, false, 'and the review surface refuses to open');
+    assert.equal(after.display, 'triaging', 'the build is done; only the split is missing');
+    assert.equal(service.diff(repo, built.id), null, 'no diff is served that no threads describe');
+  });
+
+  it('re-triages the finished build instead of running the build agent again', async () => {
+    const built = await twoFiles();
+    turns.push({
+      act: async () => {
+        throw new ProtocolError('cancelled', 'stopped');
+      },
+      frames: [],
+    });
+    await assert.rejects(() => service.capture(3, { root: repo, id: built.id }), ProtocolError);
+    assert.equal(service.open(repo, built.id).display, 'triaging');
+
+    const before = calls.length;
+    turns.push({
+      frames: triageByFile([
+        { title: 'both', files: ['a.txt', 'b.txt'], substantial: true },
+      ]),
+    });
+    const recovered = await service.capture(4, { root: repo, id: built.id });
+    assert.equal(calls.length - before, 1, 'one turn: the triage, not another build');
+    assert.equal(recovered.display, 'reviewing');
+    assert.deepEqual(recovered.blocks.map((block) => block.files), [['a.txt', 'b.txt']]);
+    assert.equal(recovered.hasDiff, true);
+  });
+});
+
+describe('two editors on one store', () => {
+  /** A second sidecar, its own service and store, over the same directory. */
+  function otherEditor(): BigService {
+    return new BigService({
+      sdk: { query: () => { throw new Error('the second editor never gets to run a turn'); } },
+      store: new BigStore(store.root),
+      claudePath: '/usr/bin/true',
+      env: { PATH: process.env.PATH },
+      emit: () => {},
+    });
+  }
+
+  it('shows a live build as held elsewhere, and refuses to resume or discard it', async () => {
+    const view = await approved();
+    const other = otherEditor();
+    let seen: SessionView | null = null;
+    let build: unknown = null;
+    let discard: unknown = null;
+    turns.push({
+      act: async () => {
+        seen = other.open(repo, view.id);
+        build = await other.build(50, { root: repo, id: view.id }).catch((error: unknown) => error);
+        discard = await other.discard(repo, view.id).catch((error: unknown) => error);
+      },
+      frames: [frames.init(), frames.result('built it')],
+    });
+    turns.push({ frames: triageByFile([]) });
+    await service.build(2, { root: repo, id: view.id });
+
+    assert.ok(seen !== null);
+    assert.equal((seen as SessionView).heldElsewhere, true);
+    assert.equal((seen as SessionView).detached, false, '"nobody is driving it" would invite `resume`');
+    assert.ok(build instanceof ProtocolError && build.code === 'busy', `second build: ${String(build)}`);
+    assert.match(String((build as ProtocolError).message), /another editor/);
+    assert.ok(discard instanceof ProtocolError && discard.code === 'busy', `discard: ${String(discard)}`);
+    // The record the second editor tried to destroy is still the first one's.
+    assert.notEqual(store.read(repo, view.id), null);
+  });
+
+  it('hands the session back once the run that held it is over', async () => {
+    const view = await approved();
+    scriptBuild([{ title: 'x', substantial: true }]);
+    await service.build(2, { root: repo, id: view.id });
+    const other = otherEditor();
+    assert.equal(other.open(repo, view.id).heldElsewhere, false, 'a released claim holds nothing');
+    assert.deepEqual(await other.discard(repo, view.id), { discarded: true });
   });
 });
 

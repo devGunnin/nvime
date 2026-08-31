@@ -27,9 +27,10 @@ describe('parseUnifiedDiff', () => {
     const hunk = file.hunks[0];
     assert.ok(hunk !== undefined);
     assert.deepEqual(
-      { id: hunk.id, oldStart: hunk.oldStart, oldCount: hunk.oldCount, newStart: hunk.newStart, newCount: hunk.newCount },
-      { id: 'h1.1', oldStart: 1, oldCount: 3, newStart: 1, newCount: 4 },
+      { oldStart: hunk.oldStart, oldCount: hunk.oldCount, newStart: hunk.newStart, newCount: hunk.newCount },
+      { oldStart: 1, oldCount: 3, newStart: 1, newCount: 4 },
     );
+    assert.equal(hunk.id, `h${hunk.signature.slice(0, 12)}`, 'the id addresses the content');
     assert.equal(hunk.lines.length, 5);
     assert.equal(hunk.synthetic, false);
   });
@@ -178,6 +179,71 @@ describe('parseUnifiedDiff', () => {
     }
   });
 
+  it('keeps a path with a space out of the trailing tab git appends to it', () => {
+    // Real `git diff` output: an unquoted path containing a space is followed
+    // by a literal TAB on the `---`/`+++` lines.
+    const diff = [
+      'diff --git a/space name.txt b/space name.txt',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/space name.txt\t',
+      '@@ -0,0 +1 @@',
+      '+hello',
+      '',
+    ].join('\n');
+    const file = parseUnifiedDiff(diff).files[0];
+    assert.equal(file?.path, 'space name.txt', 'a tab in the path makes the file unopenable and mislabels the thread');
+    assert.equal(parseUnifiedDiff(diff).hunks[0]?.file, 'space name.txt');
+  });
+
+  it('keeps a tab escaped inside a quoted path', () => {
+    const diff = [
+      'diff --git "a/tab\\tname.txt" "b/tab\\tname.txt"',
+      '--- "a/tab\\tname.txt"',
+      '+++ "b/tab\\tname.txt"',
+      '@@ -1 +1 @@',
+      '-a',
+      '+b',
+      '',
+    ].join('\n');
+    assert.equal(parseUnifiedDiff(diff).files[0]?.path, 'tab\tname.txt');
+  });
+
+  it('addresses hunks by content, so an id cannot follow a slot into another hunk', () => {
+    const one = (path: string, body: string): string =>
+      [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, '@@ -1 +1 @@', `+${body}`, ''].join('\n');
+    const before = parseUnifiedDiff(one('a.txt', 'alpha') + one('b.txt', 'beta'));
+    // A revision inserts a file ahead of them: positional ids would slide.
+    const after = parseUnifiedDiff(one('a.txt', 'alpha') + one('aaa.txt', 'secret') + one('b.txt', 'beta'));
+    const idOf = (parsed: typeof before, file: string): string | undefined =>
+      parsed.hunks.find((hunk) => hunk.file === file)?.id;
+    assert.equal(idOf(before, 'a.txt'), idOf(after, 'a.txt'), 'unchanged content keeps its id');
+    assert.equal(idOf(before, 'b.txt'), idOf(after, 'b.txt'), 'and does not shift with the file ahead of it');
+    const stale = idOf(before, 'b.txt');
+    const resolved = after.hunks.find((hunk) => hunk.id === stale);
+    assert.equal(resolved?.file, 'b.txt', 'an id never resolves to a hunk that is not its content');
+    assert.equal(new Set(after.hunks.map((hunk) => hunk.id)).size, 3, 'ids stay unique within a capture');
+  });
+
+  it('distinguishes two byte-identical hunks in one file', () => {
+    const diff = [
+      'diff --git a/dup.txt b/dup.txt',
+      '--- a/dup.txt',
+      '+++ b/dup.txt',
+      '@@ -1 +1 @@',
+      '-old',
+      '+same',
+      '@@ -9 +9 @@',
+      '-old',
+      '+same',
+      '',
+    ].join('\n');
+    const hunks = parseUnifiedDiff(diff).hunks;
+    assert.equal(hunks.length, 2);
+    assert.equal(hunks[0]?.signature, hunks[1]?.signature, 'identical content, identical signature');
+    assert.notEqual(hunks[0]?.id, hunks[1]?.id, 'but each hunk still needs its own id');
+  });
+
   it('empty input parses to no files rather than throwing', () => {
     assert.deepEqual(parseUnifiedDiff(''), { files: [], hunks: [] });
   });
@@ -202,16 +268,18 @@ describe('renderForTriage', () => {
     ].join('\n'),
   );
 
+  const [first = '', second = ''] = diff.hunks.map((hunk) => hunk.id);
+
   it('labels every hunk with the id triage answers in', () => {
     const rendered = renderForTriage(diff, 1024);
     assert.equal(rendered.truncated, false);
-    assert.match(rendered.text, /\[h1\.1\] modified a\.txt/);
-    assert.match(rendered.text, /\[h2\.1\] modified c\.txt/);
+    assert.ok(rendered.text.includes(`[${first}] modified a.txt`), rendered.text);
+    assert.ok(rendered.text.includes(`[${second}] modified c.txt`), rendered.text);
   });
 
   it('says so when the diff did not fit', () => {
-    const rendered = renderForTriage(diff, 40);
+    const rendered = renderForTriage(diff, 60);
     assert.equal(rendered.truncated, true);
-    assert.ok(!rendered.text.includes('h2.1'));
+    assert.ok(!rendered.text.includes(second));
   });
 });
