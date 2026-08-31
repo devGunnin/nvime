@@ -86,9 +86,20 @@ local SEEN_LIMIT = 64
 --- Content this buffer has already held is always allowed back — that is what
 --- redo restores, and text the user typed once is text they typed.
 ---
+--- Size alone cannot tell a coalesced burst of real typing from a paste: the
+--- scheduler can let dozens of genuine keystrokes queue up before this callback
+--- ever runs. `InsertCharPre` is counted instead — one event per character
+--- actually typed, however many `on_lines` batches they land in — and growth
+--- this tally covers is accepted regardless of `PASTE_BURST`. Nothing but real
+--- insert-mode typing fires it: `<C-r>`, normal-mode puts and bracketed paste
+--- are refused before they reach the buffer at all (see `M.open`), and `:put`
+--- reaches here with a tally of zero, so it is still caught.
+---
 --- The revert is scheduled because a buffer may not be written from inside the
 --- callback, so pasted text is on screen for one tick. The refusal says so
---- rather than pretending nothing happened.
+--- rather than pretending nothing happened. It runs under `undojoin` so a
+--- reader's `u` cannot resurrect the refused text: undone together with the
+--- change it undid, one `u` goes straight back to what they typed before it.
 --- @param buf integer
 --- @param win integer the float, so the cursor lands back in it
 --- @return fun() detach
@@ -98,9 +109,13 @@ local function block_paste(buf, win)
   local order = {}
   local detached = false
   local reverting = false
+  -- Characters typed since `accepted` was last set. Reset whenever a state is
+  -- accepted, by either path, so it never grows into a standing allowance.
+  local typed = 0
 
   local function remember(current)
     accepted = current
+    typed = 0
     local key = table.concat(current, '\n')
     if seen[key] then
       return
@@ -111,6 +126,13 @@ local function block_paste(buf, win)
       seen[table.remove(order, 1)] = nil
     end
   end
+
+  local charpre = vim.api.nvim_create_autocmd('InsertCharPre', {
+    buffer = buf,
+    callback = function()
+      typed = typed + 1
+    end,
+  })
 
   vim.api.nvim_buf_attach(buf, false, {
     on_lines = function()
@@ -125,11 +147,20 @@ local function block_paste(buf, win)
           return
         end
         local current = lines_of(buf)
-        if seen[table.concat(current, '\n')] or not M.is_paste(accepted, current) then
+        if seen[table.concat(current, '\n')] then
+          remember(current)
+          return
+        end
+        -- Only the character-count half of `is_paste` has a typed tally to
+        -- check against; more lines than one Enter can produce stays refused.
+        local grew = added_chars(accepted, current)
+        local within_typed = #current <= #accepted + 1 and grew > 0 and grew <= typed
+        if not M.is_paste(accepted, current) or within_typed then
           remember(current)
           return
         end
         reverting = true
+        pcall(vim.cmd, 'undojoin')
         pcall(vim.api.nvim_buf_set_lines, buf, 0, -1, false, accepted)
         reverting = false
         if vim.api.nvim_win_is_valid(win) then
@@ -141,6 +172,7 @@ local function block_paste(buf, win)
   })
   return function()
     detached = true
+    pcall(vim.api.nvim_del_autocmd, charpre)
   end
 end
 

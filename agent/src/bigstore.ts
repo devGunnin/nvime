@@ -69,6 +69,19 @@ export interface BigTransition {
 }
 
 /**
+ * What THIS session's own land is expected to look like, pinned on the record
+ * before `landDiff` runs and never guessed from the title afterward. Lets a
+ * repair recognize its own unrecorded landing by branch AND content, so a
+ * sibling session's identically-titled change — or any other commit that
+ * happens to sit under the same name — can never be claimed as this one's.
+ */
+export interface BigLandAttempt {
+  branch: string;
+  /** The tree the reviewed diff applies to at the pinned base commit. */
+  tree: string;
+}
+
+/**
  * What the change is built on. A property of the CHANGE, not of the clone: the
  * clone is disposable and the reviewed diff outlives it, but a diff without the
  * commit it applies to cannot be landed at all.
@@ -121,6 +134,9 @@ export interface BigSession {
   worktree: BigWorktree | null;
   /** Set once, when the change landed. Null for everything not yet merged. */
   merge: BigMerge | null;
+  /** Pinned right before the current or most recent land attempt. Null before
+   *  the first one, and stale-but-harmless after a rebase moves the base. */
+  landAttempt: BigLandAttempt | null;
   /**
    * Identity of the diff `blocks` describe, written in the same record write
    * as they are. `diff.patch` on disk that hashes to something else is a diff
@@ -212,6 +228,7 @@ export class BigStore {
       base: null,
       worktree: null,
       merge: null,
+      landAttempt: null,
       diffId: null,
       diffCapturedAt: null,
       diffBytes: 0,
@@ -614,6 +631,7 @@ function withDefaults(session: BigSession): BigSession {
   if (!isDifficulty(session.difficulty)) session.difficulty = DEFAULT_DIFFICULTY;
   if (session.gradeSessionId === undefined) session.gradeSessionId = null;
   if (session.merge === undefined) session.merge = null;
+  if (session.landAttempt === undefined) session.landAttempt = null;
   // The base used to live on the worktree, before it had to outlive the clone.
   const legacy = session.worktree as unknown as { baseCommit?: string; baseBranch?: string | null } | null;
   if (session.base == null && legacy?.baseCommit !== undefined) {

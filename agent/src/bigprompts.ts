@@ -160,12 +160,16 @@ export interface GradeItem {
 /**
  * One grading turn for a whole round: every thread answered, graded together.
  *
- * `resumed` says the grader's own SDK session is being continued, so it already
- * holds the diff and the verdicts of every thread it has seen. Re-sending them
- * would grow the context by the whole change on every round, and the ceiling
- * is reached as an ungraded round nobody can explain. A thread being graded for
- * the FIRST time still gets the full rendering, resumed or not — that context
- * is new to the grader whatever round it arrives in.
+ * `resumed` says the grader's own SDK session is being continued. The rubric
+ * and the pass mark are sent on EVERY round regardless — they are ~1.5KB, and a
+ * resume that silently comes back with a pruned context (an expired SDK
+ * session resuming into a fresh one, say) must never grade without them: a
+ * grade given blind can still clear a thread. Only the per-thread diff and
+ * verdict history are trimmed on a thread the grader has already seen, which
+ * is what makes resuming worth doing — that is the bulk of what a round would
+ * otherwise re-send. A thread being graded for the FIRST time still gets the
+ * full rendering, resumed or not — that context is new whatever round it
+ * arrives in.
  */
 export function composeGradePrompt(
   spec: BigSpec | null,
@@ -175,19 +179,18 @@ export function composeGradePrompt(
 ): string {
   if (items.length === 0) throw new Error('a grading turn needs at least one answered thread');
   const intent = resumed || spec === null ? '' : `\nWhat the change as a whole was meant to do:\n${spec.goal}\n`;
-  const bar = resumed
-    ? ''
-    : `\nThe pass mark for this session is ${threshold} out of 100. Grade against it honestly: do not` +
-      ' round an answer up to spare them another round, and do not hold back a passing answer.\n';
-  const head = resumed ? RESUMED_INSTRUCTION : GRADE_INSTRUCTION;
-  return `${head}\n${intent}${bar}\n${items.map((item) => renderGradeItem(item, resumed)).join('\n')}`;
+  const bar =
+    `\nThe pass mark for this session is ${threshold} out of 100. Grade against it honestly: do not` +
+    ' round an answer up to spare them another round, and do not hold back a passing answer.\n';
+  const resumeNote = resumed ? `\n${RESUME_NOTE}\n` : '';
+  return `${GRADE_INSTRUCTION}\n${intent}${bar}${resumeNote}\n${items.map((item) => renderGradeItem(item, resumed)).join('\n')}`;
 }
 
-const RESUMED_INSTRUCTION = [
-  'The next round of answers, on the same threads and the same rubric as before. The change, the earlier',
-  'answers and the grades you gave them are already in this conversation; only what is new is repeated below.',
-  'Return exactly one entry per thread id below, copied exactly.',
-].join('\n');
+/** Explains the abbreviated rendering below — never a replacement for the
+ *  rubric or the pass mark, which stay in every round. */
+const RESUME_NOTE =
+  'This is a later round on some of the same threads. For a thread you have already graded, the change and ' +
+  'your earlier verdict are already in this conversation and are not repeated below — only what is new is.';
 
 /**
  * A thread as the grader is shown it. On a resumed session a thread it has

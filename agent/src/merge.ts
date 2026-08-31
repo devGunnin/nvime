@@ -196,26 +196,40 @@ async function movedOrLanded(
 }
 
 /**
- * The reviewed change already on the base branch, under a branch this session's
- * land created. Both halves are required: the ref must sit directly on the
- * recorded base (`commit-tree -p <baseCommit>`, so it is this build's commit and
- * not an old session's branch of the same name), and the base branch must
- * contain it. Only asked when the base has moved, so the ordinary path pays
- * nothing for it.
+ * The reviewed change already on the base branch, under the branch THIS
+ * session's own land attempt pinned to its record before it ran. Three checks,
+ * all required: the ref must sit directly on the recorded base
+ * (`commit-tree -p <baseCommit>`), its tree must be the one this session's
+ * diff was pinned to build, and the base branch must contain it.
+ *
+ * Deliberately not a title-derived guess: two sessions opened with the same
+ * title share a preferred branch name, and a name-only match would let one
+ * claim the other's landing. `landAttempt` is set once, immediately before this
+ * session's own `landDiff`, so nothing but this session's own prior attempt can
+ * satisfy it. Null (no attempt ever pinned) always answers "no" — a base that
+ * moved before this session tried to land is never mistaken for a landing.
+ * Only asked when the base has moved, so the ordinary path pays nothing for it.
  */
 export async function landedAlready(
   session: BigSession,
   baseBranch: string,
   baseCommit: string,
 ): Promise<LandResult | null> {
-  for (const branch of branchCandidates(session.title, session.id)) {
-    const commit = await resolveRef(session.repoRoot, `refs/heads/${branch}`);
-    if (commit === null) continue;
-    if ((await resolveRef(session.repoRoot, `${commit}^`)) !== baseCommit) continue;
-    if (!(await contains(session.repoRoot, baseBranch, commit))) continue;
-    return { commit, branch };
-  }
-  return null;
+  const attempt = session.landAttempt;
+  if (attempt === null) return null;
+  const commit = await resolveRef(session.repoRoot, `refs/heads/${attempt.branch}`);
+  if (commit === null) return null;
+  if ((await resolveRef(session.repoRoot, `${commit}^`)) !== baseCommit) return null;
+  if ((await treeOf(session.repoRoot, commit)) !== attempt.tree) return null;
+  if (!(await contains(session.repoRoot, baseBranch, commit))) return null;
+  return { commit, branch: attempt.branch };
+}
+
+/** The tree a commit holds, so a name-and-parent match can still be told apart
+ *  from a same-named branch that carries different content. */
+async function treeOf(repoRoot: string, commit: string): Promise<string> {
+  const { stdout } = await git(repoRoot, ['rev-parse', `${commit}^{tree}`]);
+  return stdout.trim();
 }
 
 /** Whether `branch` already holds `commit`. Counted rather than exit-coded:
@@ -320,16 +334,46 @@ function clearStaleIndexLock(indexFile: string, startedAt: number): void {
 async function buildCommit(request: LandRequest, startedAt: number): Promise<string> {
   const { repoRoot, baseCommit, patchPath, message, indexFile } = request;
   clearStaleIndexLock(indexFile, startedAt);
-  const env = { GIT_INDEX_FILE: indexFile };
-  await git(repoRoot, ['read-tree', baseCommit], { env });
-  await applyPatch(repoRoot, patchPath, env);
-  const { stdout: tree } = await git(repoRoot, ['write-tree'], { env });
-  const { stdout } = await git(repoRoot, ['commit-tree', tree.trim(), '-p', baseCommit, '-m', message]);
+  const tree = await buildTree(repoRoot, baseCommit, patchPath, indexFile);
+  const { stdout } = await git(repoRoot, ['commit-tree', tree, '-p', baseCommit, '-m', message]);
   const commit = stdout.trim();
   if (!/^[0-9a-f]{40}$/.test(commit)) {
     throw new ProtocolError('agent_error', 'git did not return a commit for the reviewed diff', commit);
   }
   return commit;
+}
+
+/** Applies the patch onto `baseCommit` in a private index and returns the
+ *  resulting tree. Shared by the real land and by `expectedTree`'s pin, so the
+ *  two can never compute the tree two different ways. */
+async function buildTree(repoRoot: string, baseCommit: string, patchPath: string, indexFile: string): Promise<string> {
+  const env = { GIT_INDEX_FILE: indexFile };
+  await git(repoRoot, ['read-tree', baseCommit], { env });
+  await applyPatch(repoRoot, patchPath, env);
+  const { stdout } = await git(repoRoot, ['write-tree'], { env });
+  return stdout.trim();
+}
+
+/**
+ * The tree this session's land would build right now, computed without
+ * touching any ref or the operator's index. Called BEFORE `landDiff`, so the
+ * result can be pinned to the record ahead of the one write nvime makes —
+ * `landedAlready` then has something to compare a candidate commit against
+ * that could only have come from this session's own diff.
+ */
+export async function expectedTree(request: {
+  repoRoot: string;
+  baseCommit: string;
+  patchPath: string;
+  indexFile: string;
+}): Promise<string> {
+  const { repoRoot, baseCommit, patchPath, indexFile } = request;
+  try {
+    return await buildTree(repoRoot, baseCommit, patchPath, indexFile);
+  } finally {
+    rmSync(indexFile, { force: true });
+    rmSync(lockOf(indexFile), { force: true });
+  }
 }
 
 /**

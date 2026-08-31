@@ -50,6 +50,30 @@ local function open_answer(on_submit)
   return win
 end
 
+--- Like `open_answer`, but for tests that need real `InsertCharPre` events:
+--- `compose.open`'s own `startinsert` has not taken effect by the time a
+--- following `nvim_feedkeys` call runs synchronously after it — the mode
+--- switch eats the first character fed — so this stops insert first and
+--- leaves entering it to `type_text`, which does so deterministically.
+local function open_answer_insert(on_submit)
+  compose.dismiss()
+  local win = compose.open({
+    title = ' defend ',
+    no_paste = true,
+    on_submit = on_submit or function() end,
+  })
+  vim.cmd('stopinsert')
+  return win
+end
+
+--- Types `text` as real keystrokes: enters insert mode, feeds it, leaves
+--- insert mode, all in one synchronous batch — so `InsertCharPre` fires for
+--- every character exactly as it would for a reader typing them.
+local function type_text(text)
+  local esc = vim.api.nvim_replace_termcodes('<Esc>', true, true, true)
+  vim.api.nvim_feedkeys('i' .. text .. esc, 'x', false)
+end
+
 local function text_of(buf)
   return vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 end
@@ -152,6 +176,35 @@ describe('the answer box', function()
       end
     end)
     eq({ typed }, text_of(buf), 'a typed answer is never mistaken for a paste')
+    compose.dismiss()
+  end)
+
+  it('accepts a coalesced batch of real keystrokes over the paste-burst size, and undo recovers it cleanly', function()
+    -- The scheduler can let many genuine `InsertCharPre` events queue up
+    -- before the watcher's callback runs; size alone must not be able to
+    -- tell that apart from a paste. Fed as one `nvim_feedkeys` call, exactly
+    -- like a fast typist or a coalescing terminal link — the reviewer's own
+    -- probe, driven the same way, through the real input queue.
+    open_answer_insert()
+    local buf = compose.current().buf
+    local text = string.rep('x', 48)
+    local said = with_notices(function()
+      type_text(text)
+      settle()
+    end)
+    eq({ text }, text_of(buf), 'forty-eight real keystrokes, coalesced into one batch, are not a paste')
+    eq(0, #said, vim.inspect(said))
+
+    -- Accepted outright, so `u` is ordinary undo of real content — never the
+    -- watcher catching it a second time and destroying it for good, which is
+    -- what happened before: the text was on screen for exactly one tick, the
+    -- watcher reverted it before it was ever remembered, and undo had nothing
+    -- of the reader's own to restore.
+    local onUndo = with_notices(function()
+      vim.cmd('normal! u')
+      settle()
+    end)
+    eq(0, #onUndo, 'undo does not re-trigger the paste watcher on text it already accepted')
     compose.dismiss()
   end)
 

@@ -1188,8 +1188,13 @@ describe('the comprehension gate', () => {
     assert.equal(service.open(repo, created.id).blocks.find((block) => block.id === notes)?.state, 'open');
   });
 
-  it('does not re-send the change and the rounds it already graded on a resumed session', async () => {
-    const view = await reviewing();
+  it('does not re-send the change and the rounds it already graded on a resumed session, but keeps the rubric and the pass mark on every round', async () => {
+    // A diff big enough to dwarf the ~1.5KB rubric, so dropping it on a
+    // resumed round is still the dominant saving even though the rubric
+    // itself is sent every round now (see M3: a resumed prompt must never
+    // grade without it).
+    const bigChange = `def main():\n${Array.from({ length: 150 }, (_, i) => `    print("line ${i}")`).join('\n')}\n`;
+    const view = await reviewing('medium', bigChange);
     const thread = view.blocks[0]?.id ?? '';
     const prompts: string[] = [];
     for (let round = 1; round <= 5; round += 1) {
@@ -1205,12 +1210,18 @@ describe('the comprehension gate', () => {
     const second = prompts[1] ?? '';
     const fifth = prompts[4] ?? '';
 
-    assert.ok(first.includes('print("v1")'), 'the first round hands the grader the hunks');
-    assert.ok(!fifth.includes('print("v1")'), 'a resumed grader already holds them');
+    assert.ok(first.includes('line 0'), 'the first round hands the grader the hunks');
+    assert.ok(!fifth.includes('line 0'), 'a resumed grader already holds them');
     assert.ok(!fifth.includes('round 1:'), 'and already holds the rounds it graded');
     assert.ok(fifth.includes('round 5:'), 'only the new answer is new');
     assert.ok(fifth.length <= second.length + 40, `rounds must not grow: ${second.length} -> ${fifth.length}`);
     assert.ok(fifth.length * 2 < first.length, `and must be far smaller than round 1: ${first.length}`);
+
+    // M3: a resumed round drops the diff and the earlier verdicts, never the
+    // rubric or the pass mark — a resume that comes back with a pruned
+    // context must not be able to grade blind.
+    assert.match(fifth, /Grade UNDERSTANDING, not eloquence/, 'the rubric is on every round, resumed or not');
+    assert.match(fifth, /pass mark for this session is/, 'so is the pass mark');
     assert.equal(service.open(repo, view.id).blocks[0]?.state, 'resolved');
   });
 

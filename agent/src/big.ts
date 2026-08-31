@@ -51,6 +51,7 @@ import {
   branchCandidates,
   branchNameFor,
   checkMerge,
+  expectedTree,
   landDiff,
   landedAlready,
   type LandResult,
@@ -579,15 +580,26 @@ export class BigService {
       const baseBranch = base.branch;
       if (baseBranch === null) throw new ProtocolError('internal', 'checkMerge passed a change with no base branch');
       const branch = await this.#freeBranchName(held);
+      const patchPath = this.#store.diffPathFor(held.repoRoot, held.id);
+      const indexFile = join(this.#store.dirFor(held.repoRoot, held.id), 'merge-index');
+      // Pinned to the record BEFORE anything touches the repo: if the write
+      // that follows lands but the record write after it does not survive, a
+      // repair must recognize this exact attempt by branch and tree, never a
+      // sibling session's landing of the same-titled change.
+      held.landAttempt = {
+        branch,
+        tree: await expectedTree({ repoRoot: held.repoRoot, baseCommit: base.commit, patchPath, indexFile }),
+      };
+      this.#store.save(held);
       this.#emit('big.state', { id: requestId, session: held.id, state: 'reviewing', note: `landing on ${branch}` });
       const landed = await landDiff({
         repoRoot: held.repoRoot,
         branch,
         baseBranch,
         baseCommit: base.commit,
-        patchPath: this.#store.diffPathFor(held.repoRoot, held.id),
+        patchPath,
         message: held.title,
-        indexFile: join(this.#store.dirFor(held.repoRoot, held.id), 'merge-index'),
+        indexFile,
       });
 
       return this.#afterLanding(requestId, held, landed, baseBranch, params.cleanup === true);
@@ -689,6 +701,9 @@ export class BigService {
       });
       await this.#finishRebase(requestId, session, worktree.path, conflicted, branch);
       session.base = { commit: fetched, branch };
+      // Whatever was pinned was pinned against the old base; a stale pin here
+      // could only ever fail its own parent check, but null says so plainly.
+      session.landAttempt = null;
       this.#store.save(session);
       return this.#captureAndTriage(requestId, session);
     });

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import type { BigSession } from '../src/bigstore.js';
 import { DEFAULT_DIFFICULTY } from '../src/gate.js';
-import { branchNameFor, checkMerge, landDiff, type MergeRefusalCode } from '../src/merge.js';
+import { branchNameFor, checkMerge, expectedTree, landDiff, type MergeRefusalCode } from '../src/merge.js';
 import { ProtocolError } from '../src/protocol.js';
 import type { TriageBlock } from '../src/triage.js';
 import { parseUnifiedDiff } from '../src/unidiff.js';
@@ -112,6 +112,7 @@ function session(overrides: Partial<BigSession> = {}): BigSession {
     base: { commit: baseCommit, branch: 'main' },
     worktree: null,
     merge: null,
+    landAttempt: null,
     diffId: 'd1',
     diffCapturedAt: now,
     diffBytes: 1,
@@ -403,11 +404,22 @@ describe('a merge whose record write did not survive', () => {
   /** The branch a real land for `session()` would have created. */
   const OWN_BRANCH = branchNameFor('add a version flag', 'abc123');
 
+  /** The tree `session()`'s own diff builds at `baseCommit` — the same value
+   *  `BigService.merge` pins to the record before landing. */
+  async function ownTree(): Promise<string> {
+    return expectedTree({ repoRoot: repo, baseCommit, patchPath: patchFile(), indexFile: join(root, 'pin-index') });
+  }
+
   it('recognises its own landed change instead of calling it a base that moved', async () => {
+    const tree = await ownTree();
     const landed = await landDiff(landRequest({ branch: OWN_BRANCH }));
     // The record the merge would have written is exactly what is missing here:
-    // the session still says `reviewing` on the base the build started from.
-    const stale = session({ base: { commit: baseCommit, branch: 'main' } });
+    // the session still says `reviewing` on the base the build started from,
+    // but what it pinned before landing — the branch and the tree — survived.
+    const stale = session({
+      base: { commit: baseCommit, branch: 'main' },
+      landAttempt: { branch: OWN_BRANCH, tree },
+    });
     const refusals = await checkMerge(stale, {
       diff: parseUnifiedDiff(patch()),
       counts: { total: 1, open: 0, substantial: 1, defended: 1 },
@@ -442,6 +454,49 @@ describe('a merge whose record write did not survive', () => {
     run(repo, 'merge', '-q', '--ff-only', OWN_BRANCH);
 
     const refusals = await checkMerge(session(), {
+      diff: parseUnifiedDiff(patch()),
+      counts: { total: 1, open: 0, substantial: 1, defended: 1 },
+      heldElsewhere: false,
+    });
+    assert.deepEqual(refusals.map((refusal) => refusal.code), ['base-moved']);
+  });
+
+  it('does not claim a sibling session\'s landing of the same title, even one commit directly on the base', async () => {
+    // The adjacent case the two-commit test above stops short of: ONE commit,
+    // sitting directly on the base, so name-and-parent alone would match it —
+    // this is the ordinary shape of a second session opened with the same
+    // title. This session never pinned a land attempt of its own, so nothing
+    // titled the same can ever be claimed as its landing.
+    run(repo, 'checkout', '-q', '-b', OWN_BRANCH);
+    writeFileSync(join(repo, 'tool.py'), 'def main():\n    print("a sibling session landed this")\n');
+    run(repo, 'commit', '-qam', 'a sibling session, same title, same base');
+    run(repo, 'checkout', '-q', 'main');
+    run(repo, 'merge', '-q', '--ff-only', OWN_BRANCH);
+
+    const refusals = await checkMerge(session(), {
+      diff: parseUnifiedDiff(patch()),
+      counts: { total: 1, open: 0, substantial: 1, defended: 1 },
+      heldElsewhere: false,
+    });
+    assert.deepEqual(refusals.map((refusal) => refusal.code), ['base-moved']);
+  });
+
+  it('does not claim a same-named, same-parent branch that holds different content', async () => {
+    // This session DID pin a land attempt — the name check alone would pass —
+    // but the branch that exists carries different content. The tree check
+    // must still refuse it rather than call someone else's change its own.
+    const tree = await ownTree();
+    run(repo, 'checkout', '-q', '-b', OWN_BRANCH);
+    writeFileSync(join(repo, 'tool.py'), 'def main():\n    print("not the reviewed change")\n');
+    run(repo, 'commit', '-qam', 'a different change under the same branch name');
+    run(repo, 'checkout', '-q', 'main');
+    run(repo, 'merge', '-q', '--ff-only', OWN_BRANCH);
+
+    const stale = session({
+      base: { commit: baseCommit, branch: 'main' },
+      landAttempt: { branch: OWN_BRANCH, tree },
+    });
+    const refusals = await checkMerge(stale, {
       diff: parseUnifiedDiff(patch()),
       counts: { total: 1, open: 0, substantial: 1, defended: 1 },
       heldElsewhere: false,
