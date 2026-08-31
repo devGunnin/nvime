@@ -93,10 +93,17 @@ const TRIAGE_INSTRUCTION = [
   'When in doubt, substantial. Do not read files; group only what is shown.',
 ].join(' ');
 
-export function composeTriagePrompt(spec: BigSpec | null, rendered: string, truncated: boolean): string {
+export function composeTriagePrompt(
+  spec: BigSpec | null,
+  rendered: string,
+  truncated: boolean,
+  shownHunks: number,
+  totalHunks: number,
+): string {
   const intent = spec === null ? '' : `\nWhat the change was meant to do:\n${spec.goal}\n`;
   const note = truncated
-    ? '\nThe diff was too large to show in full; group what is here.\n'
+    ? `\nOnly ${shownHunks} of ${totalHunks} hunks fit the size limit and are shown below; the rest were not ` +
+      'shown at all. Group only what is here.\n'
     : '';
   return `${TRIAGE_INSTRUCTION}\n${intent}${note}\n${rendered}`;
 }

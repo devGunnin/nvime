@@ -1,5 +1,16 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, join } from 'node:path';
 import { ProtocolError } from './protocol.js';
@@ -330,8 +341,10 @@ export class BigStore {
 
   /**
    * Claims the session for one run. Exclusive creation decides the race; a
-   * claim whose holder stopped heartbeating (a killed sidecar) is reclaimed,
-   * which is what keeps a crash from wedging the session forever.
+   * claim whose holder stopped heartbeating (a killed sidecar) is reclaimed by
+   * compare-and-delete — only the exact stale file just observed is removed —
+   * which is what keeps a crash from wedging the session forever without ever
+   * deleting a claim a faster contender has since written in its place.
    *
    * @throws ProtocolError `busy` when another live run holds it.
    */
@@ -347,13 +360,15 @@ export class BigStore {
         startedAt: Date.now(),
         heartbeatAt: Date.now(),
       };
-      if (tryClaim(path, claim)) return heartbeat(path, claim);
-      const held = readLockAt(path);
-      if (held !== null && isLockLive(held)) {
-        throw new ProtocolError('busy', `this big change is running in another editor (${held.what})`);
+      if (tryClaim(path, claim)) return confirmClaim(path, claim);
+      const observed = statLockAt(path);
+      if (observed !== null && observed.lock !== null && isLockLive(observed.lock)) {
+        throw new ProtocolError('busy', `this big change is running in another editor (${observed.lock.what})`);
       }
-      // Abandoned, or released between the two calls: clear it and try once more.
-      rmSync(path, { force: true });
+      // Abandoned, or released between the two calls: remove only the exact
+      // file just observed stale, so a slower contender can never delete a
+      // fresher claim a faster one has since written to the same path.
+      if (observed !== null) removeIfUnchanged(path, observed.ino);
     }
     throw new ProtocolError('busy', 'this big change is being claimed by another editor');
   }
@@ -397,15 +412,84 @@ function readLockAt(path: string): BigLock | null {
   }
 }
 
-/** True when this process took the claim; false when someone already holds it. */
+/**
+ * True when this process took the claim; false when someone already holds it.
+ *
+ * The full claim is written to a private tmp file first and then linked into
+ * place. `linkSync` is exclusive exactly like `wx` (`EEXIST` when the target
+ * already exists), but — unlike open-then-write — there is no window where a
+ * reader can see the path half-written: it either does not exist yet, or it
+ * already has its complete content, because the content was on disk before
+ * the name that makes it visible ever existed.
+ */
 function tryClaim(path: string, claim: BigLock): boolean {
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  writeFileSync(tmp, JSON.stringify(claim), { mode: 0o600 });
   try {
-    writeFileSync(path, JSON.stringify(claim), { flag: 'wx', mode: 0o600 });
+    linkSync(tmp, path);
     return true;
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === 'EEXIST') return false;
     throw cause;
+  } finally {
+    // Only the tmp file's own directory entry goes; `path`'s hard link (if
+    // the link above succeeded) keeps the same inode and content alive.
+    rmSync(tmp, { force: true });
   }
+}
+
+/** A lock path's inode, and its content when that content is readable. */
+interface StatLock {
+  /** Null for a lock file that exists but does not parse — corrupt, not absent. */
+  lock: BigLock | null;
+  ino: number;
+}
+
+/**
+ * Like `readLockAt`, but also names the inode a compare-and-delete needs, and
+ * tells "the path is absent" (null) apart from "the path is there but
+ * unreadable" (`lock: null` with a real `ino`) — the latter is exactly as
+ * reclaimable as a stale claim, and must not be mistaken for nothing to do.
+ */
+function statLockAt(path: string): StatLock | null {
+  let ino: number;
+  try {
+    ino = statSync(path).ino;
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw cause;
+    return null;
+  }
+  return { lock: readLockAt(path), ino };
+}
+
+/**
+ * Compare-and-delete: unlinks `path` only when it is still the exact inode
+ * observed stale. A contender racing a faster one that already reclaimed and
+ * rewrote the same path finds a different inode here and leaves it alone,
+ * instead of deleting the live claim that faster contender just wrote.
+ */
+function removeIfUnchanged(path: string, expectedIno: number): void {
+  try {
+    if (statSync(path).ino !== expectedIno) return;
+    unlinkSync(path);
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw cause;
+  }
+}
+
+/**
+ * The last line of defence: even a claim this process believes it just won
+ * must be re-read before it is trusted, so a takeover this process lost by a
+ * hair is discovered here rather than by a build running unlocked.
+ */
+function confirmClaim(path: string, claim: BigLock): SessionLock {
+  const held = readLockAt(path);
+  if (held === null || held.owner !== claim.owner) {
+    throw new ProtocolError('busy', 'this big change is being claimed by another editor');
+  }
+  return heartbeat(path, claim);
 }
 
 function heartbeat(path: string, claim: BigLock): SessionLock {
@@ -494,6 +578,12 @@ export function transition(session: BigSession, state: BigState, note: string): 
 export interface Reality {
   worktreeExists: boolean;
   diffExists: boolean;
+  /**
+   * Whether the captured diff on disk still hashes to what the session's
+   * blocks were triaged against — stronger than `diffExists`, which only
+   * checks the file is there. A finished review is only ever kept on this.
+   */
+  diffVerified: boolean;
   /** Whether THIS sidecar is driving the session right now. */
   running: boolean;
   /** Whether another process holds a live claim on it. */
@@ -513,9 +603,13 @@ export interface Reconciled {
  * Makes the record agree with the disk. A session is only ever claimed to be
  * further along than the evidence supports if this function has a bug:
  *
- *   * the clone is gone      → nothing was built; back to drafting.
- *   * reviewing, no diff     → nothing to review; back to triaging.
- *   * building, nothing live → still building, but nobody is driving it.
+ *   * the clone is gone, diff unverified → nothing trustworthy to review;
+ *     back to drafting.
+ *   * the clone is gone, diff verified   → the finished review survives; only
+ *     the clone-dependent actions (revise, open-file) go away with it.
+ *   * reviewing, no diff                 → nothing to review; back to triaging.
+ *   * building, nothing live             → still building, but nobody is
+ *     driving it.
  *
  * `triaging` with no captured diff is honest rather than wrong: the build is
  * done and the split is not, so it renders no threads and is re-triaged, not
@@ -529,6 +623,15 @@ export function reconcile(session: BigSession, reality: Reality): Reconciled {
   // disk is expected, not evidence that a build was lost.
   const pending = session.worktree !== null && !session.worktree.ready;
   if (!pending && !reality.worktreeExists) {
+    if (reality.diffVerified) {
+      // Only reading needs the clone; a captured diff that still verifies is
+      // a complete, self-consistent record of the change on its own. Drop the
+      // clone-dependent affordances, but keep the review itself intact.
+      const changed = session.worktree !== null || session.buildSessionId !== null;
+      session.worktree = null;
+      session.buildSessionId = null;
+      return { changed, detached: false, heldElsewhere: held };
+    }
     transition(session, 'drafting', 'the build clone is gone — approve again to rebuild');
     session.worktree = null;
     session.buildSessionId = null;

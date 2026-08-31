@@ -283,16 +283,28 @@ detached one again.
 Inside its clone the build runs unattended, and that includes `Bash` — a build
 has to be able to run your tests. What that does and does not buy you:
 
-* **Confined:** your repository's refs, objects, reflog, config and hooks. The
-  build has its own repository. `git update-ref`, `git gc --prune=now`,
-  `git reflog expire`, `git tag -d`, `git push` inside the build reach the
-  clone's git and stop there. Nothing registers a worktree in your repo, so
-  nothing prunes one either.
+* **Confined:** your repository's refs, reflog, config and hooks, and every git
+  *command* run inside the clone. The build has its own repository.
+  `git update-ref`, `git gc --prune=now`, `git reflog expire`, `git tag -d`,
+  `git push` inside the build reach the clone's git and stop there. Nothing
+  registers a worktree in your repo, so nothing prunes one either.
 * **Confined:** file writes anywhere else. `Edit`/`Write` resolve their path
   through symlinks and are refused outside the clone.
+* **NOT confined:** your repository's object database. `--local` *hardlinks*
+  it into the clone rather than copying it, so every git command above is
+  still safe — git always writes a new object plus a ref update, never in
+  place — but a raw write that truncates or overwrites a file under
+  `.git/objects` (a stray `chmod` plus `>` from the unconfined shell below,
+  say) reaches the same inode your repository reads from, and can corrupt it.
+  nvime keeps the hardlink: `--no-hardlinks` would close this, at the cost of
+  a full copy of the object database on every single build, which defeats the
+  "almost no disk" checkout this feature exists to make cheap. Tools that
+  write via tmp-file-plus-rename (`sed -i`, editors, git itself) never hit
+  this, because they replace the link rather than the bytes behind it.
 * **NOT confined:** shell reaching arbitrary paths. `cd` costs nothing, so the
   boundary is enforcement for file tools and advice for `Bash`. A build that
-  wants to read or write elsewhere on your machine can.
+  wants to read or write elsewhere on your machine can — including, as above,
+  your repository's own object database.
 * **NOT confined:** the read-only exfiltration edge described for edit mode. It
   applies here too, and without an approval prompt in the way.
 

@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
+import type { Readable, Writable } from 'node:stream';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { setTimeout } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import {
   BigStore,
   LOCK_STALE_MS,
@@ -44,7 +48,14 @@ function built(): BigSession {
 
 /** Reality with nothing live, overridden field by field. */
 function reality(overrides: Partial<Reality>): Reality {
-  return { worktreeExists: true, diffExists: false, running: false, heldElsewhere: false, ...overrides };
+  return {
+    worktreeExists: true,
+    diffExists: false,
+    diffVerified: false,
+    running: false,
+    heldElsewhere: false,
+    ...overrides,
+  };
 }
 
 describe('BigStore', () => {
@@ -161,6 +172,21 @@ describe('reconcile', () => {
     assert.equal(session.worktree, null);
     assert.deepEqual(session.blocks, []);
     assert.match(session.transitions[session.transitions.length - 1]?.note ?? '', /clone is gone/);
+  });
+
+  it('keeps a finished review when the clone is gone but the captured diff still verifies', () => {
+    const session = built();
+    session.blocks = [
+      { id: 'b1', title: 't', files: [], hunkIds: ['h1.1'], substantial: true, rationale: '', state: 'open', reopened: false, signatures: ['s'] },
+    ];
+    session.diffId = 'abc';
+    session.diffCapturedAt = Date.now();
+    transition(session, 'reviewing', 'test');
+    const result = reconcile(session, reality({ worktreeExists: false, diffExists: true, diffVerified: true }));
+    assert.equal(result.changed, true, 'the worktree and buildSessionId still had to be cleared');
+    assert.equal(session.state, 'reviewing', 'the review itself is not thrown away');
+    assert.equal(session.worktree, null, 'only the clone-dependent affordances go');
+    assert.equal(session.blocks.length, 1, 'the triaged threads survive');
   });
 
   it('sends a review with no captured diff back to triaging, not back to building', () => {
@@ -281,5 +307,110 @@ describe('the cross-process run claim', () => {
     writeFileSync(store.lockPathFor(repo, session.id), '{not json');
     assert.equal(store.readLock(session), null);
     store.acquireLock(session, 'build').release();
+  });
+});
+
+describe('stale takeover under real contention', () => {
+  const LOCK_CONTENDER = fileURLToPath(new URL('./fixtures/lock-contender.ts', import.meta.url));
+  const CONTENDER_TIMEOUT_MS = 10_000;
+  // Bounded for CI, matching the merge-gate reviewer's own 40-trial harness
+  // (which reproduced the bug in 25 of 40 trials over two real processes).
+  const TRIALS = 12;
+
+  interface Outcome {
+    result: string;
+    stolenImmediately?: boolean;
+  }
+
+  /**
+   * A contender kept alive for the whole test: process-startup jitter
+   * (hundreds of ms) dwarfs the race window this probes (microseconds), so
+   * respawning per trial would almost never land two processes inside
+   * `acquireLock` at the same instant. One persistent worker per contender,
+   * fed one session id per trial, keeps that jitter out of the loop.
+   */
+  class Contender {
+    readonly #child: ChildProcessByStdio<Writable, Readable, Readable>;
+    readonly #lines: string[] = [];
+    #waiting: ((line: string) => void) | null = null;
+    stderr = '';
+
+    constructor(storeRoot: string, repoRoot: string) {
+      this.#child = spawn(process.execPath, ['--import', 'tsx', LOCK_CONTENDER, storeRoot, repoRoot], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      createInterface({ input: this.#child.stdout }).on('line', (line) => {
+        if (this.#waiting !== null) {
+          const resolve = this.#waiting;
+          this.#waiting = null;
+          resolve(line);
+        } else {
+          this.#lines.push(line);
+        }
+      });
+      this.#child.stderr.on('data', (chunk: Buffer) => {
+        this.stderr += chunk.toString('utf8');
+      });
+    }
+
+    /** Sends one session id and waits for that trial's one-line JSON reply. */
+    async race(sessionId: string): Promise<Outcome> {
+      this.#child.stdin.write(`${sessionId}\n`);
+      const next =
+        this.#lines.length > 0
+          ? Promise.resolve(this.#lines.shift() as string)
+          : new Promise<string>((resolve) => {
+              this.#waiting = resolve;
+            });
+      const line = await Promise.race([
+        next,
+        setTimeout(CONTENDER_TIMEOUT_MS).then((): never => {
+          throw new Error(`lock contender did not answer within ${CONTENDER_TIMEOUT_MS}ms`);
+        }),
+      ]);
+      return JSON.parse(line) as Outcome;
+    }
+
+    close(): void {
+      this.#child.stdin.end();
+    }
+  }
+
+  /** A stale ghost lock seeded exactly as a killed sidecar would leave one. */
+  function seedGhostLock(sessionId: string): void {
+    mkdirSync(store.dirFor(repo, sessionId), { recursive: true });
+    const stale = Date.now() - LOCK_STALE_MS - 1000;
+    writeFileSync(
+      store.lockPathFor(repo, sessionId),
+      JSON.stringify({ pid: 1, host: hostname(), what: 'ghost', startedAt: stale, heartbeatAt: stale }),
+    );
+  }
+
+  it('never deletes a live claim, and never lets a reader observe a torn write, across many races', async () => {
+    const a = new Contender(store.root, repo);
+    const b = new Contender(store.root, repo);
+    try {
+      for (let trial = 0; trial < TRIALS; trial += 1) {
+        const sessionId = `race${trial}`;
+        seedGhostLock(sessionId);
+
+        const [first, second] = await Promise.all([a.race(sessionId), b.race(sessionId)]);
+
+        for (const outcome of [first, second]) {
+          if (outcome.result !== 'acquired') continue;
+          assert.equal(outcome.stolenImmediately, false, `trial ${trial}: the winner's claim was gone right after acquiring it`);
+        }
+      }
+    } finally {
+      a.close();
+      b.close();
+    }
+    for (const contender of [a, b]) {
+      assert.doesNotMatch(
+        contender.stderr,
+        /ignoring an unreadable big-change lock/,
+        `a reader observed a half-written claim\n${contender.stderr}`,
+      );
+    }
   });
 });

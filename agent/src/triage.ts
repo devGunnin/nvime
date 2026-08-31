@@ -103,10 +103,19 @@ export function fallbackBlocks(diff: ParsedDiff): RawBlock[] {
  * kept by its first claimant, empty blocks removed, and everything left over
  * gathered into one substantial `unsorted` block.
  *
+ * `unshownIds` names hunks the triage turn was never shown at all (a diff
+ * that exceeded the triage window) — kept apart from hunks it saw and did not
+ * place, so the block's rationale says which actually happened rather than
+ * blaming the model for a hunk it never had the chance to sort.
+ *
  * @throws when the result would not cover the diff exactly once — that is a
  *   bug in this function, not bad model output, and must not ship silently.
  */
-export function normalizeBlocks(raw: readonly RawBlock[], diff: ParsedDiff): TriageBlock[] {
+export function normalizeBlocks(
+  raw: readonly RawBlock[],
+  diff: ParsedDiff,
+  unshownIds: ReadonlySet<string> = new Set(),
+): TriageBlock[] {
   const byId = new Map(diff.hunks.map((hunk) => [hunk.id, hunk]));
   const claimed = new Set<string>();
   const blocks: TriageBlock[] = [];
@@ -125,19 +134,25 @@ export function normalizeBlocks(raw: readonly RawBlock[], diff: ParsedDiff): Tri
 
   const missed = diff.hunks.filter((hunk) => !claimed.has(hunk.id));
   if (missed.length > 0) {
-    blocks.push(
-      makeBlock(
-        `b${blocks.length + 1}`,
-        'unsorted',
-        true,
-        'triage did not place these hunks, so they are shown in full',
-        missed,
-      ),
-    );
+    const notShown = missed.filter((hunk) => unshownIds.has(hunk.id)).length;
+    const rationale = unsortedRationale(notShown, missed.length - notShown);
+    blocks.push(makeBlock(`b${blocks.length + 1}`, 'unsorted', true, rationale, missed));
   }
 
   assertCoversExactlyOnce(blocks, diff);
   return blocks;
+}
+
+/** What actually happened to the hunks in the `unsorted` block — never a guess. */
+function unsortedRationale(notShown: number, unplaced: number): string {
+  if (notShown > 0 && unplaced > 0) {
+    return (
+      `${notShown} hunk(s) exceeded the triage window and were not shown; ` +
+      `${unplaced} more were shown but triage did not place them`
+    );
+  }
+  if (notShown > 0) return `${notShown} hunk(s) exceeded the triage window and were not shown`;
+  return 'triage did not place these hunks, so they are shown in full';
 }
 
 function makeBlock(

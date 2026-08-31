@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { BIG_AUTO_ALLOWED, BigService, type SessionView } from '../src/big.js';
+import { BIG_AUTO_ALLOWED, BigService, buildWriteBoundary, type SessionView } from '../src/big.js';
 import { BigStore } from '../src/bigstore.js';
 import { ProtocolError } from '../src/protocol.js';
 
@@ -331,11 +340,17 @@ describe('big build isolation', () => {
     assert.equal(store.read(repo, view.id), null);
   });
 
-  it('re-approves a session whose build directory was deleted by hand', async () => {
+  it('re-approves a session whose build clone vanished before any diff was captured', async () => {
+    // Nothing was ever captured here (the clone is marked built by hand, never
+    // actually run through `build`), so there is no finished review to keep —
+    // this is still the "approve again to rebuild" path.
     const first = await approved();
-    scriptBuild([{ title: 'x', substantial: true }]);
-    await service.build(2, { root: repo, id: first.id });
-    rmSync(first.worktree?.path ?? '', { recursive: true, force: true });
+    const worktreePath = first.worktree?.path ?? '';
+    mkdirSync(join(worktreePath, '.git'), { recursive: true });
+    const session = store.require(repo, first.id);
+    if (session.worktree !== null) session.worktree.ready = true;
+    store.save(session);
+    rmSync(worktreePath, { recursive: true, force: true });
     assert.equal(service.open(repo, first.id).display, 'drafting');
 
     const second = await service.approve(repo, first.id);
@@ -565,18 +580,31 @@ describe('big state honesty', () => {
     assert.equal(reopened.hasDiff, false);
   });
 
-  it('sends a session whose build clone was deleted back to drafting', async () => {
-    const view = await approved();
+  it('keeps a finished review readable when only the build clone is gone, and refuses its clone-only actions', async () => {
+    const approvedView = await approved();
     scriptBuild([{ title: 'x', substantial: true }]);
-    await service.build(2, { root: repo, id: view.id });
-    rmSync(view.worktree?.path ?? '', { recursive: true, force: true });
-    const reopened = service.open(repo, view.id);
-    assert.equal(reopened.display, 'drafting');
-    assert.equal(reopened.worktree, null);
-    assert.deepEqual(reopened.spec, SPEC, 'the spec survives so it can be rebuilt');
+    const built = await service.build(2, { root: repo, id: approvedView.id });
+    assert.equal(built.display, 'reviewing');
+    rmSync(built.worktree?.path ?? '', { recursive: true, force: true });
+
+    const reopened = service.open(repo, built.id);
+    assert.equal(reopened.display, 'reviewing', 'the captured diff still verifies, so the review survives');
+    assert.equal(reopened.worktree, null, 'the clone itself, and only it, is gone');
+    assert.equal(reopened.hasDiff, true);
+    assert.deepEqual(
+      reopened.blocks.map((block) => block.id),
+      built.blocks.map((block) => block.id),
+      'the triaged threads are untouched',
+    );
+    assert.notEqual(service.diff(repo, built.id), null, 'the diff still renders, read-only');
+
     await assert.rejects(
-      () => service.build(9, { root: repo, id: view.id }),
-      (error: unknown) => error instanceof ProtocolError && /approve the spec/.test(error.message),
+      () => service.revise(9, { root: repo, id: built.id, blockId: reopened.blocks[0]?.id ?? '', comment: 'x' }),
+      (error: unknown) => error instanceof ProtocolError && /no build clone to revise/.test(error.message),
+    );
+    await assert.rejects(
+      () => service.build(10, { root: repo, id: built.id }),
+      (error: unknown) => error instanceof ProtocolError && /build clone is gone/.test(error.message),
     );
   });
 
@@ -780,5 +808,91 @@ describe('big session store on disk', () => {
     };
     assert.equal(record.state, 'building');
     assert.equal(record.transitions.length, 2);
+  });
+
+  it('refuses to remove a clone path a tampered record does not actually own', async () => {
+    const view = await approved();
+    scriptBuild([{ title: 'x', substantial: true }]);
+    const built = await service.build(2, { root: repo, id: view.id });
+
+    // Something outside the session's own clone directory — the exact shape
+    // of directory `discard`/`#ensureClone` must never be pointed at.
+    const decoy = join(root, 'decoy');
+    mkdirSync(decoy, { recursive: true });
+    writeFileSync(join(decoy, 'canary.txt'), 'do not delete me');
+
+    const recordPath = join(store.dirFor(repo, built.id), 'session.json');
+    const record = JSON.parse(readFileSync(recordPath, 'utf8')) as { worktree: { path: string } };
+    record.worktree.path = decoy;
+    writeFileSync(recordPath, JSON.stringify(record));
+
+    await assert.rejects(() => service.discard(repo, built.id), ProtocolError);
+    assert.equal(existsSync(decoy), true, 'the tampered path must survive a refused discard');
+    assert.equal(existsSync(join(decoy, 'canary.txt')), true);
+    assert.notEqual(store.read(repo, built.id), null, 'a refused discard must not destroy the record either');
+  });
+});
+
+describe('the build write boundary', () => {
+  it('fails closed when a build turn has no worktreeRoot, instead of installing no gate', () => {
+    assert.throws(() => buildWriteBoundary(true, undefined), /worktreeRoot/);
+  });
+
+  it('resolves the real path for a build turn that has one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nvime-wtroot-'));
+    assert.equal(buildWriteBoundary(true, dir), realpathSync(dir));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('installs nothing for a read-only turn, worktreeRoot or not', () => {
+    assert.equal(buildWriteBoundary(false, undefined), null);
+    assert.equal(buildWriteBoundary(false, '/some/path'), null);
+  });
+});
+
+describe('a triage window too small for the whole diff', () => {
+  it('tells the model how much was cut, notices it in the panel, and marks the leftover truthfully', async () => {
+    const view = await approved();
+    // Five new files, each comfortably past the 128KB triage window when
+    // summed — big enough that some land past the cut without needing a
+    // pathologically large single file.
+    const names = ['big-a.txt', 'big-b.txt', 'big-c.txt', 'big-d.txt', 'big-e.txt'];
+    turns.push({
+      act: async (options) => {
+        const dir = String(options.cwd);
+        for (const name of names) {
+          writeFileSync(join(dir, name), `${name}\n`.repeat(2500));
+        }
+      },
+      frames: [frames.init(), frames.result('built it')],
+    });
+    // The triage turn only ever sees what fits; it groups exactly that into
+    // one thread and never claims the hunks it was not shown.
+    turns.push({ frames: triageByFile([{ title: 'shown', files: names, substantial: true }]) });
+
+    const built = await service.build(2, { root: repo, id: view.id });
+
+    const triagePrompt = calls[calls.length - 1]?.prompt ?? '';
+    assert.match(triagePrompt, /Only \d+ of 5 hunks fit the size limit/, triagePrompt.slice(0, 200));
+
+    assert.ok(
+      events.some(
+        (entry) => entry.event === 'big.notice' && /hunk\(s\) exceeded the triage window and were not shown/.test(String(entry.params.text)),
+      ),
+      'the panel must be told something was cut',
+    );
+
+    const unsorted = built.blocks.find((block) => block.title === 'unsorted');
+    assert.ok(unsorted !== undefined, 'the hunks past the window must still land somewhere');
+    assert.match(
+      unsorted?.rationale ?? '',
+      /exceeded the triage window and were not shown/,
+      'the leftover thread must say what actually happened, not blame the model for hunks it never saw',
+    );
+    assert.equal(unsorted?.substantial, true, 'an unshown hunk is never auto-resolved');
+
+    const covered = built.blocks.flatMap((block) => block.hunkIds);
+    assert.equal(new Set(covered).size, covered.length, 'no hunk claimed twice');
+    assert.equal(covered.length, 5, 'every file still lands in exactly one thread');
   });
 });

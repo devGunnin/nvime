@@ -325,9 +325,19 @@ export function signatureOf(file: string, lines: readonly string[]): string {
   return createHash('sha256').update(file).update('\n').update(lines.join('\n')).digest('hex').slice(0, 16);
 }
 
+export interface RenderedTriage {
+  text: string;
+  truncated: boolean;
+  /** Ids of the hunks actually included in `text` — what the model was shown. */
+  shownIds: ReadonlySet<string>;
+  /** Every hunk in the diff, shown or not, so a caller can name what was cut. */
+  totalHunks: number;
+}
+
 /** The hunk bodies, labelled with their ids — what the triage turn reads. */
-export function renderForTriage(parsed: ParsedDiff, maxBytes: number): { text: string; truncated: boolean } {
+export function renderForTriage(parsed: ParsedDiff, maxBytes: number): RenderedTriage {
   const parts: string[] = [];
+  const shownIds = new Set<string>();
   let bytes = 0;
   let truncated = false;
   for (const file of parsed.files) {
@@ -339,8 +349,9 @@ export function renderForTriage(parsed: ParsedDiff, maxBytes: number): { text: s
         break;
       }
       parts.push(block);
+      shownIds.add(hunk.id);
     }
     if (truncated) break;
   }
-  return { text: parts.join('\n'), truncated };
+  return { text: parts.join('\n'), truncated, shownIds, totalHunks: parsed.hunks.length };
 }

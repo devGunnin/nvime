@@ -79,6 +79,11 @@ export async function readHead(repoRoot: string): Promise<RepoHead> {
  * `git update-ref`, `git gc --prune=now` or `git reflog expire` inside it
  * reaches their refs and objects. `--local` hardlinks the object database, so
  * this costs a checkout and almost no disk, and the clone owns its own refs.
+ * The hardlink is a residual: every git command is safe (git never writes an
+ * object in place), but a raw write under `.git/objects` — outside git, from
+ * the build's unconfined shell — reaches the same inode the source reads
+ * from. Documented in the README rather than closed with `--no-hardlinks`,
+ * which would cost a full object copy on every build.
  *
  * Nothing here touches the source repository: `clone` only reads it, and no
  * registration is left behind for a later `worktree prune` to have to clean up.

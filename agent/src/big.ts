@@ -37,7 +37,7 @@ import {
   type TriageBlock,
   type TriageCounts,
 } from './triage.js';
-import { parseUnifiedDiff, renderForTriage, type ParsedDiff } from './unidiff.js';
+import { parseUnifiedDiff, renderForTriage, type ParsedDiff, type RenderedTriage } from './unidiff.js';
 
 /**
  * Big Change mode: interrogate the request into a spec, build it alone in a
@@ -373,7 +373,7 @@ export class BigService {
     if (held !== null) {
       throw new ProtocolError('busy', `this big change is running in another editor (${held.what}) — stop it there`);
     }
-    if (session.worktree !== null) await removeClone(session.worktree.path);
+    if (session.worktree !== null) await this.#guardedRemoveClone(session, session.worktree.path);
     this.#store.destroy(root, id);
     return { discarded: true };
   }
@@ -429,11 +429,30 @@ export class BigService {
     });
     // A half-made clone from an interrupted approval would fail `git clone`
     // on a non-empty destination; there is nothing in it worth keeping.
-    await removeClone(worktree.path);
+    await this.#guardedRemoveClone(session, worktree.path);
     mkdirSync(dirname(worktree.path), { recursive: true });
     await cloneAt(session.repoRoot, worktree.path, worktree.baseCommit);
     worktree.ready = true;
     this.#store.save(session);
+  }
+
+  /**
+   * `removeClone` is an unbounded `rm -rf`, and `dir` here is a path read back
+   * out of `session.json` — the store validates the session id for exactly
+   * this reason, and a path field must be held to the same standard. Refuses
+   * rather than silently skipping, so a tampered record surfaces as a failure
+   * instead of a build that quietly proceeds against who-knows-what directory.
+   */
+  async #guardedRemoveClone(session: BigSession, dir: string): Promise<void> {
+    const expected = this.#store.worktreePathFor(session.repoRoot, session.id);
+    if (dir !== expected) {
+      throw new ProtocolError(
+        'agent_error',
+        'refusing to remove a clone path this session does not own',
+        `expected ${expected}, got ${dir}`,
+      );
+    }
+    await removeClone(dir);
   }
 
   /** Applies the disk's version of events to the record before acting on it. */
@@ -446,6 +465,7 @@ export class BigService {
     return {
       worktreeExists: this.#store.hasWorktree(session),
       diffExists: this.#store.hasDiff(session),
+      diffVerified: this.#store.readVerifiedDiff(session) !== null,
       running: this.#runningByKey.has(keyOf(session)),
       // The store is shared by every open Neovim, so "nobody is driving this"
       // is a claim about the machine, not about this process.
@@ -488,8 +508,17 @@ export class BigService {
       return this.#view(session);
     }
 
-    const raw = await this.#triageBlocks(requestId, session, parsed);
-    const blocks = carryForward(previous, normalizeBlocks(raw, parsed));
+    const rendered = renderForTriage(parsed, MAX_TRIAGE_BYTES);
+    if (rendered.truncated) {
+      const hidden = parsed.hunks.length - rendered.shownIds.size;
+      this.#emit('big.notice', {
+        id: requestId,
+        text: `${hidden} hunk(s) exceeded the triage window and were not shown`,
+      });
+    }
+    const unshownIds = new Set(parsed.hunks.filter((hunk) => !rendered.shownIds.has(hunk.id)).map((hunk) => hunk.id));
+    const raw = await this.#triageBlocks(requestId, session, parsed, rendered);
+    const blocks = carryForward(previous, normalizeBlocks(raw, parsed, unshownIds));
     transition(session, 'reviewing', `${blocks.length} thread(s) from ${parsed.hunks.length} hunk(s)`);
     this.#store.commitCapture(session, { id: diffId, bytes, blocks });
     return this.#view(session);
@@ -499,13 +528,19 @@ export class BigService {
     requestId: number,
     session: BigSession,
     parsed: ParsedDiff,
+    rendered: RenderedTriage,
   ): Promise<RawBlock[]> {
     const worktree = session.worktree;
-    const rendered = renderForTriage(parsed, MAX_TRIAGE_BYTES);
     let reason: string;
     try {
       const result = await this.#turn(requestId, {
-        prompt: composeTriagePrompt(session.spec, rendered.text, rendered.truncated),
+        prompt: composeTriagePrompt(
+          session.spec,
+          rendered.text,
+          rendered.truncated,
+          rendered.shownIds.size,
+          rendered.totalHunks,
+        ),
         cwd: worktree?.path ?? session.repoRoot,
         phase: 'triage',
         resume: null,
@@ -612,7 +647,7 @@ export class BigService {
     abort: AbortController,
   ): Options {
     const build = spec.phase === 'build';
-    const realWorktree = build && spec.worktreeRoot !== undefined ? realPathOf(spec.worktreeRoot) : null;
+    const realWorktree = buildWriteBoundary(build, spec.worktreeRoot);
     return {
       cwd: spec.cwd,
       // A copy per turn: the SDK mutates the env object it is handed.
@@ -692,6 +727,20 @@ export class BigService {
       counts,
     };
   }
+}
+
+/**
+ * The build's write boundary: the real path `canUseTool` and the `PreToolUse`
+ * hook confine every write to, or `null` for a read-only turn that installs
+ * neither. A build turn with no `worktreeRoot` is a caller's bug, not a
+ * reason to run with mutation tools and no gate — it must fail closed.
+ */
+export function buildWriteBoundary(build: boolean, worktreeRoot: string | undefined): string | null {
+  if (!build) return null;
+  if (worktreeRoot === undefined) {
+    throw new Error('a build turn requires worktreeRoot to install its write boundary');
+  }
+  return realPathOf(worktreeRoot);
 }
 
 function keyOf(session: BigSession): string {
