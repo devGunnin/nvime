@@ -5,8 +5,13 @@ Node sidecar owns every conversation through the
 [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
 
 **Subscription auth only.** The SDK drives your local `claude` install and its
-existing login. `ANTHROPIC_API_KEY` and friends are stripped from the
-environment the SDK sees, and `:checkhealth nvime` tells you when they were set.
+existing login. Every variable the shipped SDK reads to supply a credential,
+redirect the endpoint, or select another provider — `ANTHROPIC_API_KEY`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`,
+`CLAUDE_CODE_USE_*` and the rest — is stripped from the environment the SDK
+sees, and `:checkhealth nvime` tells you which of them were set. The list is
+re-derived from the installed SDK by a test, so a version bump that adds one
+fails CI rather than leaking.
 
 This is Phase 1: **Chat**. Edit mode (P2) and Big Change with the comprehension
 gate (P3/P4) bolt onto the same RPC seam.
@@ -59,16 +64,28 @@ Every mapping is a leaf: none is a prefix of another, so nothing ever stalls for
 `timeoutlen`. `tests/lua/keymaps_spec.lua` enforces it and `:checkhealth` reports it.
 
 **Context.** Write `@path/to/file` or `@path/to/dir` in a prompt and nvime
-attaches it — a file as its contents, a directory as a bounded listing. Bad or
-oversized paths are reported in the panel, never silently dropped.
+attaches it — a file as its contents, a directory as a bounded listing. Relative
+paths resolve against the project root the panel was opened on, not Neovim's
+cwd. Bad, binary or oversized paths are reported in the panel, never silently
+dropped. `@` is not confined to the project: `@~/.ssh/id_rsa` is read and sent,
+because you asked for it.
 
 **Sessions.** The session for a project root is remembered, so reopening chat
-resumes it and replays the earlier turns. `<C-r>` lists nvime's past sessions
-for that root by title and age. Resume survives Neovim restarts.
+resumes it and replays the earlier turns — the prompts you typed, not the files
+they carried. `<C-r>` lists nvime's past sessions for that root by title and
+age. Resume survives Neovim restarts, and several Neovim instances share the
+session file without overwriting each other.
 
 **Chat is read-only.** It gets `Read`, `Glob`, `Grep`, `WebFetch` and
 `WebSearch`; file mutation and shell are denied through SDK options, not prompt
 text. Editing arrives in P2 behind its own gate.
+
+Chat loads **no** `.claude/settings.json` — not the repo's, not yours. Project
+settings carry `hooks` (shell commands the model's first `Read` would fire) and
+`apiKeyHelper`/`env` (which put back the credentials nvime just stripped), and
+none of that is gated by the tool lists. Opening an unfamiliar repo must not be
+a decision to trust it, so the guarantee is not made voidable by the code being
+read. The cost is that chat does not see the repo's `CLAUDE.md`.
 
 ## Configuration
 
@@ -85,9 +102,10 @@ require('nvime').setup({
     send_selection = '<leader>ns',
   },
   agent = {
-    node = 'node',       -- node binary
-    claude = nil,        -- absolute path; nil resolves from PATH
-    model = nil,         -- nil uses the CLI default
+    node = 'node',              -- node binary
+    claude = nil,               -- absolute path; nil resolves from PATH
+    model = nil,                -- nil uses the CLI default
+    request_timeout_ms = 15000, -- control requests; a chat turn has no deadline
   },
   context = {
     max_file_bytes = 200 * 1024,
@@ -143,10 +161,12 @@ stylua --check lua plugin tests
 luacheck lua plugin tests
 ```
 
-`agent/test/` covers the sidecar (framing, env stripping, session store, and the
+`agent/test/` covers the sidecar (framing, env stripping — including a scan of
+the installed SDK bundle — the session store under concurrent writers, and the
 chat service against a mocked SDK). `tests/lua/` covers the plugin (markdown
-rendering, RPC framing and frame dispatch, keymap leaf-only-ness, panel
-streaming, config validation, context expansion).
+rendering, RPC framing, dispatch and deadlines, sidecar lifecycle, chat wiring,
+health reporting, keymap leaf-only-ness, panel streaming and lifecycle, the
+picker, config validation, context expansion).
 
 ## Layout
 
