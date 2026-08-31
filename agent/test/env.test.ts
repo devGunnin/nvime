@@ -7,14 +7,38 @@ import {
   subscriptionEnv,
 } from '../src/env.js';
 
+/**
+ * Named independently of `STRIPPED_ENV_VARS` on purpose. Asserting the export
+ * against itself passes for any list, including a wrong one — which is how the
+ * list came to name a variable the SDK never reads while missing four it does.
+ */
+const MUST_NOT_REACH_THE_CLI = {
+  ANTHROPIC_API_KEY: 'sk-ant-leak',
+  ANTHROPIC_AUTH_TOKEN: 'tok-leak',
+  CLAUDE_CODE_OAUTH_TOKEN: 'oauth-leak',
+  AWS_BEARER_TOKEN_BEDROCK: 'bedrock-leak',
+  ANTHROPIC_BASE_URL: 'https://gateway.corp/',
+  ANTHROPIC_CUSTOM_HEADERS: 'Authorization: Bearer leak',
+  ANTHROPIC_BEDROCK_BASE_URL: 'https://bedrock.corp/',
+  ANTHROPIC_VERTEX_BASE_URL: 'https://vertex.corp/',
+  CLAUDE_CODE_USE_BEDROCK: '1',
+  CLAUDE_CODE_USE_VERTEX: '1',
+};
+
 describe('subscriptionEnv', () => {
-  it('removes every credential and provider override', () => {
-    const source: Record<string, string | undefined> = { PATH: '/usr/bin', HOME: '/home/x' };
-    for (const name of STRIPPED_ENV_VARS) source[name] = 'leaked';
-    const env = subscriptionEnv(source);
-    for (const name of STRIPPED_ENV_VARS) {
+  it('removes the credentials and endpoint overrides by name', () => {
+    const env = subscriptionEnv({ PATH: '/usr/bin', HOME: '/home/x', ...MUST_NOT_REACH_THE_CLI });
+    for (const name of Object.keys(MUST_NOT_REACH_THE_CLI)) {
       assert.equal(env[name], undefined, `${name} must not reach the SDK subprocess`);
     }
+    assert.equal(env.PATH, '/usr/bin', 'the environment is otherwise complete');
+  });
+
+  it('strips every name it advertises', () => {
+    const source: Record<string, string | undefined> = { PATH: '/usr/bin' };
+    for (const name of STRIPPED_ENV_VARS) source[name] = 'leaked';
+    const env = subscriptionEnv(source);
+    for (const name of STRIPPED_ENV_VARS) assert.equal(env[name], undefined);
   });
 
   it('keeps the rest of the environment intact', () => {

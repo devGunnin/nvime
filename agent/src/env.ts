@@ -3,15 +3,52 @@ import { delimiter, join } from 'node:path';
 
 /**
  * Subscription auth is a hard product constraint: the SDK must drive the
- * locally installed `claude` and its existing login. These variables would
- * route the CLI to an API key or a cloud provider instead, so they are removed
- * from the environment the SDK hands the subprocess.
+ * locally installed `claude` and its existing login. Every name below is read
+ * by the shipped SDK bundle to supply a credential, redirect the endpoint, or
+ * select another provider — `test/env-sdk-contract.test.ts` re-derives the set
+ * from `node_modules` so a future SDK cannot add one unnoticed.
  */
 export const STRIPPED_ENV_VARS = [
+  // Credentials, including the ones handed over as an inherited descriptor.
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
-  'ANTHROPIC_BEARER_TOKEN',
+  'ANTHROPIC_AWS_API_KEY',
+  'ANTHROPIC_FOUNDRY_API_KEY',
+  'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
+  'ANTHROPIC_IDENTITY_TOKEN',
+  'ANTHROPIC_IDENTITY_TOKEN_FILE',
+  'AWS_BEARER_TOKEN_BEDROCK',
+  'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+  'CLAUDE_CODE_HFI_BEARER_TOKEN',
+  'CLAUDE_CODE_OAUTH_REFRESH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+  'CLAUDE_CODE_SESSION_ACCESS_TOKEN',
+  // Endpoint redirection: these reroute the prompt and the OAuth credential.
+  'ANTHROPIC_AWS_BASE_URL',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_BEDROCK_BASE_URL',
+  'ANTHROPIC_BEDROCK_MANTLE_BASE_URL',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'ANTHROPIC_FOUNDRY_BASE_URL',
+  'ANTHROPIC_GOOGLE_CLOUD_BASE_URL',
+  'ANTHROPIC_VERTEX_BASE_URL',
+  'CLAUDE_CODE_API_BASE_URL',
+  'CLAUDE_CODE_CUSTOM_OAUTH_URL',
+  '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL',
+  // Provider selection, and the switches that skip its auth.
+  'CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH',
+  'CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH',
+  'CLAUDE_CODE_SKIP_BEDROCK_AUTH',
+  'CLAUDE_CODE_SKIP_FOUNDRY_AUTH',
+  'CLAUDE_CODE_SKIP_MANTLE_AUTH',
+  'CLAUDE_CODE_SKIP_VERTEX_AUTH',
+  'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
   'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_GATEWAY',
+  'CLAUDE_CODE_USE_MANTLE',
   'CLAUDE_CODE_USE_VERTEX',
 ] as const;
 
