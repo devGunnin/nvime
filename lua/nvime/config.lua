@@ -19,7 +19,9 @@ local defaults = {
     claude = nil,
     -- Model id passed to the SDK; nil uses the CLI default.
     model = nil,
-    start_timeout_ms = 15000,
+    -- Deadline for control requests. A streaming turn is exempt: it is bounded
+    -- by the user's stop key, not a timer.
+    request_timeout_ms = 15000,
   },
   context = {
     max_file_bytes = 200 * 1024,
@@ -60,6 +62,10 @@ local function validate(opts)
   end
   if opts.agent.model ~= nil then
     check_type(opts.agent.model, 'string', 'agent.model')
+  end
+  check_type(opts.agent.request_timeout_ms, 'number', 'agent.request_timeout_ms')
+  if opts.agent.request_timeout_ms < 1000 then
+    fail('agent.request_timeout_ms must be at least 1000')
   end
   check_type(opts.context.max_file_bytes, 'number', 'context.max_file_bytes')
   if opts.context.max_file_bytes < 1024 then

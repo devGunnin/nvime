@@ -85,10 +85,15 @@ local function report_claude(info)
   vim.health.info('claude login is confirmed by the first chat turn; run `:Nvime chat` to verify it')
 end
 
---- Starts the sidecar, pings it, and shuts it down again.
+--- Starts the sidecar, pings it, and shuts it down again. Uses the same env as
+--- a real spawn, or the probe would deny a `claude` that chat resolves fine.
 local function check_sidecar()
   local node = config.get().agent.node
-  local ok, proc = pcall(vim.system, { node, agent.dist_path() }, { stdin = true, text = true })
+  local ok, proc = pcall(vim.system, { node, agent.dist_path() }, {
+    stdin = true,
+    text = true,
+    env = agent.sidecar_env(),
+  })
   if not ok then
     vim.health.error('could not start the sidecar: ' .. tostring(proc))
     return

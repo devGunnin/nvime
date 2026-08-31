@@ -175,9 +175,13 @@ function M.send(text, extra)
     end
     state.session_id = result.sessionId
     refresh_status(string.format('%d out · $%.4f', result.usage.output, result.costUsd))
-  end, function(id)
-    state.request_id = id
-  end)
+  end, {
+    -- A turn streams for as long as the model takes; <C-c> bounds it, not a timer.
+    no_deadline = true,
+    on_sent = function(id)
+      state.request_id = id
+    end,
+  })
 end
 
 --- Sends the visual selection with its file and line range attached.

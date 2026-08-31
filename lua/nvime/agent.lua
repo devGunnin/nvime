@@ -53,7 +53,9 @@ local function preflight()
   return nil
 end
 
-local function sidecar_env()
+--- The configured overrides the sidecar needs, or nil when there are none.
+--- `:checkhealth` probes with this too, so it cannot contradict a working chat.
+function M.sidecar_env()
   local opts = config.get()
   local env = {}
   if opts.agent.claude ~= nil then
@@ -62,7 +64,11 @@ local function sidecar_env()
   if opts.agent.model ~= nil then
     env.NVIME_MODEL = opts.agent.model
   end
-  return next(env) == nil and nil or env
+  -- Not `cond and nil or env`: in Lua that always yields the fallback.
+  if next(env) == nil then
+    return nil
+  end
+  return env
 end
 
 local function dispatch_event(name, params)
@@ -102,7 +108,7 @@ function M.ensure(cb)
   local client = rpc.new({
     cmd = { config.get().agent.node, M.dist_path() },
     cwd = M.plugin_root(),
-    env = sidecar_env(),
+    env = M.sidecar_env(),
     on_event = dispatch_event,
     on_exit = function(code, stderr)
       state.client = nil
@@ -119,20 +125,27 @@ function M.ensure(cb)
   cb(nil)
 end
 
---- Ensures the sidecar is up, then sends one request.
+--- Ensures the sidecar is up, then sends one request. Control requests carry
+--- the configured deadline; only a streaming turn opts out of one.
 --- @param method string
 --- @param params table|nil
 --- @param cb fun(err: table|nil, result: any)
---- @param on_sent fun(request_id: integer)|nil receives the id, for cancellation
-function M.request(method, params, cb, on_sent)
+--- @param opts table|nil on_sent(request_id) and no_deadline (a streaming turn)
+function M.request(method, params, cb, opts)
+  assert(type(cb) == 'function', 'agent.request needs a callback')
+  opts = opts or {}
+  local timeout_ms = nil
+  if not opts.no_deadline then
+    timeout_ms = config.get().agent.request_timeout_ms
+  end
   M.ensure(function(err)
     if err ~= nil then
       cb(err, nil)
       return
     end
-    local id = state.client:request(method, params, cb)
-    if id ~= nil and on_sent ~= nil then
-      on_sent(id)
+    local id = state.client:request(method, params, cb, timeout_ms)
+    if id ~= nil and opts.on_sent ~= nil then
+      opts.on_sent(id)
     end
   end)
 end
