@@ -6,12 +6,25 @@ Node sidecar owns every conversation through the
 
 **Subscription auth only.** The SDK drives your local `claude` install and its
 existing login. Every variable the shipped SDK reads to supply a credential,
-redirect the endpoint, or select another provider — `ANTHROPIC_API_KEY`,
-`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`,
+redirect the endpoint, or select another provider or profile —
+`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_PROFILE`, `ANTHROPIC_UNIX_SOCKET`,
 `CLAUDE_CODE_USE_*` and the rest — is stripped from the environment the SDK
-sees, and `:checkhealth nvime` tells you which of them were set. The list is
-re-derived from the installed SDK by a test, so a version bump that adds one
-fails CI rather than leaking.
+sees, and `:checkhealth nvime` tells you which of them were set.
+`agent/test/env-sdk-contract.test.ts` re-derives the list from the SDK bundle
+actually installed in `node_modules`, so a version bump that adds one fails CI
+rather than leaking. That derivation classifies by pattern over the bundle's
+identifier names, not by reading the bundle's own declared variable sets — a
+future SDK release could in principle name a new credential something the
+classifier's patterns miss, in which case it would reach the subprocess
+unstripped and unwarned.
+
+Proxy and TLS variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`,
+`NODE_EXTRA_CA_CERTS`, `NODE_TLS_REJECT_UNAUTHORIZED`) are deliberately left
+alone — they are system-wide conventions, and stripping them would break
+corporate networks — but together they can route a prompt and your OAuth
+credential through whatever man-in-the-middle you have configured. That is an
+accepted tradeoff, not an oversight.
 
 This is Phase 1: **Chat**. Edit mode (P2) and Big Change with the comprehension
 gate (P3/P4) bolt onto the same RPC seam.
