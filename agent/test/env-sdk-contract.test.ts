@@ -16,9 +16,10 @@ const SDK_BUNDLE = createRequire(import.meta.url).resolve('@anthropic-ai/claude-
 /** Scope: what the spawned `claude` reads. The browser bridge is not in play. */
 const OWNED_PREFIX = /^(_?CLAUDE_CODE|ANTHROPIC|AWS_BEARER)_/;
 const CARRIES_A_CREDENTIAL =
-  /(API_KEY|AUTH_TOKEN|OAUTH_TOKEN|BEARER_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN|IDENTITY_TOKEN)/;
-const REDIRECTS_TRAFFIC = /(BASE_URL|OAUTH_URL|CUSTOM_HEADERS)/;
-const SELECTS_A_PROVIDER = /^CLAUDE_CODE_(USE_|SKIP_[A-Z0-9_]*AUTH$)/;
+  /(API_KEY|AUTH_TOKEN|OAUTH_TOKEN|BEARER_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN|IDENTITY_TOKEN|CLIENT_CERT|CLIENT_KEY|CERT_STORE|AUTH_HELPER)/;
+const REDIRECTS_TRAFFIC = /(BASE_URL|OAUTH_URL|CUSTOM_HEADERS|UNIX_SOCKET)/;
+const SELECTS_A_PROVIDER =
+  /^CLAUDE_CODE_(USE_|SKIP_[A-Z0-9_]*AUTH$)|^ANTHROPIC_(PROFILE|CONFIG_DIR|SCOPE|ORGANIZATION_ID|SERVICE_ACCOUNT_ID|WORKSPACE_ID)$/;
 
 /**
  * Names that match the shapes above but threaten neither guarantee. Each entry
@@ -37,6 +38,13 @@ const ALLOWED_UNSTRIPPED = new Map([
   ['CLAUDE_CODE_USE_COWORK_PLUGINS', 'feature flag, not a provider'],
   ['CLAUDE_CODE_USE_NATIVE_FILE_SEARCH', 'feature flag, not a provider'],
   ['CLAUDE_CODE_USE_POWERSHELL_TOOL', 'feature flag, not a provider'],
+  [
+    'CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER',
+    'only exercised behind HTTPS_PROXY/HTTP_PROXY/ALL_PROXY, which nvime ' +
+      'deliberately leaves alone (see the README) — nothing to strip here that ' +
+      "isn't already the proxy's own scope",
+  ],
+  ['CLAUDE_CODE_PROXY_AUTH_HELPER_TTL_MS', 'a cache lifetime, not a credential'],
 ]);
 
 /** Every credential/routing/provider name the installed bundle mentions. */
