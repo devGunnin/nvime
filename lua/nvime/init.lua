@@ -10,13 +10,6 @@ local palette = require('nvime.palette')
 
 local M = {}
 
---- Capabilities the dashboard lists. P4 arms the review gate.
-local CAPABILITIES = {
-  { name = 'chat', status = 'ready', summary = 'read-only conversation with session resume' },
-  { name = 'edit', status = 'ready', summary = 'point-and-change, applied live in the buffer' },
-  { name = 'big', status = 'ready', summary = 'spec, worktree build, triaged review threads' },
-}
-
 --- @param user table|nil
 function M.setup(user)
   local opts = config.setup(user)
@@ -59,26 +52,8 @@ function M.cancel()
   end
 end
 
---- `:Nvime` with no argument: what nvime can do and whether it is wired up.
-function M.dashboard()
-  local lines = { 'nvime — no vibe coding in my editor', '' }
-  for _, capability in ipairs(CAPABILITIES) do
-    lines[#lines + 1] = string.format('  %-6s %-16s %s', capability.name, capability.status, capability.summary)
-  end
-  lines[#lines + 1] = ''
-  lines[#lines + 1] = '  sidecar  ' .. (agent.is_running() and 'running' or 'starts on first use')
-  local built = vim.uv.fs_stat(agent.dist_path()) ~= nil
-  lines[#lines + 1] = '  build    ' .. (built and 'present' or ('missing — ' .. agent.build_hint()))
-  lines[#lines + 1] = ''
-  lines[#lines + 1] = '  :Nvime chat      open the chat panel'
-  lines[#lines + 1] = '  :Nvime edit      instruct claude about this file'
-  lines[#lines + 1] = '  :Nvime big       start or resume a big change'
-  lines[#lines + 1] = '  :Nvime diff      review the changeset'
-  lines[#lines + 1] = '  :Nvime cancel    stop the running turn'
-  lines[#lines + 1] = '  :checkhealth nvime'
-  vim.notify(table.concat(lines, '\n'), vim.log.levels.INFO)
-end
-
-M.CAPABILITIES = CAPABILITIES
+--- `:Nvime` with no argument: the front door — what nvime can do, whether it is
+--- wired up, and every big change in this project with its review progress.
+M.dashboard = require('nvime.dashboard').open
 
 return M

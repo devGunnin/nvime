@@ -1,5 +1,9 @@
 local M = {}
 
+--- The gate's difficulty dial. The sidecar owns the thresholds these name;
+--- this list is only what a user may write in `setup`.
+M.DIFFICULTIES = { 'vibe', 'easy', 'medium', 'extreme' }
+
 --- Defaults. `setup()` deep-merges the user table over this and validates the result.
 local defaults = {
   panel = {
@@ -23,6 +27,14 @@ local defaults = {
     nofade = false,
     -- How long the sidecar holds a tool call waiting for your y/n.
     approval_timeout_ms = 60000,
+  },
+  big = {
+    -- How hard the comprehension gate is for a new big change:
+    -- vibe (no gate) / easy 40 / medium 70 / extreme 90.
+    difficulty = 'medium',
+    -- Throw the build clone away once the change has landed. Off by default:
+    -- the clone is the only place the build's own history still exists.
+    cleanup_on_merge = false,
   },
   agent = {
     node = 'node',
@@ -79,6 +91,11 @@ local function validate(opts)
   if opts.edit.approval_timeout_ms < 1000 then
     fail('edit.approval_timeout_ms must be at least 1000')
   end
+  check_type(opts.big.difficulty, 'string', 'big.difficulty')
+  if not vim.tbl_contains(M.DIFFICULTIES, opts.big.difficulty) then
+    fail('big.difficulty must be one of: ' .. table.concat(M.DIFFICULTIES, ', '))
+  end
+  check_type(opts.big.cleanup_on_merge, 'boolean', 'big.cleanup_on_merge')
   check_type(opts.agent.node, 'string', 'agent.node')
   if opts.agent.claude ~= nil then
     check_type(opts.agent.claude, 'string', 'agent.claude')

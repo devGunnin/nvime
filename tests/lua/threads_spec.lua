@@ -244,27 +244,6 @@ describe('review thread actions', function()
     threads.close()
   end)
 
-  it('tells the reader the gate and the merge are not armed yet', function()
-    open_review({ block() })
-    local seen = {}
-    local real_notify = vim.notify
-    vim.notify = function(message)
-      seen[#seen + 1] = message
-    end
-    press(threads.view().tree_buf, 'a')
-    press(threads.view().tree_buf, 'M')
-    vim.notify = real_notify
-    ok(seen[1]:match('next release') ~= nil, seen[1])
-    ok(seen[2]:match('not armed') ~= nil, seen[2])
-    eq(
-      nil,
-      vim.iter(fake.requests):find(function(request)
-        return request.method == 'big.merge'
-      end)
-    )
-    threads.close()
-  end)
-
   it('does not let a session title be evaluated as vimscript in the winbar', function()
     -- A winbar evaluates `%{expr}` on every redraw, and the title is the first
     -- line of the user's own prompt — routinely pasted from an issue.

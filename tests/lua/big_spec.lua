@@ -171,7 +171,8 @@ describe('big change intake', function()
           state = 'building',
           display = 'building',
           spec = SPEC,
-          worktree = { path = '/tmp/wt', baseCommit = 'abcdef1234', baseBranch = 'main' },
+          worktree = { path = '/tmp/wt' },
+          base = { commit = 'abcdef1234', branch = 'main' },
         }),
       },
     }
@@ -245,12 +246,16 @@ describe('big change session states', function()
       big.describe(session({ display = 'building', detached = false, heldElsewhere = true }))
     )
     eq(
-      'reviewing · 2 of 5 threads open',
-      big.describe(session({ display = 'reviewing', counts = { total = 5, open = 2, substantial = 3 } }))
+      'reviewing · 2 of 5 open · 1/3 defended',
+      big.describe(session({ display = 'reviewing', counts = { total = 5, open = 2, substantial = 3, defended = 1 } }))
     )
     eq(
-      'mergeable · 0 of 5 threads open',
-      big.describe(session({ display = 'mergeable', counts = { total = 5, open = 0, substantial = 3 } }))
+      'mergeable · 0 of 5 open · 3/3 defended',
+      big.describe(session({ display = 'mergeable', counts = { total = 5, open = 0, substantial = 3, defended = 3 } }))
+    )
+    eq(
+      'merged into main',
+      big.describe(session({ display = 'merged', merge = { baseBranch = 'main', commit = 'abc' } }))
     )
     eq('no big change selected', big.describe(nil))
   end)

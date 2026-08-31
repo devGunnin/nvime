@@ -17,6 +17,11 @@ M.APPROVAL = {
   { lhs = '<Esc>', allow = false, desc = 'nvime: deny' },
 }
 
+--- The normal-mode puts the paste-blocked answer box refuses. Listed here
+--- because they are ordinary editing keys: the leaf-only check has to see them,
+--- and `compose.lua` binds exactly this table so the two cannot drift.
+M.COMPOSE_PUT = { 'p', 'P', 'gp', 'gP', ']p', '[p', ']P', '[P' }
+
 --- @param opts table the resolved config
 --- @return table[] entries with scope, mode, lhs, desc
 function M.all(opts)
@@ -46,6 +51,7 @@ function M.all(opts)
     { scope = 'threads', mode = 'n', lhs = 'a', desc = 'nvime: answer this thread' },
     { scope = 'threads', mode = 'n', lhs = 'r', desc = 'nvime: request changes' },
     { scope = 'threads', mode = 'n', lhs = 'X', desc = 'nvime: re-open or clear a trivial thread' },
+    { scope = 'threads', mode = 'n', lhs = 'R', desc = 'nvime: rebase onto the moved base' },
     { scope = 'threads', mode = 'n', lhs = 'M', desc = 'nvime: merge' },
     { scope = 'threads', mode = 'n', lhs = '<CR>', desc = 'nvime: open this file in the worktree' },
     { scope = 'threads', mode = 'n', lhs = 'q', desc = 'nvime: close the review' },
@@ -60,6 +66,13 @@ function M.all(opts)
   for _, key in ipairs(M.APPROVAL) do
     entries[#entries + 1] = { scope = 'approval', mode = 'n', lhs = key.lhs, desc = key.desc }
   end
+  for _, key in ipairs(require('nvime.dashboard').KEYS) do
+    entries[#entries + 1] = { scope = 'dashboard', mode = 'n', lhs = key.lhs, desc = key.desc }
+  end
+  for _, lhs in ipairs(M.COMPOSE_PUT) do
+    entries[#entries + 1] = { scope = 'compose', mode = 'n', lhs = lhs, desc = 'nvime: refuse a paste' }
+  end
+  entries[#entries + 1] = { scope = 'compose', mode = 'i', lhs = '<C-r>', desc = 'nvime: refuse a paste' }
   return entries
 end
 

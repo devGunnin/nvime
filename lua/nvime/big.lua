@@ -60,9 +60,20 @@ function M.describe(session)
   if session.detached and (label == 'building' or label == 'triaging') then
     return label .. ' (detached — sidecar gone)'
   end
+  if label == 'merged' then
+    local merge = session.merge or {}
+    return 'merged into ' .. (merge.baseBranch or 'your branch')
+  end
   if label == 'reviewing' or label == 'mergeable' then
-    local counts = session.counts or { open = 0, total = 0 }
-    return string.format('%s · %d of %d threads open', label, counts.open, counts.total)
+    local counts = session.counts or { open = 0, total = 0, substantial = 0, defended = 0 }
+    return string.format(
+      '%s · %d of %d open · %d/%d defended',
+      label,
+      counts.open,
+      counts.total,
+      counts.defended or 0,
+      counts.substantial or 0
+    )
   end
   return label
 end
@@ -118,8 +129,9 @@ function M.next_step(session)
       or 'building — <C-c> stops it',
     triaging = session.detached and 'the build is done but not sorted — type `retriage`, or `discard`'
       or 'sorting the diff into threads',
-    reviewing = '<C-t> opens the review threads',
-    mergeable = '<C-t> opens the review threads',
+    reviewing = '<C-t> opens the review threads — a defends one, M merges when none are left',
+    mergeable = 'every thread is cleared — <C-t>, then M merges it into your branch',
+    merged = 'landed — nothing left to do here',
   }
   return hints[session.display]
 end
@@ -226,7 +238,12 @@ local function title_from(text)
 end
 
 local function start_new(text)
-  agent.request('big.create', { root = state.root, title = title_from(text) }, function(err, result)
+  local params = {
+    root = state.root,
+    title = title_from(text),
+    difficulty = config.get().big.difficulty,
+  }
+  agent.request('big.create', params, function(err, result)
     if err ~= nil then
       show_error(err)
       return
@@ -269,12 +286,10 @@ function M.approve()
       return
     end
     adopt(result.session)
-    local base = result.session.worktree or {}
-    surface():append(string.format('  clone %s', base.path or '?'), 'NvimeDim')
-    surface():append(
-      string.format('  base  %s on %s', (base.baseCommit or '?'):sub(1, 8), base.baseBranch or '-'),
-      'NvimeDim'
-    )
+    local worktree = result.session.worktree or {}
+    local base = result.session.base or {}
+    surface():append(string.format('  clone %s', worktree.path or '?'), 'NvimeDim')
+    surface():append(string.format('  base  %s on %s', (base.commit or '?'):sub(1, 8), base.branch or '-'), 'NvimeDim')
     surface():blank()
     M.build()
   end, { no_deadline = true })
@@ -349,15 +364,41 @@ function M.send(text)
   if display == 'drafting' then
     if word == 'approve' then
       M.approve()
+    elseif vim.tbl_contains(config.DIFFICULTIES, word) then
+      M.set_difficulty(word)
     else
       M.ask(text)
     end
   elseif display == 'building' or display == 'triaging' then
     M.resume_or_discard(word)
+  elseif display == 'merged' then
+    surface():append('  this change has landed — <C-r> picks another', 'NvimeActivity')
+    surface():blank()
   else
     surface():append('  this change is built — <C-t> opens the review threads', 'NvimeActivity')
     surface():blank()
   end
+end
+
+--- Sets the gate's difficulty while the spec is still being drafted. The
+--- sidecar refuses afterwards: moving the bar would re-rate a review that has
+--- already happened.
+--- @param word string one of config.DIFFICULTIES
+function M.set_difficulty(word)
+  assert(state.session ~= nil, 'big.set_difficulty needs a selected session')
+  agent.request('big.difficulty', {
+    root = state.root,
+    sessionId = state.session.id,
+    difficulty = word,
+  }, function(err, result)
+    if err ~= nil then
+      show_error(err)
+      return
+    end
+    adopt(result.session)
+    surface():append('  gate difficulty: ' .. word, 'NvimeActivity')
+    surface():blank()
+  end)
 end
 
 --- The answers a build in progress accepts. Anything else is refused rather
@@ -490,6 +531,7 @@ function M.open()
   if not existed then
     refresh_status()
     surface():append('describe the change you want. claude will ask until the spec is real.', 'NvimeDim')
+    surface():append('`approve` builds it. type a difficulty to move the gate: vibe/easy/medium/extreme.', 'NvimeDim')
     surface():append('<C-r> lists the big changes already going in this project.', 'NvimeDim')
     surface():blank()
   end
