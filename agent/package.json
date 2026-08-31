@@ -1,0 +1,24 @@
+{
+  "name": "nvime-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "nvime sidecar: one Node process per Neovim instance, speaking ndjson over stdio to the Claude Agent SDK",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.251"
+  },
+  "devDependencies": {
+    "@types/node": "26.4.0",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  }
+}

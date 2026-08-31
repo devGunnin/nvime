@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  NVIM_VERSION: v0.11.3
+  STYLUA_VERSION: v2.4.1
+
+jobs:
+  lua:
+    name: lua (lint + headless tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stylua
+        run: |
+          curl -fsSL -o stylua.zip \
+            "https://github.com/JohnnyMorganz/StyLua/releases/download/${STYLUA_VERSION}/stylua-linux-x86_64.zip"
+          mkdir -p "$HOME/.local/bin"
+          unzip -q stylua.zip -d "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/stylua"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install luacheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends luarocks
+          sudo luarocks install luacheck
+
+      - name: Install Neovim
+        run: |
+          curl -fsSL -o nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
+          tar -xzf nvim.tar.gz
+          echo "$PWD/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - run: stylua --check lua plugin tests
+      - run: luacheck lua plugin tests
+      - run: nvim --clean -l tests/run.lua
+
+  agent:
+    name: agent (typecheck + tests)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: agent/package-lock.json
+
+      - run: npm ci
+        working-directory: agent
+      - run: npm run typecheck
+        working-directory: agent
+      - run: npm test
+        working-directory: agent
+      - run: npm run build
+        working-directory: agent
+
+      - name: The built sidecar must start and answer a ping
+        working-directory: agent
+        run: |
+          printf '%s\n%s\n' \
+            '{"id":1,"method":"ping","params":{}}' \
+            '{"id":2,"method":"shutdown","params":{}}' \
+            | node dist/index.js | tee frames.jsonl
+          grep -q '"id":1,"ok":true' frames.jsonl
