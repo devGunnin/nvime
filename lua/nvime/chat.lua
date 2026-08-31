@@ -14,8 +14,14 @@ local state = {
   session_id = nil,
   request_id = nil,
   subscribed = false,
-  -- False until the project's stored session has been looked up.
+  -- False until the project's stored session and its history have both
+  -- landed. A send before then would race the resumed transcript into the
+  -- live stream and, worse, start a new session before the old one is known.
   restored = false,
+  -- A send that arrived while restore was still in flight; replayed once
+  -- `restored` goes true. At most one: a second send while still restoring
+  -- replaces it, since only the latest prompt matters.
+  pending_send = nil,
 }
 
 local function short(session_id)
@@ -76,12 +82,27 @@ local function on_panel_close()
   end)
 end
 
+--- Marks the restore pipeline done and replays a send that arrived mid-flight.
+--- Must run only once history (if any) has actually been written, not once it
+--- has merely been requested — otherwise the replayed send's own "you" line
+--- and stream can still land ahead of the async history it raced.
+local function finish_restore()
+  state.restored = true
+  local pending = state.pending_send
+  if pending == nil then
+    return
+  end
+  state.pending_send = nil
+  M.send(pending.text, pending.extra)
+end
+
 --- Renders the resumed transcript so a reopened panel is not mysteriously empty.
 local function load_history(session_id)
   agent.request('chat.history', { root = state.root, sessionId = session_id, limit = 40 }, function(err, result)
     if err ~= nil then
       -- A missing transcript is not fatal: the session still resumes.
       panel.append('  could not load the earlier turns: ' .. (err.message or '?'), 'NvimeDim')
+      finish_restore()
       return
     end
     for _, turn in ipairs(result.turns or {}) do
@@ -91,21 +112,23 @@ local function load_history(session_id)
     end
     panel.append('— resumed —', 'NvimeDim')
     panel.blank()
+    finish_restore()
   end)
 end
 
 local function restore_session()
   agent.request('chat.list', { root = state.root, limit = 25 }, function(err, result)
     if err ~= nil then
-      state.restored = true
       show_error(err)
+      finish_restore()
       return
     end
     state.session_id = result.current
-    state.restored = true
     refresh_status(nil)
     if result.current ~= nil then
       load_history(result.current)
+    else
+      finish_restore()
     end
   end)
 end
@@ -142,6 +165,12 @@ end
 function M.send(text, extra)
   assert(type(text) == 'string', 'chat.send needs prompt text')
   assert(type(state.root) == 'string', 'chat.send needs an open panel with a captured root')
+  if not state.restored then
+    -- Restore (session lookup + history) is still running: sending now would
+    -- guess at the session and let the resumed transcript land mid-stream.
+    state.pending_send = { text = text, extra = extra }
+    return
+  end
   if state.request_id ~= nil then
     vim.notify('nvime: a turn is already running (<C-c> to stop it)', vim.log.levels.WARN)
     return

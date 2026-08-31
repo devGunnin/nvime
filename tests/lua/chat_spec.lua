@@ -7,7 +7,7 @@ local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
 
 --- Stands in for the sidecar: records every request and hands back canned
 --- replies, so the chat wiring is exercised without a process or a login.
-local fake = { requests = {}, replies = {}, subscriber = nil }
+local fake = { requests = {}, replies = {}, deferred = {}, subscriber = nil }
 
 function fake.request(method, params, cb, opts)
   fake.requests[#fake.requests + 1] = { method = method, params = params, opts = opts }
@@ -15,9 +15,27 @@ function fake.request(method, params, cb, opts)
     opts.on_sent(#fake.requests)
   end
   local reply = fake.replies[method]
+  if reply ~= nil and reply.defer then
+    -- Answered later via fake.answer, so a caller can interleave other calls
+    -- in between the way a real async reply would.
+    fake.deferred[method] = fake.deferred[method] or {}
+    table.insert(fake.deferred[method], cb)
+    return
+  end
   if reply ~= nil then
     cb(reply.err, reply.result)
   end
+end
+
+--- Answers the oldest deferred call to `method`, simulating a reply that
+--- lands on its own tick instead of synchronously with the request.
+function fake.answer(method, err, result)
+  local queue = fake.deferred[method]
+  if queue == nil or #queue == 0 then
+    error('no deferred ' .. method .. ' call to answer', 2)
+  end
+  local cb = table.remove(queue, 1)
+  cb(err, result)
 end
 
 function fake.on_event(fn)
@@ -48,9 +66,28 @@ end
 local function open_on(dir)
   panel.close()
   fake.requests = {}
+  fake.deferred = {}
   fake.replies = { ['chat.list'] = { err = nil, result = { current = nil, sessions = {} } } }
   local live = chat.state()
-  live.request_id, live.session_id, live.root = nil, nil, nil
+  live.request_id, live.session_id, live.root, live.pending_send = nil, nil, nil, nil
+  config.setup({})
+  palette.apply()
+  vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/a.lua'))
+  chat.open()
+end
+
+--- Like `open_on`, but `chat.list`/`chat.history` answer only when the test
+--- calls `fake.answer` — the race `M.send` racing `M.open`'s restore needs.
+local function open_on_deferred(dir)
+  panel.close()
+  fake.requests = {}
+  fake.deferred = {}
+  fake.replies = {
+    ['chat.list'] = { defer = true },
+    ['chat.history'] = { defer = true },
+  }
+  local live = chat.state()
+  live.request_id, live.session_id, live.root, live.pending_send = nil, nil, nil, nil
   config.setup({})
   palette.apply()
   vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/a.lua'))
@@ -150,6 +187,53 @@ describe('chat.send', function()
     eq(1, #vim.tbl_filter(function(request)
       return request.method == 'chat.send'
     end, fake.requests))
+    panel.close()
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
+describe('sending before restore lands', function()
+  it('defers a send until the resumed transcript is fully written', function()
+    local dir = sandbox()
+    from_elsewhere(function()
+      open_on_deferred(dir)
+      -- Same tick as M.open(), the way M.send_selection fires it: chat.list
+      -- has not answered yet, so this must not jump the queue.
+      chat.send('explain this')
+      eq(nil, sent('chat.send'), 'the send must wait for restore, not race it')
+
+      fake.answer('chat.list', nil, { current = 'sess-1', sessions = {} })
+      eq(nil, sent('chat.send'), 'chat.list resolving is not enough: history is still loading')
+
+      fake.answer('chat.history', nil, { turns = { { role = 'user', text = 'earlier question' } } })
+      local request = sent('chat.send')
+      ok(request ~= nil, 'the deferred send is replayed once restore finishes')
+      eq('sess-1', request.params.sessionId, 'and resumes the session restore found, not a new one')
+
+      -- The history's own turns legitimately contain a "you" line too, so look
+      -- for the new turn's marker specifically: the first "you" after "resumed".
+      local rendered = scrollback()
+      local resumed_row, new_turn_row = nil, nil
+      for i, line in ipairs(rendered) do
+        if line == '— resumed —' then
+          resumed_row = i
+        elseif resumed_row ~= nil and line == 'you' and new_turn_row == nil then
+          new_turn_row = i
+        end
+      end
+      ok(resumed_row ~= nil, 'the resumed transcript was rendered')
+      ok(new_turn_row ~= nil, 'the new turn was rendered')
+      ok(resumed_row < new_turn_row, 'the resumed transcript lands before the new turn, never spliced into it')
+    end)
+    panel.close()
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('sends immediately once restore has already landed', function()
+    local dir = sandbox()
+    open_on(dir) -- fake.replies resolves chat.list synchronously
+    chat.send('hello')
+    ok(sent('chat.send') ~= nil, 'a normal send is not held up once restored')
     panel.close()
     vim.fn.delete(dir, 'rf')
   end)
