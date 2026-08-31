@@ -221,8 +221,18 @@ local function refresh_mtime(buf)
   return tostring(err)
 end
 
+--- Makes the buffer write back byte for byte. 'fixendofline' would otherwise
+--- append a trailing newline the agent deliberately did not write.
+local function match_eol(buf, after_text)
+  local _, eol = diffs.to_lines(after_text)
+  if not eol then
+    vim.bo[buf].fixendofline = false
+  end
+  vim.bo[buf].endofline = eol
+end
+
 local function apply_hunks(buf, before_text, after_text)
-  local after_lines = diffs.to_lines(after_text)
+  local after_lines, _ = diffs.to_lines(after_text)
   local hunks = diffs.hunks(before_text, after_text)
   -- Applied last-first so an earlier hunk's row numbers stay valid.
   for i = #hunks, 1, -1 do
@@ -267,6 +277,7 @@ function M.apply(change, opts)
   if current == after.text then
     -- Already what the agent wrote: nothing to rewrite, but the stored mtime
     -- still has to catch up or the next :checktime complains.
+    match_eol(buf, after.text)
     local err = refresh_mtime(buf)
     marked[buf] = { run_id = opts.run_id, changedtick = vim.api.nvim_buf_get_changedtick(buf) }
     return err == nil and 'unchanged' or 'write-failed', err
@@ -277,6 +288,7 @@ function M.apply(change, opts)
 
   clear_fade(buf)
   local views = save_views(buf)
+  match_eol(buf, after.text)
   open_undo_block(buf, opts.run_id)
   local hunks = apply_hunks(buf, before.text, after.text)
   local write_err = refresh_mtime(buf)

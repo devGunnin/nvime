@@ -20,8 +20,16 @@ local view = {
   changes = {},
   --- Buffer row (1-based) -> { change = index, hunk = index|nil }.
   rows = {},
+  --- Hunks reverted from this view. The sidecar's record is the run as it
+  --- happened and never changes, so "already reverted" is knowledge only the
+  --- view has — without it a second revert reports a drift the user did not make.
+  reverted = {},
   unified = false,
 }
+
+local function hunk_key(change, hunk_index)
+  return string.format('%s:%d:%d', change.runId, change.index, hunk_index)
+end
 
 local function surface()
   return panel.get(PANEL)
@@ -83,7 +91,8 @@ local function render_list()
       rows[#lines] = { change = index }
     else
       for hunk_index, hunk in ipairs(diffs.hunks(before, after)) do
-        lines[#lines + 1] = '    ' .. describe_hunk(hunk)
+        local done = view.reverted[hunk_key(change, hunk_index)] == true
+        lines[#lines + 1] = '    ' .. describe_hunk(hunk) .. (done and '  · reverted' or '')
         rows[#lines] = { change = index, hunk = hunk_index }
       end
     end
@@ -205,6 +214,9 @@ function M.revert(target)
   if hunk == nil then
     return false, 'that hunk is no longer part of the change'
   end
+  if view.reverted[hunk_key(change, target.hunk)] then
+    return false, 'that hunk is already reverted'
+  end
   local current, read_err = read_current(change.path)
   if current == nil then
     return false, read_err
@@ -223,6 +235,7 @@ function M.revert(target)
   if land_err ~= nil then
     return false, land_err
   end
+  view.reverted[hunk_key(change, target.hunk)] = true
   return true, nil
 end
 
@@ -290,7 +303,11 @@ end
 --- Opens the changeset for the project the edit surface is bound to.
 function M.open()
   local opts = config.get()
-  view.root = edit.root()
+  local root = edit.root()
+  if root ~= view.root then
+    view.reverted = {}
+  end
+  view.root = root
   panel.open({
     name = PANEL,
     title = 'nvime changeset',
