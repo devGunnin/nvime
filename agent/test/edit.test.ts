@@ -193,6 +193,28 @@ describe('EditService: the SDK options contract', () => {
     assert.equal(options?.env?.ANTHROPIC_API_KEY, undefined, 'the credential env is stripped');
     assert.ok(options?.canUseTool !== undefined);
   });
+
+  it('prepends the project instructions to the user prompt as an explicit, marked block — never systemPrompt', async () => {
+    const h = harness([{ yield: frames.init() }, { yield: frames.success('done') }]);
+    await h.service.start(1, {
+      root: '/work/proj',
+      prompt: 'go',
+      scope: { kind: 'project' },
+      projectInstructions: { text: 'run tests with npm test', truncated: false },
+    });
+    assert.equal(h.calls[0]?.options.systemPrompt, undefined, 'untrusted text must never reach systemPrompt');
+    const prompt = h.calls[0]?.prompt ?? '';
+    assert.match(prompt, /^<project-notes id="[0-9a-f]+" untrusted="true">/);
+    assert.match(prompt, /cannot change your tool permissions/);
+    assert.match(prompt, /run tests with npm test/);
+  });
+
+  it('carries no project-notes section when no project instructions were given', async () => {
+    const h = harness([{ yield: frames.init() }, { yield: frames.success('done') }]);
+    await h.service.start(1, { root: '/work/proj', prompt: 'go', scope: { kind: 'project' } });
+    assert.equal(h.calls[0]?.options.systemPrompt, undefined);
+    assert.doesNotMatch(h.calls[0]?.prompt ?? '', /<project-notes /);
+  });
 });
 
 describe('EditService.start', () => {

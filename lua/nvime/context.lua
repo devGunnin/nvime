@@ -122,6 +122,70 @@ function M.current_path()
   return vim.fs.normalize(name)
 end
 
+local PROJECT_INSTRUCTIONS_MAX_BYTES = 16 * 1024
+local PROJECT_INSTRUCTIONS_CANDIDATES = { 'CLAUDE.md', 'AGENTS.md', '.nvime/instructions.md' }
+
+--- `descendant` is `ancestor` itself or strictly inside it. Both must already
+--- be resolved (`fs_realpath`) absolute paths with no trailing slash.
+local function is_contained(descendant, ancestor)
+  return descendant == ancestor or vim.startswith(descendant, ancestor .. '/')
+end
+
+--- A regular, non-symlinked file at `path`, resolving under `real_root`.
+--- Two independent checks, deliberately not collapsed into one: `fs_lstat`
+--- refuses the candidate itself being a symlink (any target, in or out of the
+--- project), and the `fs_realpath` containment check catches a symlinked
+--- ancestor directory (e.g. `.nvime` itself pointing elsewhere) that `lstat`
+--- on the final component alone would miss.
+local function safe_project_file(path, real_root)
+  local lstat = vim.uv.fs_lstat(path)
+  if lstat == nil or lstat.type ~= 'file' then
+    return nil
+  end
+  local real_path = vim.uv.fs_realpath(path)
+  if real_path == nil or not is_contained(real_path, real_root) then
+    return nil
+  end
+  return path
+end
+
+--- The project's own CLAUDE.md / AGENTS.md / .nvime/instructions.md, first
+--- found at `root`, capped and marked truncated past the byte limit. Raw
+--- bytes, never `readfile` (same reasoning as `read_file` above); a binary
+--- match is skipped rather than sent as prose. A symlinked candidate, or one
+--- whose resolved path escapes `root`, is refused rather than read — this
+--- file is injected automatically on every turn, with no `@file` opt-in.
+--- @param root string absolute project root
+--- @return table|nil { text: string, truncated: boolean }
+function M.project_instructions(root)
+  assert(type(root) == 'string' and vim.startswith(root, '/'), 'context.project_instructions needs an absolute root')
+  if not config.get().project_instructions.enabled then
+    return nil
+  end
+  local real_root = vim.uv.fs_realpath(root)
+  if real_root == nil then
+    return nil
+  end
+  for _, rel in ipairs(PROJECT_INSTRUCTIONS_CANDIDATES) do
+    local path = safe_project_file(root .. '/' .. rel, real_root)
+    if path ~= nil then
+      local handle = io.open(path, 'rb')
+      if handle ~= nil then
+        local raw = handle:read(PROJECT_INSTRUCTIONS_MAX_BYTES + 1) or ''
+        handle:close()
+        if raw:find('\0', 1, true) == nil and #raw > 0 then
+          local truncated = #raw > PROJECT_INSTRUCTIONS_MAX_BYTES
+          local text = truncated and raw:sub(1, PROJECT_INSTRUCTIONS_MAX_BYTES) or (raw:gsub('\n$', ''))
+          if vim.trim(text) ~= '' then
+            return { text = text, truncated = truncated }
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
 --- The active visual selection as a context block, or nil outside visual mode.
 --- Reads the live visual marks, so it works from inside the mapping itself.
 --- @return table|nil block

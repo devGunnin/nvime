@@ -203,7 +203,7 @@ local function status()
     string.format('%%#NvimeSession#%s · %s', title, M.escape_winbar(M.gate_status(view.session)))
   if win_valid(view.pane_win) then
     vim.wo[view.pane_win].winbar =
-      '%#NvimeDim#a answer · r request changes · X re-open · R rebase · ]t/[t · M merge'
+      '%#NvimeDim#a answer · e explain · r request changes · X re-open · R rebase · ]t/[t · M merge'
   end
 end
 
@@ -368,10 +368,49 @@ local function answer()
         adopt(result.session)
         M.report_grade(result.session, block.id)
       end, {
-        -- A grading round is an agent turn; <C-c> bounds it, not a timer.
+        -- A grading round is an agent turn with no bound at all: its request
+        -- id is never stored where `big.cancel` can see it, and closing the
+        -- answer box only destroys the window — the turn keeps running and
+        -- still holds the session lock. There is no <C-c> for this one.
         no_deadline = true,
       })
     end,
+  })
+end
+
+--- `e`: post-clear explain. Only when the sidecar will actually answer it — a
+--- substantial thread whose defense is still open is refused server-side too,
+--- but checked here first so the float is never opened on a refusal.
+local function explain()
+  local block = current_block()
+  if block == nil then
+    return
+  end
+  if block.substantial and block.state == 'open' then
+    notify(
+      'this thread is still open — clear it first; explaining now would hand over the answer',
+      vim.log.levels.WARN
+    )
+    return
+  end
+  local title = block.title
+  local explain_ui = require('nvime.explain')
+  explain_ui.pending(title)
+  agent.request('big.explain', {
+    root = view.root,
+    sessionId = view.session.id,
+    blockId = block.id,
+  }, function(err, result)
+    if err ~= nil then
+      explain_ui.show(title, '! ' .. (err.message or 'could not explain this thread'))
+      return
+    end
+    explain_ui.show(title, (result or {}).text or '')
+  end, {
+    -- An agent turn with no cancel: closing the float only destroys the
+    -- window, not the request — the turn runs to completion regardless, and
+    -- other actions refuse with "already running" until it does.
+    no_deadline = true,
   })
 end
 
@@ -560,6 +599,7 @@ local KEYS = {
   { lhs = 'r', fn = request_changes, desc = 'nvime: request changes' },
   { lhs = '<CR>', fn = open_file, desc = 'nvime: open this file in the build clone' },
   { lhs = 'a', fn = answer, desc = 'nvime: answer this thread' },
+  { lhs = 'e', fn = explain, desc = 'nvime: explain this thread' },
   { lhs = 'R', fn = rebase, desc = 'nvime: rebase onto the moved base' },
   { lhs = 'M', fn = merge, desc = 'nvime: merge' },
   {

@@ -4,7 +4,7 @@ import { getSessionMessages, listSessions, query } from '@anthropic-ai/claude-ag
 import { BigService } from './big.js';
 import { BigStore, defaultBigRoot } from './bigstore.js';
 import { ChatService } from './chat.js';
-import { parseContextBlocks } from './context.js';
+import { parseContextBlocks, parseProjectInstructions } from './context.js';
 import { EditService, parseScope } from './edit.js';
 import { resolveClaudeExecutable, strippedNames } from './env.js';
 import { DEFAULT_DIFFICULTY, DIFFICULTIES, isDifficulty, type Difficulty } from './gate.js';
@@ -178,6 +178,7 @@ function registerHandlers(
       prompt: requireString(params, 'prompt'),
       context: parseContextBlocks(requireArray(params, 'context')),
       sessionId: optionalString(params, 'sessionId'),
+      projectInstructions: parseProjectInstructions(params.projectInstructions),
     }),
   );
 
@@ -206,6 +207,7 @@ function registerHandlers(
       prompt: requireString(params, 'prompt'),
       scope: parseScope(params.scope),
       sessionId: optionalString(params, 'sessionId'),
+      projectInstructions: parseProjectInstructions(params.projectInstructions),
     }),
   );
 
@@ -327,6 +329,14 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
       cleanup: params.cleanup === true,
+    }),
+  );
+
+  dispatcher.register('big.explain', async (id, params) =>
+    present(big).explain(id, {
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+      blockId: requireString(params, 'blockId'),
     }),
   );
 

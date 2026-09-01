@@ -265,4 +265,37 @@ describe('panel', function()
     ok(panel.is_open(NAME), 'closing one leaves the other open')
     panel.close(NAME)
   end)
+
+  it('still opens, and completion still works, when the root has a malformed .gitignore', function()
+    local completion = require('nvime.completion')
+    local dir = vim.fs.normalize(vim.fn.tempname())
+    vim.fn.mkdir(dir, 'p')
+    vim.fn.writefile({ 'x' }, dir .. '/keep.py')
+    -- `[]]` is legitimate git syntax (a literal `]`) that this repo's matcher
+    -- used to reject at match time, crashing the walk this panel triggers.
+    vim.fn.writefile({ '[]]*.txt' }, dir .. '/.gitignore')
+    completion.invalidate(dir)
+
+    panel.close(NAME)
+    config.setup({})
+    palette.apply()
+    local opts = panel_opts()
+    opts.root = dir
+    local self = panel.open(opts)
+
+    ok(panel.is_open(NAME), 'a bad .gitignore pattern must not stop the panel from opening')
+    ok(vim.api.nvim_win_is_valid(self.win), 'the scrollback window is open')
+    ok(vim.api.nvim_win_is_valid(self.prompt_win), 'the prompt window is open')
+
+    ok(
+      vim.wait(3000, function()
+        return completion.ready(dir)
+      end, 10),
+      'completion must recover rather than stay stuck loading'
+    )
+    ok(vim.tbl_contains(completion.candidates(dir, ''), 'keep.py'), 'completion still works for everything else')
+
+    panel.close(NAME)
+    vim.fn.delete(dir, 'rf')
+  end)
 end)

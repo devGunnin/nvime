@@ -42,6 +42,9 @@ local function checkhealth(world)
     if path == agent.dist_path() then
       return world.built and { type = 'file' } or nil
     end
+    if path:match('%.credentials%.json$') ~= nil then
+      return world.credentials and { type = 'file' } or nil
+    end
     return real.fs_stat(path)
   end
   vim.system = function(cmd, opts)
@@ -63,11 +66,21 @@ local function checkhealth(world)
   return reported, spawned
 end
 
---- node answers a version; anything else is the sidecar answering a ping.
-local function healthy_world(built)
+--- node answers a version; a `git config` call answers a fixed identity;
+--- anything else is the sidecar answering a ping.
+local function healthy_world(built, credentials)
   return {
     built = built,
+    credentials = credentials or false,
     respond = function(cmd)
+      if cmd[1] == 'git' then
+        if cmd[#cmd] == 'user.name' then
+          return { code = 0, stdout = 'Test User\n', stderr = '' }
+        end
+        if cmd[#cmd] == 'user.email' then
+          return { code = 0, stdout = 'test@example.com\n', stderr = '' }
+        end
+      end
       if cmd[2] == '--version' then
         return { code = 0, stdout = 'v22.22.2\n', stderr = '' }
       end
@@ -171,5 +184,46 @@ describe('health.check', function()
     ok(entry ~= nil, 'a stalling mapping must be reported')
     eq('error', entry.level)
     config.setup({})
+  end)
+
+  it('warns, never fails, on a missing credentials file — a Keychain login leaves none', function()
+    config.setup({})
+    local reported = checkhealth(healthy_world(true, false))
+    local entry = find(reported, 'credentials file')
+    ok(entry ~= nil, vim.inspect(reported))
+    eq('warn', entry.level)
+  end)
+
+  it('reports the credentials file found, when there is one', function()
+    config.setup({})
+    local reported = checkhealth(healthy_world(true, true))
+    local entry = find(reported, 'found a claude credentials file')
+    ok(entry ~= nil, vim.inspect(reported))
+    eq('ok', entry.level)
+  end)
+
+  it('reports the git identity this repo would land a merge commit under', function()
+    config.setup({})
+    local reported = checkhealth(healthy_world(true))
+    local entry = find(reported, 'git identity: Test User <test@example.com>')
+    ok(entry ~= nil, vim.inspect(reported))
+    eq('ok', entry.level)
+  end)
+
+  it('fails loudly on no git identity — the P4 land refusal this exists for', function()
+    config.setup({})
+    local world = healthy_world(true)
+    local respond = world.respond
+    world.respond = function(cmd)
+      if cmd[1] == 'git' then
+        return { code = 1, stdout = '', stderr = '' }
+      end
+      return respond(cmd)
+    end
+    local reported = checkhealth(world)
+    local entry = find(reported, 'no identity configured')
+    ok(entry ~= nil, vim.inspect(reported))
+    eq('error', entry.level)
+    ok(entry.advice:find('git config user.name', 1, true) ~= nil, tostring(entry.advice))
   end)
 end)

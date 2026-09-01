@@ -99,6 +99,11 @@ cwd. Bad, binary or oversized paths are reported in the panel, never silently
 dropped. `@` is not confined to the project: `@~/.ssh/id_rsa` is read and sent,
 because you asked for it.
 
+**Known limit: the `@` completion popup does not offer symlinks.** git lists
+them; the popup's own tree walk does not. Typing the path by hand (e.g.
+`@link.txt`) still attaches it correctly — this is a discoverability gap in
+the popup, not something `@` itself refuses.
+
 **Sessions.** The session for a project root is remembered, so reopening chat
 resumes it and replays the earlier turns — the prompts you typed, not the files
 they carried. `<C-r>` lists nvime's past sessions for that root by title and

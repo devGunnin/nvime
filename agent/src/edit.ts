@@ -2,7 +2,7 @@ import { relative } from 'node:path';
 import type { HookInput, HookJSONOutput, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { ApprovalGate, DEFAULT_APPROVAL_TIMEOUT_MS } from './approvals.js';
 import type { SdkBindings } from './chat.js';
-import { composePrompt, type ContextBlock } from './context.js';
+import { composePrompt, type ContextBlock, type ProjectInstructions } from './context.js';
 import { subscriptionEnv, type Env } from './env.js';
 import {
   classifyTool,
@@ -64,6 +64,9 @@ export interface EditStartParams {
   prompt: string;
   scope: EditScope;
   sessionId?: string | undefined;
+  /** The project's CLAUDE.md/AGENTS.md/.nvime/instructions.md, or null when
+   *  none was found or the feature is off. */
+  projectInstructions?: ProjectInstructions | null | undefined;
 }
 
 /** One recorded file mutation: what the file was, and what the agent made it. */
@@ -192,7 +195,7 @@ export class EditService {
 
   async #drive(run: Run, params: EditStartParams): Promise<EditDone> {
     const options = this.#buildOptions(run, params.sessionId);
-    const prompt = composeEditPrompt(params.prompt, params.scope, run.root);
+    const prompt = composeEditPrompt(params.prompt, params.scope, run.root, params.projectInstructions ?? null);
     let sessionId = params.sessionId ?? '';
 
     for await (const message of this.#sdk.query({ prompt, options })) {
@@ -404,7 +407,9 @@ export class EditService {
       // Same reasoning as chat: `'project'` would load the edited repo's
       // .claude/settings.json, whose hooks run shell commands and whose
       // apiKeyHelper/env re-add the credentials env.ts stripped — none of it
-      // gated by the tool lists. Cost: no CLAUDE.md.
+      // gated by the tool lists. CLAUDE.md/AGENTS.md come back as an untrusted
+      // section of the user message instead (`composeEditPrompt`) — never
+      // `systemPrompt`, which repo text must never reach.
       settingSources: [],
       ...(resume === undefined ? {} : { resume }),
       ...(this.#model === undefined ? {} : { model: this.#model }),
@@ -484,7 +489,12 @@ export class EditService {
  * because it steers the model; it is NOT what keeps the edit inside the
  * project — `canUseTool` is.
  */
-export function composeEditPrompt(prompt: string, scope: EditScope, root: string): string {
+export function composeEditPrompt(
+  prompt: string,
+  scope: EditScope,
+  root: string,
+  projectInstructions: ProjectInstructions | null = null,
+): string {
   const blocks: ContextBlock[] = [];
   let where: string;
   if (scope.kind === 'project') {
@@ -507,7 +517,7 @@ export function composeEditPrompt(prompt: string, scope: EditScope, root: string
     `Make the following change ${where}. Apply it directly with the Edit or Write tool — ` +
     'do not print a patch, and do not ask for confirmation. Keep the change minimal, ' +
     'then say in one or two sentences what you changed.';
-  return composePrompt(`${instruction}\n\n${prompt}`, blocks, root);
+  return composePrompt(`${instruction}\n\n${prompt}`, blocks, root, projectInstructions);
 }
 
 /** Validates the `scope` param. Anything unrecognized is a `bad_request`. */

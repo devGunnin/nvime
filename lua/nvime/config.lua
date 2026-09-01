@@ -50,6 +50,11 @@ local defaults = {
     max_file_bytes = 200 * 1024,
     max_dir_entries = 200,
   },
+  project_instructions = {
+    -- CLAUDE.md / AGENTS.md / .nvime/instructions.md, sent to chat and edit as
+    -- an explicit, marked-untrusted block. Off disables reading the file at all.
+    enabled = true,
+  },
 }
 
 local options = vim.deepcopy(defaults)
@@ -115,6 +120,7 @@ local function validate(opts)
   if opts.context.max_dir_entries < 1 then
     fail('context.max_dir_entries must be at least 1')
   end
+  check_type(opts.project_instructions.enabled, 'boolean', 'project_instructions.enabled')
   return opts
 end
 

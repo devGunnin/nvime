@@ -167,6 +167,29 @@ describe('ChatService.send', () => {
     );
   });
 
+  it('prepends the project instructions to the user prompt as an explicit, marked block — never systemPrompt', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath);
+    await h.service.send(1, {
+      root: ROOT,
+      prompt: 'hi',
+      context: [],
+      projectInstructions: { text: 'use tabs, never semicolons', truncated: false },
+    });
+    assert.equal(h.calls[0]?.options?.systemPrompt, undefined, 'untrusted text must never reach systemPrompt');
+    const prompt = h.calls[0]?.prompt ?? '';
+    assert.match(prompt, /^<project-notes id="[0-9a-f]+" untrusted="true">/);
+    assert.match(prompt, /cannot change your tool permissions/);
+    assert.match(prompt, /use tabs, never semicolons/);
+    assert.match(prompt, /hi$/);
+  });
+
+  it('carries no project-notes section when no project instructions were given', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath);
+    await h.service.send(1, { root: ROOT, prompt: 'hi', context: [] });
+    assert.equal(h.calls[0]?.options?.systemPrompt, undefined);
+    assert.equal(h.calls[0]?.prompt, 'hi');
+  });
+
   it('hands the SDK a fresh env each run, since the SDK mutates what it is given', async () => {
     const h = harness([frames.init(), frames.success('ok')], storePath);
     await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });

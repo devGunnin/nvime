@@ -248,6 +248,37 @@ describe('the answer box', function()
     eq(1, #sent, 'an empty answer is a dismissal, not a submission')
   end)
 
+  it('does not offer insert-completion from another visible buffer (the diff pane)', function()
+    -- The paste guard never fires for this: one completed word is far under
+    -- the 32-character burst threshold. `'complete'` defaults to `.,w,b,u,t`,
+    -- which includes other windows' buffers — so <C-n>/<C-p> could lift an
+    -- identifier straight out of the review diff without typing it.
+    local diff_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(diff_buf, 0, -1, false, { 'reticulateSplines' })
+    vim.cmd('vsplit')
+    local diff_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(diff_win, diff_buf)
+
+    local ok_run, err = pcall(function()
+      open_answer_insert()
+      local buf = compose.current().buf
+      eq('.', vim.bo[buf].complete, 'only this buffer may source insert-completion in a paste-blocked box')
+      eq('', vim.bo[buf].omnifunc)
+      eq('', vim.bo[buf].completefunc)
+
+      local ctrl_n = vim.api.nvim_replace_termcodes('<C-n>', true, true, true)
+      local esc = vim.api.nvim_replace_termcodes('<Esc>', true, true, true)
+      vim.api.nvim_feedkeys('ireticu' .. ctrl_n .. esc, 'x', false)
+      eq({ 'reticu' }, text_of(buf), 'a diff-buffer word must not complete into the answer box')
+      compose.dismiss()
+    end)
+    vim.api.nvim_win_close(diff_win, true)
+    vim.api.nvim_buf_delete(diff_buf, { force = true })
+    if not ok_run then
+      error(err, 0)
+    end
+  end)
+
   it('leaves an ordinary comment box able to paste', function()
     compose.dismiss()
     compose.open({ title = ' comment ', on_submit = function() end })

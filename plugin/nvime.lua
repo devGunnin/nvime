@@ -28,6 +28,13 @@ local subcommands = {
   health = function()
     vim.cmd('checkhealth nvime')
   end,
+  doctor = function()
+    require('nvime').doctor()
+  end,
+  statusline = function()
+    local on = require('nvime').toggle_statusline()
+    vim.notify('nvime: winbar status ' .. (on and 'on' or 'off'))
+  end,
 }
 
 vim.api.nvim_create_user_command('Nvime', function(args)
