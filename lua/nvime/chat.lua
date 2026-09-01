@@ -4,6 +4,7 @@
 local agent = require('nvime.agent')
 local config = require('nvime.config')
 local context = require('nvime.context')
+local models = require('nvime.models')
 local panel = require('nvime.panel')
 local picker = require('nvime.picker')
 
@@ -210,12 +211,15 @@ function M.send(text, extra)
   surface():begin_stream('claude')
   surface():start_activity()
 
+  local dial = models.dial('chat')
   agent.request('chat.send', {
     root = state.root,
     prompt = text,
     context = blocks,
     sessionId = state.session_id,
     projectInstructions = context.project_instructions(state.root),
+    model = dial.model,
+    effort = dial.effort,
   }, function(err, result)
     state.request_id = nil
     surface():stop_activity()

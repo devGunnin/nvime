@@ -325,6 +325,24 @@ describe('review thread actions', function()
     threads.close()
   end)
 
+  it("threads the big_build lane's model dial into big.revise", function()
+    local models = require('nvime.models')
+    open_review({ block() })
+    press(threads.view().tree_buf, 'r')
+    vim.api.nvim_buf_set_lines(compose.current().buf, 0, -1, false, { 'use equal jitter here' })
+    fake.replies['big.revise'] = { result = { session = session({ block({ state = 'open' }) }) } }
+    fake.replies['big.diff'] = { result = { diff = { text = DIFF, hunks = HUNKS } } }
+    models.set('big_build', 'claude-opus-5', 'high')
+    press(compose.current().buf, '<CR>')
+    local revise = vim.iter(fake.requests):find(function(request)
+      return request.method == 'big.revise'
+    end)
+    eq('claude-opus-5', revise.params.model)
+    eq('high', revise.params.effort)
+    models.reset('big_build')
+    threads.close()
+  end)
+
   it('does not send an empty comment', function()
     open_review({ block() })
     press(threads.view().tree_buf, 'r')
@@ -393,6 +411,26 @@ describe('the comprehension gate in the review', function()
     ok(sent ~= nil, 'the answer reaches the grader')
     eq('abc123', sent.params.sessionId)
     eq({ { blockId = 'b1', text = 'it spreads retries across the whole window' } }, sent.params.answers)
+    threads.close()
+  end)
+
+  it("threads the big_grade lane's model dial into big.answer", function()
+    local models = require('nvime.models')
+    open_review({ block() })
+    press(threads.view().tree_buf, 'a')
+    vim.api.nvim_buf_set_lines(compose.current().buf, 0, -1, false, { 'it spreads retries across the window' })
+    fake.replies['big.answer'] =
+      { result = { session = session({ block({ state = 'resolved', rounds = { round(87) } }) }) } }
+    models.set('big_grade', 'claude-opus-5', 'high')
+    with_notices(function()
+      press(compose.current().buf, '<CR>')
+    end)
+    local sent = vim.iter(fake.requests):find(function(request)
+      return request.method == 'big.answer'
+    end)
+    eq('claude-opus-5', sent.params.model)
+    eq('high', sent.params.effort)
+    models.reset('big_grade')
     threads.close()
   end)
 
@@ -508,6 +546,22 @@ describe('the explain key', function()
     explain.close()
   end)
 
+  it("threads the explain lane's model dial into big.explain", function()
+    local models = require('nvime.models')
+    open_review({ block({ state = 'resolved' }) })
+    fake.replies['big.explain'] = { result = { text = 'it adds a --version flag.' } }
+    models.set('explain', 'claude-haiku-5', 'low')
+    press(threads.view().tree_buf, 'e')
+    local request = vim.iter(fake.requests):find(function(entry)
+      return entry.method == 'big.explain'
+    end)
+    eq('claude-haiku-5', request.params.model)
+    eq('low', request.params.effort)
+    models.reset('explain')
+    threads.close()
+    explain.close()
+  end)
+
   it('explains trivia even while it is reopened', function()
     open_review({ block({ substantial = false, state = 'open', reopened = true }) })
     fake.replies['big.explain'] = { result = { text = 'this reformats a comment; nothing behavioral changed.' } }
@@ -605,6 +659,23 @@ describe('the merge key', function()
     end)
     ok(sent ~= nil)
     eq('abc123', sent.params.sessionId)
+    threads.close()
+  end)
+
+  it("threads the big_build lane's model dial into big.rebase", function()
+    local models = require('nvime.models')
+    open_review({ block() })
+    fake.replies['big.rebase'] = { result = { session = session({ block() }) } }
+    models.set('big_build', 'claude-sonnet-5', 'medium')
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    local sent = vim.iter(fake.requests):find(function(request)
+      return request.method == 'big.rebase'
+    end)
+    eq('claude-sonnet-5', sent.params.model)
+    eq('medium', sent.params.effort)
+    models.reset('big_build')
     threads.close()
   end)
 

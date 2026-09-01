@@ -64,6 +64,46 @@ describe('config.setup', function()
   end)
 end)
 
+describe('the models table', function()
+  it('defaults every lane to the CLI default (nil model, nil effort)', function()
+    local opts = config.setup(nil)
+    for _, lane in ipairs(config.MODEL_LANES) do
+      eq(nil, opts.models[lane].model, lane)
+      eq(nil, opts.models[lane].effort, lane)
+    end
+  end)
+
+  it('sets one lane without disturbing the others', function()
+    local opts = config.setup({ models = { big_build = { model = 'claude-opus-5', effort = 'high' } } })
+    eq('claude-opus-5', opts.models.big_build.model)
+    eq('high', opts.models.big_build.effort)
+    eq(nil, opts.models.chat.model, 'an untouched lane keeps the default')
+    config.setup(nil)
+  end)
+
+  it('takes any of the three efforts, and nothing else', function()
+    for _, effort in ipairs(config.EFFORTS) do
+      eq(effort, config.setup({ models = { chat = { effort = effort } } }).models.chat.effort)
+    end
+    t.throws(function()
+      config.setup({ models = { chat = { effort = 'xhigh' } } })
+    end, 'models%.chat%.effort')
+    t.throws(function()
+      config.setup({ models = { chat = { model = 5 } } })
+    end, 'models%.chat%.model')
+    config.setup(nil)
+  end)
+
+  it('refuses the grader lane at effort low — grading is the gate', function()
+    t.throws(function()
+      config.setup({ models = { big_grade = { effort = 'low' } } })
+    end, 'big_grade')
+    -- medium/high still work; low is the only refused value.
+    eq('high', config.setup({ models = { big_grade = { effort = 'high' } } }).models.big_grade.effort)
+    config.setup(nil)
+  end)
+end)
+
 describe('the gate difficulty', function()
   it('defaults to medium, as the design fixed', function()
     config.setup()

@@ -7,6 +7,13 @@ M.DIFFICULTIES = { 'vibe', 'easy', 'medium', 'extreme' }
 --- The glyph sets `nvime.icons` can draw from.
 M.ICON_SETS = { 'unicode', 'ascii' }
 
+--- Reasoning-effort levels a `models.*` lane may name. The SDK also accepts
+--- 'xhigh'/'max'; nvime's config and `:Nvime model` picker offer only these.
+M.EFFORTS = { 'low', 'medium', 'high' }
+
+--- The per-mode dials `models.*` covers, and the lanes `:Nvime model` offers.
+M.MODEL_LANES = { 'chat', 'edit', 'big_build', 'big_intake', 'big_grade', 'explain' }
+
 --- Defaults. `setup()` deep-merges the user table over this and validates the result.
 local defaults = {
   panel = {
@@ -48,11 +55,22 @@ local defaults = {
     node = 'node',
     -- Absolute path to the claude binary; nil resolves it from PATH.
     claude = nil,
-    -- Model id passed to the SDK; nil uses the CLI default.
-    model = nil,
     -- Deadline for control requests. A streaming turn is exempt: it is bounded
     -- by the user's stop key, not a timer.
     request_timeout_ms = 15000,
+  },
+  -- Per-mode model + reasoning-effort overrides, threaded into every agent
+  -- turn that mode runs. `model`/`effort` nil means the CLI's own default;
+  -- `:Nvime model` layers a session-scoped override on top of these.
+  models = {
+    chat = { model = nil, effort = nil },
+    edit = { model = nil, effort = nil },
+    big_build = { model = nil, effort = nil },
+    big_intake = { model = nil, effort = nil },
+    -- Grading is the comprehension gate itself; it may never run at effort
+    -- 'low' — validated below, and enforced again in `nvime.models`.
+    big_grade = { model = nil, effort = nil },
+    explain = { model = nil, effort = nil },
   },
   context = {
     max_file_bytes = 200 * 1024,
@@ -117,12 +135,26 @@ local function validate(opts)
   if opts.agent.claude ~= nil then
     check_type(opts.agent.claude, 'string', 'agent.claude')
   end
-  if opts.agent.model ~= nil then
-    check_type(opts.agent.model, 'string', 'agent.model')
-  end
   check_type(opts.agent.request_timeout_ms, 'number', 'agent.request_timeout_ms')
   if opts.agent.request_timeout_ms < 1000 then
     fail('agent.request_timeout_ms must be at least 1000')
+  end
+  check_type(opts.models, 'table', 'models')
+  for _, lane in ipairs(M.MODEL_LANES) do
+    local dial = opts.models[lane]
+    check_type(dial, 'table', 'models.' .. lane)
+    if dial.model ~= nil then
+      check_type(dial.model, 'string', 'models.' .. lane .. '.model')
+    end
+    if dial.effort ~= nil then
+      check_type(dial.effort, 'string', 'models.' .. lane .. '.effort')
+      if not vim.tbl_contains(M.EFFORTS, dial.effort) then
+        fail('models.' .. lane .. '.effort must be one of: ' .. table.concat(M.EFFORTS, ', '))
+      end
+    end
+  end
+  if opts.models.big_grade.effort == 'low' then
+    fail('models.big_grade.effort may not be low — grading is the gate and never runs at the shallowest effort')
   end
   check_type(opts.context.max_file_bytes, 'number', 'context.max_file_bytes')
   if opts.context.max_file_bytes < 1024 then

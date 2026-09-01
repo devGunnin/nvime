@@ -132,6 +132,45 @@ describe('statusline.get', function()
   end)
 end)
 
+describe('statusline.get: the model dial suffix', function()
+  local models = require('nvime.models')
+
+  it('appends nothing while every lane is at the CLI default', function()
+    models.reset_all()
+    with_surfaces({}, function()
+      eq('', statusline.get())
+    end)
+  end)
+
+  it('appends the active dial when nothing else is worth reporting', function()
+    models.set('chat', 'claude-opus-5', 'high')
+    with_surfaces({}, function()
+      eq('nvime: chat:claude-opus-5/high', statusline.get())
+    end)
+    models.reset('chat')
+  end)
+
+  it('appends the active dial after the running-surface status', function()
+    models.set('big_build', 'claude-sonnet-5', 'medium')
+    with_surfaces({ chat = {
+      is_running = function()
+        return true
+      end,
+    } }, function()
+      eq('nvime: chat ' .. require('nvime.icons').get().busy .. '  big_build:claude-sonnet-5/medium', statusline.get())
+    end)
+    models.reset('big_build')
+  end)
+
+  it('doubles a literal % in a typed model name before it reaches a winbar %{expr}', function()
+    models.set('chat', '100%-local', nil)
+    with_surfaces({}, function()
+      eq('nvime: chat:100%%-local/-', statusline.get())
+    end)
+    models.reset('chat')
+  end)
+end)
+
 describe('statusline.toggle_winbar', function()
   it('flips the global winbar on and off, evaluating through statusline.get', function()
     vim.o.winbar = ''

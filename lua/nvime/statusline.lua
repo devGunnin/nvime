@@ -6,10 +6,9 @@
 --- own redraw cycle to re-evaluate it, so nothing here polls either.
 local M = {}
 
---- One line: which surface is doing something, and how far along it is.
---- Empty when nothing is worth reporting.
+--- The base status text, before any model-dial suffix is appended.
 --- @return string
-function M.get()
+local function base_status()
   local icons = require('nvime.icons').get()
   if require('nvime.chat').is_running() then
     return 'nvime: chat ' .. icons.busy
@@ -30,6 +29,27 @@ function M.get()
   end
   local counts = session.counts
   return string.format('nvime: big %d/%d defended', counts.defended or 0, counts.substantial or 0)
+end
+
+--- One line: which surface is doing something, how far along it is, and (only
+--- while at least one lane is off the CLI default) which model/effort dial is
+--- active — e.g. "nvime: chat ●  big_build:opus/high". Empty when there is
+--- nothing to report and every lane is at its default.
+--- @return string
+function M.get()
+  local status = base_status()
+  local dial = table.concat(require('nvime.models').summary(), '  ')
+  if dial == '' then
+    return status
+  end
+  -- A model name is user-typed (`:Nvime model`) and this string ends up
+  -- inside a `%{expr}` winbar/statusline item, which re-scans its result for
+  -- more `%` items — double it before it ever reaches one.
+  dial = dial:gsub('%%', '%%%%')
+  if status == '' then
+    return 'nvime: ' .. dial
+  end
+  return status .. '  ' .. dial
 end
 
 --- Neovim re-evaluates a `%{%...%}` winbar item on its own redraws — this is

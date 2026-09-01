@@ -9,6 +9,7 @@
 --- the next answer has to address. There is no override, and `M` will not
 --- merge while anything is open.
 local agent = require('nvime.agent')
+local models = require('nvime.models')
 local shape = require('nvime.text')
 
 local M = {}
@@ -428,11 +429,14 @@ local function request_changes()
     hint = 'what should change, and why?',
     on_submit = function(comment)
       notify('revising the change — this runs for as long as it takes')
+      local dial = models.dial('big_build')
       agent.request('big.revise', {
         root = view.root,
         sessionId = view.session.id,
         blockId = block.id,
         comment = comment,
+        model = dial.model,
+        effort = dial.effort,
       }, function(err, result)
         if err ~= nil then
           notify(err.message or 'the revision failed', vim.log.levels.ERROR)
@@ -471,10 +475,13 @@ local function answer()
     height = 10,
     on_submit = function(text)
       notify('grading your answer')
+      local dial = models.dial('big_grade')
       agent.request('big.answer', {
         root = view.root,
         sessionId = view.session.id,
         answers = { { blockId = block.id, text = text } },
+        model = dial.model,
+        effort = dial.effort,
       }, function(err, result)
         if err ~= nil then
           notify(err.message or 'the grading turn failed', vim.log.levels.ERROR)
@@ -511,10 +518,13 @@ local function explain()
   local title = block.title
   local explain_ui = require('nvime.explain')
   explain_ui.pending(title)
+  local dial = models.dial('explain')
   agent.request('big.explain', {
     root = view.root,
     sessionId = view.session.id,
     blockId = block.id,
+    model = dial.model,
+    effort = dial.effort,
   }, function(err, result)
     if err ~= nil then
       explain_ui.show(title, '! ' .. (err.message or 'could not explain this thread'))
@@ -647,7 +657,13 @@ local function rebase()
     return
   end
   notify('rebasing the build onto the updated base — this runs for as long as it takes')
-  agent.request('big.rebase', { root = view.root, sessionId = view.session.id }, function(err, result)
+  local dial = models.dial('big_build')
+  agent.request('big.rebase', {
+    root = view.root,
+    sessionId = view.session.id,
+    model = dial.model,
+    effort = dial.effort,
+  }, function(err, result)
     if err ~= nil then
       notify(err.message or 'the rebase failed', vim.log.levels.ERROR)
       return

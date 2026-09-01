@@ -71,9 +71,6 @@ function M.sidecar_env()
   if opts.agent.claude ~= nil then
     env.NVIME_CLAUDE_PATH = opts.agent.claude
   end
-  if opts.agent.model ~= nil then
-    env.NVIME_MODEL = opts.agent.model
-  end
   return env
 end
 

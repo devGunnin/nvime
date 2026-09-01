@@ -8,6 +8,7 @@
 --- deliberately asking "why doesn't this work", never an editing path.
 local config = require('nvime.config')
 local keymaps = require('nvime.keymaps')
+local models = require('nvime.models')
 
 -- Not a top-level `local agent = require(...)`: several specs replace
 -- `package.loaded['nvime.agent']` with a fake for the span of their own
@@ -214,6 +215,18 @@ local function check_git_identity(entries, root)
   ok(entries, string.format('git identity: %s <%s>', name, email))
 end
 
+--- Lists every lane whose model/effort dial is not the CLI default, config or
+--- a session-scoped `:Nvime model` override alike — informational, since a
+--- non-default dial is a deliberate choice, not a problem to fix.
+local function check_model_dial(entries)
+  local active = models.summary()
+  if #active == 0 then
+    info(entries, 'model dial: every lane uses the CLI default')
+    return
+  end
+  info(entries, 'model dial: ' .. table.concat(active, '  '))
+end
+
 --- Runs every check and returns what each found, in the order a reader should
 --- see them. Never raises — a probe that cannot even run is reported as a
 --- failure of that probe, not a crash of the command that asked for this.
@@ -232,6 +245,7 @@ function M.run(root)
   end
   check_login_file(entries)
   check_git_identity(entries, root or vim.uv.cwd())
+  check_model_dial(entries)
   return entries
 end
 

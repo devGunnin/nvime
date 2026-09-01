@@ -8,6 +8,7 @@
 local agent = require('nvime.agent')
 local config = require('nvime.config')
 local context = require('nvime.context')
+local models = require('nvime.models')
 local panel = require('nvime.panel')
 local picker = require('nvime.picker')
 local threads = require('nvime.threads')
@@ -260,7 +261,14 @@ end
 function M.ask(text)
   assert(type(text) == 'string' and text ~= '', 'big.ask needs a message')
   assert(state.session ~= nil, 'big.ask needs a selected session')
-  stream('big.intake', { root = state.root, sessionId = state.session.id, message = text }, function(session)
+  local dial = models.dial('big_intake')
+  stream('big.intake', {
+    root = state.root,
+    sessionId = state.session.id,
+    message = text,
+    model = dial.model,
+    effort = dial.effort,
+  }, function(session)
     local last = session.conversation[#session.conversation]
     if last ~= nil and last.role == 'agent' then
       surface():append('claude', 'NvimeAgent')
@@ -316,14 +324,24 @@ end
 --- Runs (or resumes) the build, then captures and triages what it produced.
 function M.build()
   assert(state.session ~= nil, 'big.build needs a selected session')
-  stream('big.build', { root = state.root, sessionId = state.session.id }, settle_threads)
+  local dial = models.dial('big_build')
+  stream(
+    'big.build',
+    { root = state.root, sessionId = state.session.id, model = dial.model, effort = dial.effort },
+    settle_threads
+  )
 end
 
 --- `retriage`: sorts an already-built change into threads again, without
 --- re-running the build agent over work it has already done.
 function M.capture()
   assert(state.session ~= nil, 'big.capture needs a selected session')
-  stream('big.capture', { root = state.root, sessionId = state.session.id }, settle_threads)
+  local dial = models.dial('big_build')
+  stream(
+    'big.capture',
+    { root = state.root, sessionId = state.session.id, model = dial.model, effort = dial.effort },
+    settle_threads
+  )
 end
 
 --- Throws the clone and the record away. Only ever on an explicit `discard`.
