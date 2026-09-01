@@ -50,15 +50,28 @@ end
 function M.render(request, width)
   assert(type(request) == 'table', 'approval.render needs a request')
   assert(type(width) == 'number' and width > 0, 'approval.render needs a positive width')
-  local body_width = math.max(width - #INDENT, 8)
+  -- One column of slack past the indent: a line that ends exactly on the
+  -- border can measure as needing a second row, and the float then opens with
+  -- an empty band under its content.
+  local body_width = math.max(width - #INDENT - 1, 8)
   -- Every line is pre-wrapped to the border, so the float's height in buffer
   -- lines is also its height on screen. Without this a two-line summary
   -- silently pushes the payload — the thing being consented to — off the
   -- bottom of a float sized for one.
   local lines, marks = {}, {}
-  local function section(label, body)
-    lines[#lines + 1] = label
-    marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #label, hl = 'NvimeLabel' }
+  --- Appends one label, wrapped and kept one column in, and marks its first
+  --- row. Returns that row. `text.wrap` collapses runs of whitespace, so the
+  --- leading column is re-applied rather than passed through it.
+  local function label(caption, hl)
+    local wrapped = text.wrap(caption:gsub('^ ', ''), width - 2)
+    for _, line in ipairs(wrapped) do
+      lines[#lines + 1] = ' ' .. line
+    end
+    marks[#marks + 1] = { row = #lines - #wrapped, col = 0, end_col = 1 + #wrapped[1], hl = hl or 'NvimeLabel' }
+    return #lines - #wrapped
+  end
+  local function section(caption, body)
+    label(caption)
     for _, line in ipairs(text.wrap(body, body_width)) do
       lines[#lines + 1] = INDENT .. line
     end
@@ -73,8 +86,7 @@ function M.render(request, width)
   -- The sidecar already resolved where the write really lands. Without this
   -- the user authorizes a path they would have to walk a symlink to decode.
   if type(request.path) == 'string' and request.path ~= '' and request.path ~= shown then
-    lines[#lines + 1] = ' !! it really lands on:'
-    alerts[#alerts + 1] = #lines
+    alerts[#alerts + 1] = label(' !! it really lands on:', 'NvimeError') + 1
     for _, line in ipairs(text.wrap_exact(request.path, body_width)) do
       lines[#lines + 1] = INDENT .. line
     end
@@ -91,18 +103,21 @@ function M.render(request, width)
   -- Every byte, wrapped by characters: a word wrap drops the space it broke
   -- at, and a command is not something to show approximately.
   local body = text.wrap_exact(shown, body_width)
-  lines[#lines + 1] = string.format(
-    ' the exact %s — %d line%s, %d byte%s:',
-    detail.kind or 'value',
-    #body,
-    #body == 1 and '' or 's',
-    detail.bytes or #shown,
-    (detail.bytes or #shown) == 1 and '' or 's'
+  label(
+    string.format(
+      ' the exact %s — %d line%s, %d byte%s:',
+      detail.kind or 'value',
+      #body,
+      #body == 1 and '' or 's',
+      detail.bytes or #shown,
+      (detail.bytes or #shown) == 1 and '' or 's'
+    )
   )
-  marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #lines[#lines], hl = 'NvimeLabel' }
   if detail.truncated then
-    lines[#lines + 1] = string.format(' !! TRUNCATED — nvime can only show you %d of %d bytes', #shown, detail.bytes)
-    alerts[#alerts + 1] = #lines
+    alerts[#alerts + 1] = label(
+      string.format(' !! TRUNCATED — nvime can only show you %d of %d bytes', #shown, detail.bytes),
+      'NvimeError'
+    ) + 1
   end
   local first_body = #lines
   for _, line in ipairs(body) do
@@ -114,21 +129,6 @@ function M.render(request, width)
     marks[#marks + 1] = { row = row, hl = 'NvimeCode' }
   end
   return lines, alerts, marks
-end
-
---- Rows `lines` occupies once the window has wrapped them. `render`
---- pre-wraps, so this normally equals `#lines`; it is the backstop that keeps
---- the payload on screen if anything ever exceeds the width anyway.
---- @param lines string[]
---- @param width integer
---- @return integer
-function M.screen_rows(lines, width)
-  assert(type(width) == 'number' and width > 0, 'screen_rows needs a positive width')
-  local rows = 0
-  for _, line in ipairs(lines) do
-    rows = rows + math.max(math.ceil(vim.fn.strdisplaywidth(line) / width), 1)
-  end
-  return rows
 end
 
 --- Opens the float for `ask` and wires the approval keys to `answer`.
@@ -151,7 +151,9 @@ local function show(ask, answer)
   vim.bo[buf].modifiable = false
   vim.bo[buf].bufhidden = 'wipe'
 
-  local height = M.screen_rows(lines, width)
+  -- One row per line: `render` wraps every line to the border itself, so the
+  -- buffer's height is the height on screen.
+  local height = #lines
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
     width = width,
@@ -164,9 +166,9 @@ local function show(ask, answer)
     title = ' nvime · approve? ',
     title_pos = 'center',
   })
+  -- Everything is pre-wrapped to the border, so these two are only a backstop
+  -- — and `linebreak` keeps that backstop off the middle of a word.
   vim.wo[win].wrap = true
-  -- Prose is not pre-wrapped; the payload is, so this only ever catches the
-  -- summary and the reason, and it catches them at a space.
   vim.wo[win].linebreak = true
   active = { win = win, buf = buf, request = ask.request, on_answer = ask.on_answer }
 
