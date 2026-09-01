@@ -89,6 +89,42 @@ describe('completion.refresh / completion.candidates', function()
     vim.fn.delete(dir, 'rf')
   end)
 
+  it('shows files even when 50+ directories alone would otherwise fill every row', function()
+    local dir = sandbox()
+    for i = 1, 60 do
+      vim.fn.mkdir(string.format('%s/d%02d', dir, i), 'p')
+    end
+    vim.fn.writefile({ 'x' }, dir .. '/only-file.txt')
+    completion.invalidate(dir)
+    completion.refresh(dir)
+    wait_ready(dir)
+    local candidates = completion.candidates(dir, '')
+    local has_file = false
+    for _, c in ipairs(candidates) do
+      if c == 'only-file.txt' then
+        has_file = true
+      end
+    end
+    ok(has_file, 'a lone file must not be starved out by 60 matching directories: ' .. vim.inspect(candidates))
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('surfaces how many matches were left out of the popup, instead of silently capping', function()
+    local dir = sandbox()
+    for i = 1, 70 do
+      vim.fn.writefile({ 'x' }, string.format('%s/f%03d.txt', dir, i))
+    end
+    completion.invalidate(dir)
+    completion.refresh(dir)
+    wait_ready(dir)
+    local candidates = completion.candidates(dir, '')
+    local notice = candidates[#candidates]
+    ok(type(notice) == 'table', 'the last row should be a truncation notice: ' .. vim.inspect(notice))
+    ok(notice.empty == 1, 'an empty-word notice needs empty=1 or Vim drops it')
+    ok(notice.abbr:find('more') ~= nil, notice.abbr)
+    vim.fn.delete(dir, 'rf')
+  end)
+
   it('answers nothing before the cache is warm, rather than walking the tree inline', function()
     local dir = sandbox()
     vim.fn.writefile({ 'a' }, dir .. '/alpha.py')
@@ -97,6 +133,63 @@ describe('completion.refresh / completion.candidates', function()
     eq(false, completion.ready(dir))
     vim.fn.delete(dir, 'rf')
   end)
+end)
+
+describe('completion vs git — differential gitignore matching', function()
+  it(
+    'agrees with `git ls-files --others --exclude-standard` on character classes, ** across /, and nested .gitignore',
+    function()
+      local dir = sandbox()
+      vim.fn.system({ 'git', 'init', '-q', dir })
+      ok(vim.v.shell_error == 0, 'git init failed, cannot run the differential test')
+
+      -- Character class: b.txt is ignored ([ab].txt), a.txt and c.txt are not.
+      vim.fn.writefile({ 'x' }, dir .. '/a.txt')
+      vim.fn.writefile({ 'x' }, dir .. '/b.txt')
+      vim.fn.writefile({ 'x' }, dir .. '/c.txt')
+
+      -- `**` must cross more than one `/`.
+      vim.fn.mkdir(dir .. '/deep/nested', 'p')
+      vim.fn.writefile({ 'x' }, dir .. '/deep/deep.txt')
+      vim.fn.writefile({ 'x' }, dir .. '/deep/nested/deep.txt')
+      vim.fn.writefile({ 'x' }, dir .. '/deep/keep.txt')
+
+      -- A nested .gitignore, scoped to its own directory only.
+      vim.fn.mkdir(dir .. '/sub', 'p')
+      vim.fn.writefile({ 'x' }, dir .. '/sub/nested-ignored.py')
+      vim.fn.writefile({ 'x' }, dir .. '/sub/kept.py')
+      vim.fn.writefile({ 'nested-ignored.py' }, dir .. '/sub/.gitignore')
+
+      vim.fn.writefile({ '[ab].txt', '**/deep.txt' }, dir .. '/.gitignore')
+
+      local out = vim.fn.systemlist({ 'git', '-C', dir, 'ls-files', '--others', '--exclude-standard' })
+      ok(vim.v.shell_error == 0, 'git ls-files failed: ' .. table.concat(out, '\n'))
+      local expected = {}
+      for _, path in ipairs(out) do
+        expected[path] = true
+      end
+      ok(next(expected) ~= nil, 'fixture produced no git-tracked files to compare against')
+
+      completion.invalidate(dir)
+      completion.refresh(dir)
+      wait_ready(dir)
+      local candidates = completion.candidates(dir, '')
+      local offered = {}
+      for _, c in ipairs(candidates) do
+        if type(c) == 'string' and not vim.endswith(c, '/') then
+          offered[c] = true
+        end
+      end
+
+      for path in pairs(expected) do
+        ok(offered[path] == true, path .. ' — git offers it, the matcher does not')
+      end
+      for path in pairs(offered) do
+        ok(expected[path] == true, path .. ' — the matcher offers it, git ignores it')
+      end
+      vim.fn.delete(dir, 'rf')
+    end
+  )
 end)
 
 describe('completion.completefunc', function()
