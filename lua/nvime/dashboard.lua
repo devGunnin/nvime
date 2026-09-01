@@ -46,6 +46,20 @@ local STATE_HL = {
   drafting = 'NvimeDim',
 }
 
+--- The states of the preflight facts that are actually good news. Anything
+--- else is neutral or a failure, and neither is painted as "all set".
+local READY = { running = true, present = true }
+
+--- @param value string the fact as it is written on the page
+--- @return string highlight group
+function M.fact_hl(value)
+  assert(type(value) == 'string', 'dashboard.fact_hl needs a fact')
+  if READY[value] then
+    return 'NvimeOk'
+  end
+  return value:find('missing') ~= nil and 'NvimeError' or 'NvimeDim'
+end
+
 --- One line per big change: where it is, and how much of its review is left.
 --- @param session table a list summary from `big.list`
 --- @param title_width integer|nil cells the title may occupy before it is cut
@@ -105,7 +119,7 @@ function M.render(facts, width)
   for _, row in ipairs({ { 'sidecar  ', facts.sidecar }, { 'build    ', facts.build } }) do
     lines[#lines + 1] = '  ' .. row[1] .. row[2]
     mark(#lines - 1, 0, 2 + #row[1], 'NvimeLabel')
-    mark(#lines - 1, 2 + #row[1], -1, row[2]:find('missing') and 'NvimeError' or 'NvimeOk')
+    mark(#lines - 1, 2 + #row[1], -1, M.fact_hl(row[2]))
   end
   lines[#lines + 1] = ''
   lines[#lines + 1] = ' big changes in this project'

@@ -11,6 +11,9 @@ local statusline = require('nvime.statusline')
 
 local M = {}
 
+--- @type string
+M.VERSION = require('nvime.version')
+
 --- @param user table|nil
 function M.setup(user)
   local opts = config.setup(user)

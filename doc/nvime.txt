@@ -1,0 +1,481 @@
+*nvime.txt*  No vibe coding in my editor — a Claude-native Neovim plugin
+
+Author:  devGunnin
+Version: 2.0.0
+License: private
+
+==============================================================================
+CONTENTS                                                       *nvime-contents*
+
+  1. Introduction ......................... |nvime-introduction|
+  2. Requirements ......................... |nvime-requirements|
+  3. Setup ................................ |nvime-setup|
+  4. Commands ............................. |nvime-commands|
+  5. Keymaps .............................. |nvime-keymaps|
+  6. Chat ................................. |nvime-chat|
+  7. Edit ................................. |nvime-edit|
+  8. Big Change ........................... |nvime-big|
+  9. Configuration ........................ |nvime-configuration|
+ 10. Highlight groups ..................... |nvime-highlights|
+ 11. Statusline ........................... |nvime-statusline|
+ 12. Health .............................. |nvime-health|
+ 13. Security model ....................... |nvime-security|
+
+==============================================================================
+1. INTRODUCTION                                            *nvime-introduction*
+
+nvime is a Claude-native Neovim plugin with three capabilities: Chat, Edit and
+Big Change. Lua is the UI; a Node sidecar owns every conversation through the
+Claude Agent SDK and drives your local `claude` install with its existing
+subscription login. No API key is used in any code path.
+
+Big Change is the reason the plugin exists. Claude interrogates the request
+into a spec, builds it alone in a disposable clone of the repository, splits
+the result into review threads, and grades your written defense of each
+substantial one before it will land anything on your branch. There is no
+force-merge.
+
+==============================================================================
+2. REQUIREMENTS                                            *nvime-requirements*
+
+  - Neovim >= 0.10
+  - Node >= 20
+  - Claude Code installed and signed in (`claude` on `PATH`)
+
+The sidecar must be built before first use: >
+
+    npm --prefix agent install && npm --prefix agent run build
+<
+`:Nvime doctor` reports every one of these, with the fix under each failure.
+
+==============================================================================
+3. SETUP                                                          *nvime-setup*
+
+                                                              *nvime.setup()*
+require('nvime').setup({opts})
+    Validates {opts} over the defaults, installs them, derives the highlight
+    groups from the active colorscheme, and applies the keymaps if they are
+    enabled. Raises with the option path that was wrong rather than coercing
+    a bad value. Calling it is optional; the defaults apply without it, except
+    that no global keymap is bound.
+
+    See |nvime-configuration| for every key.
+
+==============================================================================
+4. COMMANDS                                                    *nvime-commands*
+
+                                                                     *:Nvime*
+:Nvime                  Open the dashboard: what nvime can do, whether it is
+                        wired up, and every big change in this project with
+                        its review progress. <CR> opens the change under the
+                        cursor.
+
+:Nvime chat             Open (or focus) the chat panel. |nvime-chat|
+
+:Nvime edit             Open the edit panel, scoped to the current file.
+                        |nvime-edit|
+
+:Nvime big              Open the big-change panel: start a new change, or
+                        <C-r> to pick one already going. |nvime-big|
+
+:Nvime diff             Open the changeset of the last edit run.
+
+:Nvime cancel           Stop whichever run is going — chat, edit or a big
+                        change — and say so if none is.
+
+:Nvime doctor           Run every preflight check and render the result as one
+                        pass/warn/fail list, with the fix named under each
+                        failure. |nvime-health|
+
+:Nvime health           The same checks through `:checkhealth nvime`.
+
+:Nvime statusline       Toggle the built-in winbar status on or off, globally,
+                        for windows that have no winbar of their own.
+                        |nvime-statusline|
+
+==============================================================================
+5. KEYMAPS                                                      *nvime-keymaps*
+
+Global maps are off until `keymaps.enabled = true`. Every mapping nvime
+defines is a leaf: none is a prefix of another, so nothing ever stalls for
+'timeoutlen'. `:checkhealth nvime` reports this.
+
+Global ~
+    <leader>nc      normal      open chat
+    <leader>ns      visual      send the selection with its file and lines
+    <leader>ne      normal      instruct claude about this file
+    <leader>ne      visual      instruct claude about the selection
+    <leader>nd      normal      review the changeset
+    <leader>nB      normal      open a big change
+
+Prompt buffer ~
+    <CR>            normal      send the prompt
+    <C-s>           insert      send the prompt (<CR> still inserts a newline)
+    <C-r>           normal      session / change picker
+    <C-c>           normal      stop the running turn
+
+Scrollback ~
+    q                           close the panel
+
+Approval float ~
+    y, Y                        allow once
+    n, N, <Esc>                 deny
+
+Changeset ~
+    <CR>                        open the file at this hunk
+    r                           revert this hunk
+    d                           toggle the unified diff
+    q                           close
+
+Big-change panel ~
+    <C-r>                       pick a big change
+    <C-t>                       open the review threads
+    <C-c>                       stop the run
+    q                           close
+
+Review threads ~
+    ]t, [t                      next / previous thread
+    a                           defend this thread (the gate)
+    e                           explain a cleared thread
+    r                           request changes on this thread
+    X                           re-open (or re-clear) a trivial thread
+    R                           rebase the build onto a moved base
+    M                           merge into your branch
+    <CR>                        open this file in the build clone
+    q                           close the review
+
+Dashboard ~
+    c, e, b, d                  chat / edit / big / changeset
+    <CR>                        open the change under the cursor
+    q, <Esc>                    close
+
+Answer box (paste-blocked) ~
+    <CR>                        submit
+    <C-s>            insert     submit
+    <Esc>, q                    cancel
+    p, P, gp, gP, ]p, [p, ]P, [P, i_<C-r>   refused: type it
+
+==============================================================================
+6. CHAT                                                            *nvime-chat*
+
+A persistent, read-only conversation with full session history. Streaming
+markdown is rendered as it arrives, with fenced code highlighted by the real
+grammar for its language when a parser is installed.
+
+Context ~
+    Write `@path/to/file` or `@path/to/dir` in a prompt and nvime attaches it:
+    a file as its contents, a directory as a bounded listing. Relative paths
+    resolve against the project root the panel was opened on, never Neovim's
+    cwd. Bad, binary or oversized paths are reported in the panel rather than
+    dropped. `@` completion is gitignore-aware.
+
+Sessions ~
+    The session for a project root is remembered, so reopening chat replays
+    the earlier turns. <C-r> lists nvime's own past sessions for that root by
+    title and age. Resume survives Neovim restarts, and several Neovim
+    instances share the session file without overwriting each other.
+
+Chat can never touch your code: it gets Read, Glob, Grep, WebFetch and
+WebSearch, and file mutation and shell are denied through SDK options rather
+than prompt text. See |nvime-security| for what that does NOT confine.
+
+==============================================================================
+7. EDIT                                                            *nvime-edit*
+
+`<leader>ne` scopes the instruction to the current file; from visual mode, to
+the selection. The prompt stays armed afterwards, and a follow-up is not
+pinned to the original file.
+
+Live application ~
+    Every change is pushed to the editor as its exact before/after the moment
+    the tool finishes. If a buffer holds that file only the changed hunks are
+    rewritten through the buffer API: the cursor and scroll position stay put,
+    the changed lines light up and fade after `edit.fade_ms`, and the buffer
+    is left unmodified and in step with disk. No `:e`, no reload prompt, and
+    no W11/W12 warning later.
+
+    One undo block per run, per buffer: a single `u` reverts everything one
+    run did to that buffer. It reverts the BUFFER — disk keeps the agent's
+    version until you `:w`.
+
+    A buffer with unsaved edits the agent did not see is refused, not
+    overwritten, and the conflict is reported. A file some other writer
+    changed in between is reported as `external-change` and left alone.
+
+Approvals ~
+    Writes under the project root run unattended. A write anywhere else, and
+    any shell command, opens a `y`/`n` float — never a modal, and the editor
+    stays usable while it waits. The float carries the whole command or path,
+    wrapped over as many lines as it takes; past 8 KB it says how many bytes
+    it could not show. An unanswered ask is denied, as is one whose run was
+    cancelled. `edit.approval_timeout_ms` bounds the wait.
+
+Changeset ~
+    `<leader>nd` lists every file the run touched with its hunks. `<CR>` jumps
+    to a hunk, `d` toggles a plain unified diff, and `r` reverts one hunk
+    through the same live-application path. A hunk whose lines have been
+    hand-edited since refuses to revert rather than writing something neither
+    side asked for.
+
+==============================================================================
+8. BIG CHANGE                                                       *nvime-big*
+
+Intake ~
+    Describe the change; Claude reads the repo and asks until it is not
+    guessing, then plays back a spec (goal, approach, scope, acceptance, out
+    of scope) as schema-enforced structured output. No spec is ever invented
+    from prose. Answer, revise, or type `approve`. Typing `vibe`, `easy`,
+    `medium` or `extreme` while drafting moves the gate.
+
+Build ~
+    Approving records HEAD and returns; the build then makes a local clone of
+    the repository at that commit under `stdpath('data')/nvime/big/`, with
+    `origin` removed. The build agent works there with full mutation rights
+    and is told not to commit. Progress streams into the panel; <C-c> stops
+    it. A build is meant to outlive the editor.
+
+Triage ~
+    On completion the diff against the base is captured and a read-only triage
+    turn groups the hunks into threads, rating each substantial or trivial.
+    Every hunk lands in exactly one thread; anything triage forgot becomes an
+    open `unsorted` thread, and a failed triage falls back to one substantial
+    thread per file and says so. Trivia auto-resolves but stays visible with
+    an `auto` chip, and `X` re-opens it.
+
+The gate ~
+    `a` on an open substantial thread opens an answer box that takes typed
+    text only. Submitting runs one read-only grading turn in the build clone,
+    resumed across rounds. Under the pass mark the thread stays open and the
+    grader's hint and follow-up render in it; the next answer has to address
+    the follow-up. There is no round cap and no override.
+
+    Pass marks: `vibe` no gate, `easy` 40, `medium` 70, `extreme` 90.
+
+    If the grading turn fails or answers unusably the round is recorded
+    ungraded: the answer is kept, the thread stays open, and the pane says
+    why. A grade nobody gave is never inferred.
+
+Merge ~
+    `M` lands the reviewed change on the branch the build started from — the
+    only thing nvime ever writes to your repository. It asserts every
+    precondition itself and reports all of them at once. The commit is built
+    in a private index outside the repository, so an interruption leaves your
+    index, tree and branches exactly as they were; exactly one command touches
+    your checkout, `git merge --ff-only`, and HEAD is re-read immediately
+    before and after it.
+
+    `R` rebases the build onto a base branch that has moved, then re-captures
+    and re-triages; content already defended carries forward by signature.
+
+==============================================================================
+9. CONFIGURATION                                          *nvime-configuration*
+
+Defaults: >
+
+    require('nvime').setup({
+      panel = {
+        width = 80,
+        prompt_height = 3,
+        position = 'right',
+      },
+      ui = {
+        icons = 'unicode',
+      },
+      keymaps = {
+        enabled = false,
+        chat = '<leader>nc',
+        send_selection = '<leader>ns',
+        edit = '<leader>ne',
+        changeset = '<leader>nd',
+        big = '<leader>nB',
+      },
+      edit = {
+        fade_ms = 1500,
+        nofade = false,
+        approval_timeout_ms = 60000,
+      },
+      big = {
+        difficulty = 'medium',
+        cleanup_on_merge = false,
+      },
+      agent = {
+        node = 'node',
+        claude = nil,
+        model = nil,
+        request_timeout_ms = 15000,
+      },
+      context = {
+        max_file_bytes = 200 * 1024,
+        max_dir_entries = 200,
+      },
+      project_instructions = {
+        enabled = true,
+      },
+    })
+<
+panel.width            number, 20..400. Columns the panel occupies.
+panel.prompt_height    number, 1..20. Lines of the prompt buffer.
+panel.position         'right' or 'left'.
+
+ui.icons               'unicode' (default) or 'ascii'. The default set uses
+                       only plain Unicode — box drawing, arrows, a check mark,
+                       quarter-circle spinner frames — never a private-use
+                       Nerd Font codepoint. 'ascii' swaps the whole set.
+
+keymaps.enabled        boolean. nvime binds no global key until this is true.
+keymaps.chat           string, `<leader>nc` by default.
+keymaps.send_selection string, `<leader>ns` by default.
+keymaps.edit           string, `<leader>ne` by default.
+keymaps.changeset      string, `<leader>nd` by default.
+keymaps.big            string, `<leader>nB` by default.
+
+edit.fade_ms           number >= 100. How long a fresh hunk stays lit.
+edit.nofade            boolean. Keep the highlight until the next change.
+edit.approval_timeout_ms
+                       number >= 1000. How long the sidecar holds a tool call
+                       waiting for your y/n before denying it.
+
+big.difficulty         'vibe' | 'easy' | 'medium' | 'extreme'. The gate a NEW
+                       big change starts with.
+big.cleanup_on_merge   boolean. Throw the build clone away once the change
+                       lands. Off by default: the clone is the only place the
+                       build's own history still exists.
+
+agent.node             string. The node binary.
+agent.claude           string or nil. Absolute path to `claude`; nil resolves
+                       it from PATH.
+agent.model            string or nil. Model id passed to the SDK; nil uses the
+                       CLI default.
+agent.request_timeout_ms
+                       number >= 1000. Deadline for control requests. A
+                       streaming turn is exempt: it is bounded by your stop
+                       key, not a timer.
+
+context.max_file_bytes number >= 1024. Ceiling on one `@file` attachment.
+context.max_dir_entries
+                       number >= 1. Ceiling on one `@dir` listing.
+
+project_instructions.enabled
+                       boolean. Send CLAUDE.md / AGENTS.md / .nvime/
+                       instructions.md to chat and edit as an explicitly
+                       marked-untrusted block. Off disables reading the file
+                       at all.
+
+==============================================================================
+10. HIGHLIGHT GROUPS                                         *nvime-highlights*
+
+Colours are derived from the active colorscheme at runtime and re-derived on
+|ColorScheme|. Only foregrounds are read: every background nvime paints is
+that foreground blended into your own `Normal` background at a low alpha, so
+the tints work on a light background and on a colorscheme whose diff groups
+have a neutral background.
+
+Override any of them after `setup()` with |nvim_set_hl()|.
+
+    NvimeUser           your own turns
+    NvimeAgent          the agent's turns
+    NvimeHeading        markdown headings, page titles
+    NvimeCode           a fenced code block's background
+    NvimeFence          the fence lines around it
+    NvimeInlineCode     `inline code`
+    NvimeBold           **bold**
+    NvimeItalic         *italic*
+    NvimeDim            secondary text
+    NvimeActivity       the next step a surface suggests
+    NvimeError          failures and refusals
+    NvimeSession        session and state markers
+    NvimeSelected       the row a picker's cursor is on
+    NvimeBar            a panel's winbar
+    NvimeBarDim         a hint bar
+    NvimeBarKey         a key named on a bar
+    NvimeCursorLine     the cursor line inside nvime's own windows
+    NvimeLabel          a label left of the value it names
+    NvimeKey            a key the reader is meant to press
+    NvimeOk             a passing check, a clearing grade
+    NvimeWarn           a warning, a grade that was not enough
+    NvimeFile           a file name in a list
+    NvimeAdded          an added hunk's sign
+    NvimeChanged        a changed hunk's sign
+    NvimeRemoved        a removed hunk's sign
+    NvimeThreadDefend   the DEFEND chip
+    NvimeThreadClear    the ok chip
+    NvimeThreadAuto     the auto chip
+    NvimeThreadOpen     the OPEN chip on a re-opened trivial thread
+    NvimeEditAdd        a freshly added hunk's band
+    NvimeEditChange     a freshly changed hunk's band
+    NvimeEditDelete     a freshly removed hunk's band
+    NvimeEditFade       the band a hunk fades through
+
+==============================================================================
+11. STATUSLINE                                               *nvime-statusline*
+
+                                                       *nvime.statusline()*
+require('nvime').statusline()
+    A compact string for your own 'statusline': `nvime: chat ●` while a chat
+    turn streams, `nvime: edit N hunks` while a run applies them, `nvime: big
+    X/Y defended` for the selected big change (or `nvime: big building` while
+    one is still being built). Empty when there is nothing to report. Reads
+    only what each surface already keeps live — never a fresh request, never a
+    timer. >
+
+        vim.o.statusline = "%f %m %= %{v:lua.require('nvime.statusline').get()}"
+<
+`:Nvime statusline` toggles a built-in 'winbar' equivalent instead, for
+windows that have no winbar of their own.
+
+==============================================================================
+12. HEALTH                                                       *nvime-health*
+
+`:Nvime doctor` and `:checkhealth nvime` run the same checks:
+
+    - Neovim version
+    - the keymaps are leaf-only
+    - node, and its version
+    - the sidecar is built, and answers a ping
+    - the `claude` CLI, and its version
+    - no API key or provider override is in the environment
+    - a claude credentials file exists (best effort)
+    - this repository has a git identity, which a local merge needs
+
+`:Nvime doctor` renders them as one pass/warn/fail list with the fix named
+under each failure; `q` or `<Esc>` closes it.
+
+==============================================================================
+13. SECURITY MODEL                                             *nvime-security*
+
+nvime is precise about what it confines. The README carries the full text;
+the short version:
+
+Subscription only ~
+    Every variable the SDK reads to supply a credential, redirect the
+    endpoint, or select another provider is stripped from the environment the
+    SDK sees, and `:checkhealth` says which of them were set. Proxy and TLS
+    variables are deliberately left alone, which means a configured
+    man-in-the-middle still sees the traffic.
+
+No project settings ~
+    Chat and edit load no `.claude/settings.json` — not the repo's, not
+    yours. Its hooks would run shell on the model's first Read, and its
+    `env`/`apiKeyHelper` would put back the credentials nvime just stripped.
+
+Reads are NOT confined                                *nvime-security-reads*
+    Read, Glob, Grep, WebFetch and WebSearch are always allowed and are not
+    confined to the project root. Read any file you can read, then WebFetch an
+    attacker's URL, is a complete exfiltration path with no approval prompt in
+    it. The realistic trigger is prompt-injected content in a repository you
+    opened. This is a deliberate tradeoff and cannot currently be turned off.
+    The write gate is unaffected.
+
+A big-change build is only mostly confined ~
+    Its git commands, and file writes by Edit/Write, stop at the clone. Shell
+    can reach anywhere — `cd` costs nothing — and the clone's object database
+    is hardlinked to yours, so a raw write under `.git/objects` can corrupt
+    your repository. Nothing asks during a build: a build outlives the editor,
+    so the fail-safe answer with nobody watching is no.
+
+The paste block is a block, not a sandbox ~
+    The answer box refuses the put mappings, refuses |vim.paste()|, and undoes
+    any burst that arrives by another route. Text fed in slowly enough gets
+    through. The grader still grades what you submit.
+
+vim:tw=78:ts=8:noet:ft=help:norl:

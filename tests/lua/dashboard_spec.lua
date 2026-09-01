@@ -142,6 +142,13 @@ describe('the dashboard page', function()
     dashboard.dismiss()
   end)
 
+  it('paints only a ready preflight as ready', function()
+    eq('NvimeOk', dashboard.fact_hl('running'))
+    eq('NvimeOk', dashboard.fact_hl('present'))
+    eq('NvimeError', dashboard.fact_hl('missing — run npm --prefix agent run build'))
+    eq('NvimeDim', dashboard.fact_hl('starts on first use'))
+  end)
+
   it('reports a missing build with what to run', function()
     local page = table.concat(dashboard.render(facts({}, { build = 'missing — run npm' })), '\n')
     ok(page:match('build    missing — run npm') ~= nil, page)

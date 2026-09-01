@@ -1,6 +1,6 @@
 {
   "name": "nvime-agent",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "description": "nvime sidecar: one Node process per Neovim instance, speaking ndjson over stdio to the Claude Agent SDK",
   "type": "module",

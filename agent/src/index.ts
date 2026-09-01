@@ -23,7 +23,7 @@ import { CLAUDE_VERSION_PROBE_TIMEOUT_MS, DRAIN_TIMEOUT_MS } from './timeouts.js
 
 export { CLAUDE_VERSION_PROBE_TIMEOUT_MS, DRAIN_TIMEOUT_MS } from './timeouts.js';
 
-export const AGENT_VERSION = '0.1.0';
+export const AGENT_VERSION = '2.0.0';
 
 const run = promisify(execFile);
 
