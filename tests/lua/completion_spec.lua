@@ -192,6 +192,79 @@ describe('completion vs git — differential gitignore matching', function()
   )
 end)
 
+describe('completion — a malformed .gitignore pattern degrades, never crashes', function()
+  it('skips a `[]]` class instead of throwing, and does not filter anything with it', function()
+    local dir = sandbox()
+    vim.fn.writefile({ 'x' }, dir .. '/keep.py')
+    -- `[]]` is git's spelling for "a literal `]`" — legitimate syntax that
+    -- used to compile to an invalid Lua pattern and throw at match time.
+    vim.fn.writefile({ 'x' }, dir .. '/oddname]file.txt')
+    vim.fn.writefile({ '[]]*.txt' }, dir .. '/.gitignore')
+    completion.invalidate(dir)
+    completion.refresh(dir)
+    wait_ready(dir)
+
+    local candidates = completion.candidates(dir, '')
+    ok(vim.tbl_contains(candidates, 'keep.py'), vim.inspect(candidates))
+    ok(
+      vim.tbl_contains(candidates, 'oddname]file.txt'),
+      'a skipped rule must filter nothing, not fall back to matching everything: ' .. vim.inspect(candidates)
+    )
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('recovers instead of getting stuck at "loading" forever', function()
+    local dir = sandbox()
+    vim.fn.writefile({ 'x' }, dir .. '/keep.py')
+    vim.fn.writefile({ '[]]*.txt' }, dir .. '/.gitignore')
+
+    completion.invalidate(dir)
+    completion.refresh(dir)
+    wait_ready(dir)
+    ok(completion.ready(dir), 'the cache must not be stuck on the loading sentinel')
+
+    -- A second refresh after invalidate must also complete cleanly.
+    completion.invalidate(dir)
+    completion.refresh(dir)
+    wait_ready(dir)
+    ok(completion.ready(dir), 'a later refresh must still be able to complete')
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
+describe('completion — ** backtracking is bounded', function()
+  it('matches an 11-** / 20-deep tree in well under a second', function()
+    local dir = sandbox()
+    -- One rule, 11 `**` segments — without memoisation this backtracks
+    -- combinatorially over every split point; the reviewer measured 13s for
+    -- this exact shape.
+    local pattern = string.rep('**/', 11) .. 'nomatch.txt'
+    vim.fn.writefile({ pattern }, dir .. '/.gitignore')
+
+    local path = dir
+    for i = 1, 20 do
+      path = path .. '/d' .. i
+      vim.fn.mkdir(path, 'p')
+    end
+    for i = 1, 10 do
+      vim.fn.writefile({ 'x' }, string.format('%s/f%02d.txt', path, i))
+    end
+
+    -- Entry count (~30) stays well under the walk's CHUNK size, so a warm
+    -- `refresh` completes synchronously — this measures the matcher itself,
+    -- not scheduler latency.
+    completion.invalidate(dir)
+    local clock = vim.uv or vim.loop
+    local start = clock.hrtime()
+    completion.refresh(dir)
+    local elapsed_ms = (clock.hrtime() - start) / 1e6
+
+    ok(completion.ready(dir), 'a small tree must finish synchronously, inside refresh() itself')
+    ok(elapsed_ms < 100, string.format('refresh took %dms, expected sub-100ms once memoised', elapsed_ms))
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
 describe('completion.completefunc', function()
   it('answers -1 on findstart, and no candidates, without a bound root', function()
     local buf = vim.api.nvim_create_buf(false, true)

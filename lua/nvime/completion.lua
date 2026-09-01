@@ -69,8 +69,20 @@ local function segment_to_pattern(segment)
   return table.concat(out)
 end
 
+--- Whether `pattern` is a Lua pattern `string.match` will accept — building
+--- the pattern text never fails, but a class like `[]]` (git's spelling for
+--- a literal `]`) compiles to `[]…`, which Lua rejects at match time, not
+--- build time. Tested once per rule at load, not per file at match time.
+--- @param pattern string
+--- @return boolean
+local function pattern_ok(pattern)
+  return (pcall(string.match, '', pattern))
+end
+
 --- Reads one directory's own `.gitignore` into match rules. `dir` is the
---- absolute directory holding it.
+--- absolute directory holding it. A line whose pattern the matcher cannot
+--- compile is skipped with a one-line notice rather than failing the whole
+--- file or the walk that depends on it.
 --- @param dir string
 --- @return table[] each { negate, dir_only, anchored, segments|basename_pattern }
 local function load_gitignore(dir)
@@ -97,54 +109,88 @@ local function load_gitignore(dir)
         trimmed = trimmed:sub(2)
       end
       local rule = { negate = negate, dir_only = dir_only }
+      local ok = true
       -- A pattern with an internal `/` is anchored to this .gitignore's own
       -- directory even without a leading `/`, exactly as git anchors it.
       if anchored or trimmed:find('/', 1, true) ~= nil then
         rule.anchored = true
         local segments = {}
         for _, seg in ipairs(vim.split(trimmed, '/', { plain = true })) do
-          segments[#segments + 1] = seg == '**' and '**' or segment_to_pattern(seg)
+          if seg == '**' then
+            segments[#segments + 1] = '**'
+          else
+            local pat = segment_to_pattern(seg)
+            if not pattern_ok(pat) then
+              ok = false
+              break
+            end
+            segments[#segments + 1] = pat
+          end
         end
         rule.segments = segments
       else
         rule.anchored = false
         rule.basename_pattern = segment_to_pattern(trimmed)
+        ok = pattern_ok(rule.basename_pattern)
       end
-      rules[#rules + 1] = rule
+      if ok then
+        rules[#rules + 1] = rule
+      else
+        vim.notify(
+          string.format('nvime: skipping unparseable .gitignore pattern %q in %s', line, dir),
+          vim.log.levels.WARN
+        )
+      end
     end
   end
   return rules
 end
 
 --- Whether `pattern_segs[pi..]` matches `path_segs[si..]`. A `**` segment
---- matches zero or more path segments — tried greedily-to-none, since a
---- pattern this short (a handful of rules, shallow trees) never needs more.
+--- matches zero or more path segments, tried by trying every split point.
+--- Without memoisation this backtracks combinatorially: each `**` can retry
+--- every position the ones before it also retried, so a handful of `**`
+--- segments against a deep path costs seconds, not microseconds. `memo`
+--- (fresh per top-level call, see `rule_matches`) caps it at
+--- O(#pattern_segs * #path_segs) by keying purely on `(pi, si)` — the result
+--- for a given position pair never depends on how we got there.
 --- @param pattern_segs table
 --- @param pi integer
 --- @param path_segs table
 --- @param si integer
+--- @param memo table<integer, boolean>
 --- @return boolean
-local function segments_match(pattern_segs, pi, path_segs, si)
-  while pi <= #pattern_segs do
+local function segments_match(pattern_segs, pi, path_segs, si, memo)
+  local key = pi * (#path_segs + 2) + si
+  local cached = memo[key]
+  if cached ~= nil then
+    return cached
+  end
+  local result
+  if pi > #pattern_segs then
+    result = si > #path_segs
+  else
     local seg = pattern_segs[pi]
     if seg == '**' then
       if pi == #pattern_segs then
-        return true
-      end
-      for skip = si, #path_segs + 1 do
-        if segments_match(pattern_segs, pi + 1, path_segs, skip) then
-          return true
+        result = true
+      else
+        result = false
+        for skip = si, #path_segs + 1 do
+          if segments_match(pattern_segs, pi + 1, path_segs, skip, memo) then
+            result = true
+            break
+          end
         end
       end
-      return false
+    elseif si > #path_segs or path_segs[si]:match(seg) == nil then
+      result = false
+    else
+      result = segments_match(pattern_segs, pi + 1, path_segs, si + 1, memo)
     end
-    if si > #path_segs or path_segs[si]:match(seg) == nil then
-      return false
-    end
-    pi = pi + 1
-    si = si + 1
   end
-  return si > #path_segs
+  memo[key] = result
+  return result
 end
 
 --- Whether one rule matches `local_path` — relative to the `.gitignore`
@@ -157,7 +203,7 @@ local function rule_matches(rule, local_path)
     return vim.fs.basename(local_path):match(rule.basename_pattern) ~= nil
   end
   local path_segs = vim.split(local_path, '/', { plain = true })
-  return segments_match(rule.segments, 1, path_segs, 1)
+  return segments_match(rule.segments, 1, path_segs, 1, {})
 end
 
 --- `relpath` (root-relative) expressed relative to `base` (also
@@ -246,7 +292,9 @@ end
 --- Walks `root`, a few hundred entries per scheduled step, honoring every
 --- applicable `.gitignore` (root and nested) and `SKIP_DIRS`. `on_done(files,
 --- dirs, truncated)` runs exactly once, whatever stopped the walk — reaching
---- the end, or `MAX_ENTRIES`.
+--- the end, `MAX_ENTRIES`, or an unexpected error partway through (reported
+--- as `truncated`, since `load_gitignore` already screens out the one known
+--- crashing case and this is a last-resort net, not the primary defense).
 --- @param root string
 --- @param on_done fun(files: string[], dirs: string[], truncated: boolean)
 local function walk_async(root, on_done)
@@ -263,24 +311,37 @@ local function walk_async(root, on_done)
     end,
   })
   local function step()
-    for _ = 1, CHUNK do
-      local name, kind = iter()
-      if name == nil then
-        on_done(files, dirs, false)
-        return
-      end
-      if (#files + #dirs) >= MAX_ENTRIES then
-        on_done(files, dirs, true)
-        return
-      end
-      local chain = chain_for(root, built, parent_of(name))
-      if kind == 'directory' then
-        if not SKIP_DIRS[vim.fs.basename(name)] and not is_ignored(chain, name, true) then
-          dirs[#dirs + 1] = name
+    local ok, done, truncated = pcall(function()
+      for _ = 1, CHUNK do
+        local name, kind = iter()
+        if name == nil then
+          return true, false
         end
-      elseif kind == 'file' and not is_ignored(chain, name, false) then
-        files[#files + 1] = name
+        if (#files + #dirs) >= MAX_ENTRIES then
+          return true, true
+        end
+        local chain = chain_for(root, built, parent_of(name))
+        if kind == 'directory' then
+          if not SKIP_DIRS[vim.fs.basename(name)] and not is_ignored(chain, name, true) then
+            dirs[#dirs + 1] = name
+          end
+        elseif kind == 'file' and not is_ignored(chain, name, false) then
+          files[#files + 1] = name
+        end
       end
+      return false, false
+    end)
+    if not ok then
+      vim.notify(
+        'nvime: completion walk hit an error, results may be incomplete: ' .. tostring(done),
+        vim.log.levels.WARN
+      )
+      on_done(files, dirs, true)
+      return
+    end
+    if done then
+      on_done(files, dirs, truncated)
+      return
     end
     vim.schedule(step)
   end
@@ -297,7 +358,10 @@ function M.refresh(root, on_done)
     return
   end
   cache[root] = 'loading'
-  walk_async(root, function(files, dirs, truncated)
+  -- Belt and suspenders: `walk_async` catches its own per-step errors, but a
+  -- failure before the first step (e.g. `vim.fs.dir` itself) must still clear
+  -- `'loading'` rather than wedge completion for this root forever.
+  local ok, err = pcall(walk_async, root, function(files, dirs, truncated)
     table.sort(files)
     table.sort(dirs)
     cache[root] = { files = files, dirs = dirs, truncated = truncated }
@@ -305,6 +369,10 @@ function M.refresh(root, on_done)
       on_done()
     end
   end)
+  if not ok then
+    cache[root] = nil
+    vim.notify('nvime: completion refresh failed for ' .. root .. ': ' .. tostring(err), vim.log.levels.WARN)
+  end
 end
 
 --- Whether `root` has a ready cache — never triggers a fetch itself.

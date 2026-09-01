@@ -251,7 +251,12 @@ function M.open(opts)
       vim.b[self.prompt_buf].nvime_root = opts.root
       vim.bo[self.prompt_buf].completefunc = "v:lua.require('nvime.completion').completefunc"
       vim.bo[self.prompt_buf].omnifunc = "v:lua.require('nvime.completion').completefunc"
-      completion.refresh(opts.root)
+      -- A completion problem must never stop the panel from opening: the
+      -- walk guards itself, but this catches anything that still escapes.
+      local ok, err = pcall(completion.refresh, opts.root)
+      if not ok then
+        vim.notify('nvime: completion unavailable for this panel: ' .. tostring(err), vim.log.levels.WARN)
+      end
     end
   end
   vim.bo[self.buf].modifiable = false
