@@ -34,6 +34,10 @@ local state = {
   --- The last SessionView the sidecar returned, or nil when none is selected.
   session = nil,
   request_id = nil,
+  --- The `big.attach` request following a build this editor did not start.
+  attach_id = nil,
+  --- The last event seq rendered, so a re-attach picks up rather than repeats.
+  seq = 0,
   subscribed = false,
 }
 
@@ -55,11 +59,18 @@ function M.describe(session)
     return 'no big change selected'
   end
   local label = session.display or 'drafting'
-  if session.heldElsewhere and (label == 'building' or label == 'triaging') then
+  local mid_build = label == 'building' or label == 'triaging'
+  -- A live runner first: it looks exactly like "another editor" from the lock
+  -- alone, and the two mean opposite things — one is a build to attach to,
+  -- the other is somebody else's session to leave alone.
+  if session.runnerLive and mid_build then
+    return label .. ' (detached — keeps running)'
+  end
+  if session.heldElsewhere and mid_build then
     return label .. ' (in another editor)'
   end
-  if session.detached and (label == 'building' or label == 'triaging') then
-    return label .. ' (detached — sidecar gone)'
+  if session.detached and mid_build then
+    return session.runner ~= nil and 'build died — resumable' or (label .. ' (detached — sidecar gone)')
   end
   if label == 'merged' then
     local merge = session.merge or {}
@@ -120,14 +131,21 @@ function M.next_step(session)
   if session == nil then
     return nil
   end
+  if session.runnerLive then
+    return 'building outside the editor — s steers it, <C-c> stops it, closing Neovim does not'
+  end
   if session.heldElsewhere then
     return 'another editor is driving this — watch it there, or <C-r> to pick a different change'
+  end
+  local building = 'building — <C-c> stops it'
+  if session.detached then
+    building = session.runner ~= nil and 'the build died part-way — type `resume` to pick it back up, or `discard`'
+      or 'type `resume` to pick the build back up, or `discard` to throw it away'
   end
   local hints = {
     drafting = session.spec ~= nil and 'answer, revise, or type `approve` to build it'
       or 'answer the question to sharpen the spec',
-    building = session.detached and 'type `resume` to pick the build back up, or `discard` to throw it away'
-      or 'building — <C-c> stops it',
+    building = building,
     triaging = session.detached and 'the build is done but not sorted — type `retriage`, or `discard`'
       or 'sorting the diff into threads',
     reviewing = '<C-t> opens the review threads — a defends one, M merges when none are left',
@@ -147,17 +165,41 @@ local function render_next_step()
   end
 end
 
---- Adopts a view the sidecar returned as the panel's current session.
+--- Adopts a view the sidecar returned as the panel's current session. Switching
+--- session resets the replay cursor: seqs are per session's own build log.
 local function adopt(session)
+  if session ~= nil and (state.session == nil or state.session.id ~= session.id) then
+    state.seq = 0
+  end
   state.session = session
   refresh_status()
 end
 
-local function on_event(name, params)
-  if params.id ~= nil and params.id ~= state.request_id then
+--- One steer, as it moves from accepted to read by the build agent.
+local function render_steer(params)
+  if params.state == 'queued' then
+    surface():interject('  you → build · ' .. (params.text or ''), 'NvimeUser')
     return
   end
-  if name == 'big.started' then
+  surface():interject('  you → build · delivered', 'NvimeDim')
+end
+
+local function on_event(name, params)
+  if params.id ~= nil and params.id ~= state.request_id and params.id ~= state.attach_id then
+    return
+  end
+  -- Replayed events carry the seq they were recorded at, so a re-attach can
+  -- ask for what follows instead of repainting the whole build.
+  if type(params.seq) == 'number' and params.seq > state.seq then
+    state.seq = params.seq
+  end
+  if name == 'big.steer' then
+    render_steer(params)
+  elseif name == 'big.done' then
+    surface():interject('  → build finished', 'NvimeSession')
+  elseif name == 'big.failed' then
+    show_error({ message = params.message or 'the detached build failed', detail = params.detail })
+  elseif name == 'big.started' then
     surface():interject(string.format('  %s · %s', params.phase, params.model or '?'), 'NvimeDim')
   elseif name == 'big.delta' then
     surface():push_delta(params.text)
@@ -183,10 +225,17 @@ local function subscribe_once()
   state.subscribed = true
 end
 
---- Panel closed mid-run. The build keeps going in the sidecar on purpose — it
---- is meant to survive the editor — so only the streaming subscription ends.
+--- Panel closed mid-run. The build keeps going on purpose — it is meant to
+--- survive the editor — so only this editor's view of it ends. An attach is
+--- told to let go, or the sidecar keeps a socket open onto a surface that is
+--- no longer there.
 local function on_panel_close()
   state.request_id = nil
+  local attached = state.attach_id
+  state.attach_id = nil
+  if attached ~= nil then
+    agent.request('big.detach', { target = attached }, function() end)
+  end
 end
 
 --- Sends one request that streams into the panel, and settles the surface once.
@@ -454,18 +503,90 @@ function M.resume_or_discard(word)
   end
 end
 
+--- `<C-c>`: stop whatever this editor is following. A detached build is asked
+--- through its own control channel — the sidecar routes that — so stopping it
+--- writes its terminal event and releases its claim rather than killing it.
 function M.cancel()
-  if state.request_id == nil then
+  local target = state.request_id or state.attach_id
+  if target == nil then
     vim.notify('nvime: no big change is running', vim.log.levels.INFO)
     return
   end
-  agent.request('big.cancel', { target = state.request_id }, function(err, result)
+  agent.request('big.cancel', { target = target }, function(err, result)
     if err ~= nil then
       show_error(err)
     elseif not result.cancelled then
       vim.notify('nvime: it had already finished', vim.log.levels.INFO)
     end
   end)
+end
+
+--- Follows a build this editor did not start: replays what it has not seen,
+--- then follows live. Read-only, and several editors may watch one build.
+function M.attach()
+  local session = state.session
+  if session == nil or not session.runnerLive then
+    return false
+  end
+  if state.request_id ~= nil or state.attach_id ~= nil then
+    return false
+  end
+  surface():append('— attached to the build running outside the editor —', 'NvimeSession')
+  surface():begin_stream(nil)
+  surface():start_activity()
+  agent.request('big.attach', {
+    root = state.root,
+    sessionId = session.id,
+    after = state.seq,
+  }, function(err)
+    state.attach_id = nil
+    surface():stop_activity()
+    surface():finish_stream()
+    if err ~= nil then
+      show_error(err)
+    end
+    M.refresh()
+  end, {
+    -- Following a build lasts as long as the build does.
+    no_deadline = true,
+    on_sent = function(id)
+      state.attach_id = id
+    end,
+  })
+  return true
+end
+
+--- Hands one message to a running build. It reaches the build agent at the
+--- next turn boundary; nothing here interrupts the turn in flight, and a steer
+--- is context only — it cannot widen what the build is allowed to touch.
+--- @param text string
+function M.steer(text)
+  assert(type(text) == 'string' and text ~= '', 'big.steer needs a message')
+  assert(state.session ~= nil, 'big.steer needs a selected session')
+  agent.request('big.steer', {
+    root = state.root,
+    sessionId = state.session.id,
+    text = text,
+  }, function(err)
+    if err ~= nil then
+      show_error(err)
+      M.refresh()
+    end
+  end)
+end
+
+--- `s`: the compose float for one steer.
+function M.open_steer()
+  local session = state.session
+  if session == nil or not session.runnerLive then
+    vim.notify('nvime: no build is running outside the editor to steer', vim.log.levels.INFO)
+    return
+  end
+  require('nvime.compose').open({
+    title = ' steer the build ',
+    hint = 'one nudge — the build reads it at its next turn, without stopping',
+    on_submit = M.steer,
+  })
 end
 
 --- `<C-t>`: the review threads for the selected session.
@@ -526,6 +647,9 @@ function M.select(id)
     end
     render_spec(result.session.spec)
     render_next_step()
+    -- Opening a session whose build is still going picks the stream back up
+    -- where this editor left it, which is what makes a restart continuous.
+    M.attach()
   end)
 end
 
@@ -545,13 +669,16 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'describe it · <CR> send · <C-r> sessions · <C-t> threads · <C-c> stop',
+    prompt_hint = 'describe it · <CR> send · <C-r> sessions · <C-t> threads · s steer · <C-c> stop',
     on_submit = M.send,
     on_close = on_panel_close,
     keys = {
       { mode = 'n', lhs = '<C-r>', fn = M.pick_session, desc = 'nvime: pick a big change', where = 'both' },
       { mode = 'n', lhs = '<C-t>', fn = M.open_threads, desc = 'nvime: open the review threads', where = 'both' },
       { mode = 'n', lhs = '<C-c>', fn = M.cancel, desc = 'nvime: stop the big change', where = 'both' },
+      -- Scrollback only: `s` is `substitute` in the prompt buffer, which the
+      -- user is typing in.
+      { mode = 'n', lhs = 's', fn = M.open_steer, desc = 'nvime: steer the running build' },
     },
   })
   if not existed then
@@ -559,14 +686,19 @@ function M.open()
     surface():append('describe the change you want. claude will ask until the spec is real.', 'NvimeDim')
     surface():append('`approve` builds it. type a difficulty to move the gate: vibe/easy/medium/extreme.', 'NvimeDim')
     surface():append('<C-r> lists the big changes already going in this project.', 'NvimeDim')
+    surface():append(
+      'a build keeps running when you close Neovim — reopen it here to pick the stream back up.',
+      'NvimeDim'
+    )
     surface():blank()
   end
 end
 
---- Whether a big-change request is in flight from this editor.
+--- Whether this editor is following a big change — its own run, or a detached
+--- build it attached to.
 --- @return boolean
 function M.is_running()
-  return state.request_id ~= nil
+  return state.request_id ~= nil or state.attach_id ~= nil
 end
 
 --- Test hook: the live big-change state.

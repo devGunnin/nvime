@@ -6,7 +6,9 @@ local panel = require('nvime.panel')
 local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
 
 --- Stands in for the sidecar: records requests, replies from a canned table.
-local fake = { requests = {}, replies = {}, subscriber = nil }
+--- A method with no canned reply stays IN FLIGHT, the way a streaming request
+--- really does, and `fake.settle` answers it later.
+local fake = { requests = {}, replies = {}, pending = {}, subscriber = nil }
 
 function fake.request(method, params, cb, opts)
   fake.requests[#fake.requests + 1] = { method = method, params = params, opts = opts }
@@ -16,7 +18,21 @@ function fake.request(method, params, cb, opts)
   local reply = fake.replies[method]
   if reply ~= nil then
     cb(reply.err, reply.result)
+    return
   end
+  fake.pending[#fake.pending + 1] = { method = method, cb = cb }
+end
+
+--- Answers the oldest in-flight `method`. Returns whether one was waiting.
+function fake.settle(method, err, result)
+  for index, entry in ipairs(fake.pending) do
+    if entry.method == method then
+      table.remove(fake.pending, index)
+      entry.cb(err, result)
+      return true
+    end
+  end
+  return false
 end
 
 local real_agent = require('nvime.agent')
@@ -65,6 +81,8 @@ local function session(overrides)
     display = 'drafting',
     detached = false,
     heldElsewhere = false,
+    runnerLive = false,
+    runner = nil,
     worktreeExists = false,
     hasDiff = false,
     counts = { total = 0, open = 0, substantial = 0 },
@@ -76,7 +94,7 @@ end
 
 local function open_on(path)
   panel.close('big')
-  fake.requests, fake.replies = {}, {}
+  fake.requests, fake.replies, fake.pending = {}, {}, {}
   local live = big.state()
   live.root, live.session, live.request_id = nil, nil, nil
   config.setup({})
@@ -407,6 +425,146 @@ describe('big change session states', function()
     ok(fake.subscriber ~= nil, 'the panel subscribes to sidecar events')
     fake.subscriber('big.denied', { id = 999, tool = 'Write', reason = 'outside' })
     ok(not has_line('refused'), "another run's events are not this panel's")
+    cleanup()
+  end)
+end)
+
+--- A build running outside the editor: the runner holds the claim, so the
+--- session is `heldElsewhere` too — telling the two apart is the whole point.
+local function running_detached(overrides)
+  return session(vim.tbl_extend('force', {
+    state = 'building',
+    display = 'building',
+    heldElsewhere = true,
+    runnerLive = true,
+    runner = { pid = 4242, socket = '/run/x.sock', log = '/store/events.ndjson', what = 'build' },
+  }, overrides or {}))
+end
+
+describe('a build that outlives the editor', function()
+  it('reads as a detached build rather than as another editor', function()
+    eq('building (detached — keeps running)', big.describe(running_detached()))
+    ok(big.next_step(running_detached()):match('s steers it'), 'and says how to steer it')
+  end)
+
+  it('reads a killed runner as a build that died, still resumable', function()
+    local dead = session({
+      state = 'building',
+      display = 'building',
+      detached = true,
+      runner = { pid = 4242, socket = '/run/x.sock', log = '/l', what = 'build' },
+    })
+    eq('build died — resumable', big.describe(dead))
+    ok(big.next_step(dead):match('died part%-way'), 'and offers resume rather than pretending it is running')
+  end)
+
+  it('keeps calling a sidecar-scoped detached build what it always was', function()
+    eq(
+      'building (detached — sidecar gone)',
+      big.describe(session({ display = 'building', detached = true })),
+      'no runner was ever recorded, so nothing died — the sidecar simply went'
+    )
+  end)
+
+  it('attaches when a session with a live build is opened, replaying from where it left off', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.open'] = { result = { session = running_detached() } }
+    big.select('abc123')
+    local attach = sent('big.attach')
+    ok(attach ~= nil, 'opening a running build follows it')
+    eq(0, attach.params.after, 'a panel that has seen nothing replays the whole build')
+    ok(attach.opts.no_deadline, 'following a build lasts as long as the build')
+    cleanup()
+  end)
+
+  it('resumes from the last event it rendered rather than repainting the build', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.open'] = { result = { session = running_detached() } }
+    big.select('abc123')
+    local id = big.state().attach_id
+    fake.subscriber('big.delta', { id = id, text = 'working', seq = 12 })
+    -- The stream drops (a sidecar restart), and the session is opened again.
+    ok(fake.settle('big.attach', { message = 'the sidecar went away' }))
+    big.select('abc123')
+    local attaches = vim.tbl_filter(function(request)
+      return request.method == 'big.attach'
+    end, fake.requests)
+    eq(12, attaches[#attaches].params.after)
+    cleanup()
+  end)
+
+  it('renders a steer as it is accepted and again when the agent reads it', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.open'] = { result = { session = running_detached() } }
+    big.select('abc123')
+    local id = big.state().attach_id
+    fake.subscriber('big.steer', { id = id, steerId = 1, text = 'use the retry helper', state = 'queued' })
+    ok(has_line('you → build · use the retry helper'), 'the steer is shown where the build stream is')
+    fake.subscriber('big.steer', { id = id, steerId = 1, state = 'delivered' })
+    ok(has_line('you → build · delivered'))
+    cleanup()
+  end)
+
+  it('sends a typed steer to the running build', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = running_detached()
+    big.steer('also add a --help flag')
+    local steer = sent('big.steer')
+    ok(steer ~= nil)
+    eq('also add a --help flag', steer.params.text)
+    eq('abc123', steer.params.sessionId)
+    cleanup()
+  end)
+
+  it('refuses to open the steer box when nothing is running outside the editor', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ display = 'reviewing' })
+    big.open_steer()
+    eq(nil, require('nvime.compose').current(), 'no float, and no request')
+    eq(nil, sent('big.steer'))
+    cleanup()
+  end)
+
+  it('opens the steer box on a live build, and sends what was typed', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = running_detached()
+    big.open_steer()
+    local float = require('nvime.compose').current()
+    ok(float ~= nil, 'the compose float is open')
+    vim.api.nvim_buf_set_lines(float.buf, 0, -1, false, { 'prefer the existing helper' })
+    vim.api.nvim_set_current_win(float.win)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, false, true), 'x', false)
+    eq('prefer the existing helper', sent('big.steer').params.text)
+    cleanup()
+  end)
+
+  it('stops a build it is only attached to, through the same key that stops its own', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.open'] = { result = { session = running_detached() } }
+    big.select('abc123')
+    local id = big.state().attach_id
+    fake.replies['big.cancel'] = { result = { cancelled = true } }
+    big.cancel()
+    eq(id, sent('big.cancel').params.target, 'the attach is what gets stopped')
+    cleanup()
+  end)
+
+  it('lets go of the stream when the panel closes, without stopping the build', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.open'] = { result = { session = running_detached() } }
+    big.select('abc123')
+    local id = big.state().attach_id
+    panel.close('big')
+    eq(id, sent('big.detach').params.target)
+    eq(nil, sent('big.cancel'), 'closing a window never stops a build')
     cleanup()
   end)
 end)

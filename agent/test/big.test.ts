@@ -13,7 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { BIG_AUTO_ALLOWED, BigService, buildWriteBoundary, gateDial, type SessionView } from '../src/big.js';
 import { BigStore } from '../src/bigstore.js';
 import { ProtocolError } from '../src/protocol.js';
@@ -131,14 +131,16 @@ beforeEach(() => {
   turns = [];
   service = new BigService({
     sdk: {
-      query: ({ prompt, options }: { prompt: string; options?: Options }) => {
+      query: ({ prompt, options }: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Options }) => {
         assert.ok(options !== undefined, 'the service always builds options');
-        calls.push({ prompt, options });
+        assert.equal(typeof prompt, 'string', 'these turns are driven by a plain prompt');
+        const text = prompt as string;
+        calls.push({ prompt: text, options });
         const turn = turns.shift();
-        assert.ok(turn !== undefined, `no scripted turn for: ${prompt.slice(0, 60)}`);
+        assert.ok(turn !== undefined, `no scripted turn for: ${text.slice(0, 60)}`);
         return (async function* () {
           if (turn.act !== undefined) await turn.act(options);
-          for (const frame of typeof turn.frames === 'function' ? turn.frames(prompt) : turn.frames) yield frame;
+          for (const frame of typeof turn.frames === 'function' ? turn.frames(text) : turn.frames) yield frame;
         })();
       },
     },
@@ -1683,13 +1685,14 @@ describe('the model dial', () => {
     // The reviewer's export-low probe: a shell-level effort override, which
     // `subscriptionEnv` alone does not strip because it is not a credential.
     const gateEnvService = new BigService({
-      sdk: { query: ({ prompt, options }: { prompt: string; options?: Options }) => {
-        calls.push({ prompt, options: options as Options });
+      sdk: { query: ({ prompt, options }: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Options }) => {
+        const text = prompt as string;
+        calls.push({ prompt: text, options: options as Options });
         const turn = turns.shift();
-        assert.ok(turn !== undefined, `no scripted turn for: ${prompt.slice(0, 60)}`);
+        assert.ok(turn !== undefined, `no scripted turn for: ${text.slice(0, 60)}`);
         return (async function* () {
           if (turn.act !== undefined) await turn.act(options as Options);
-          for (const frame of typeof turn.frames === 'function' ? turn.frames(prompt) : turn.frames) yield frame;
+          for (const frame of typeof turn.frames === 'function' ? turn.frames(text) : turn.frames) yield frame;
         })();
       } },
       store,

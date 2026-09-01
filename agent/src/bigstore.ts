@@ -109,6 +109,25 @@ export interface BigTurn {
   at: number;
 }
 
+/**
+ * The detached process driving this session's build, while one is driving it.
+ *
+ * Written by the runner itself, under the same run claim as everything else it
+ * writes, and cleared when it finishes. A record that still names a runner
+ * whose claim has gone stale is exactly how "the build died" is told apart from
+ * "the build is running" — nothing here is guessed from a pid alone.
+ */
+export interface BigRunner {
+  pid: number;
+  /** The control socket. Derived, not authoritative: recorded for diagnosis. */
+  socket: string;
+  /** The append-only event log this run is writing. */
+  log: string;
+  /** `build`, `revise`, or `rebase`. */
+  what: string;
+  startedAt: number;
+}
+
 export interface BigSession {
   version: 1;
   id: string;
@@ -132,6 +151,8 @@ export interface BigSession {
   /** Recorded at approval, moved by a rebase. Outlives the clone. */
   base: BigBase | null;
   worktree: BigWorktree | null;
+  /** The detached runner driving the build, or null when none is recorded. */
+  runner: BigRunner | null;
   /** Set once, when the change landed. Null for everything not yet merged. */
   merge: BigMerge | null;
   /** Pinned right before the current or most recent land attempt. Null before
@@ -206,6 +227,11 @@ export class BigStore {
     return join(this.dirFor(repoRoot, id), 'lock.json');
   }
 
+  /** The session's append-only build log. Survives every run, and is replayed. */
+  logPathFor(repoRoot: string, id: string): string {
+    return join(this.dirFor(repoRoot, id), 'events.ndjson');
+  }
+
   create(repoRoot: string, title: string, difficulty: Difficulty = DEFAULT_DIFFICULTY): BigSession {
     if (title.trim() === '') throw new ProtocolError('bad_request', 'a big change needs a title');
     const now = Date.now();
@@ -227,6 +253,7 @@ export class BigStore {
       gradeSessionId: null,
       base: null,
       worktree: null,
+      runner: null,
       merge: null,
       landAttempt: null,
       diffId: null,
@@ -632,6 +659,9 @@ function withDefaults(session: BigSession): BigSession {
   if (session.gradeSessionId === undefined) session.gradeSessionId = null;
   if (session.merge === undefined) session.merge = null;
   if (session.landAttempt === undefined) session.landAttempt = null;
+  // A record written before detached builds existed has no runner, which is
+  // the same thing as never having had one: nothing is driving it.
+  if (session.runner === undefined) session.runner = null;
   // The base used to live on the worktree, before it had to outlive the clone.
   const legacy = session.worktree as unknown as { baseCommit?: string; baseBranch?: string | null } | null;
   if (session.base == null && legacy?.baseCommit !== undefined) {

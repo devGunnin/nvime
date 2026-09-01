@@ -1,6 +1,13 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { EffortLevel, HookInput, HookJSONOutput, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  EffortLevel,
+  HookInput,
+  HookJSONOutput,
+  Options,
+  SDKMessage,
+  SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import {
   composeBuildPrompt,
   composeExplainPrompt,
@@ -15,16 +22,18 @@ import {
 } from './bigprompts.js';
 import {
   clearCapture,
+  isLockLive,
   reconcile,
   transition,
   type BigBase,
+  type BigRunner,
   type BigSession,
   type BigSpec,
   type BigState,
   type BigStore,
   type Reality,
 } from './bigstore.js';
-import type { EmitEvent, SdkBindings } from './chat.js';
+import type { EmitEvent } from './chat.js';
 import { dialOptions, type Dial } from './dial.js';
 import { stripGateEnv, subscriptionEnv, type Env } from './env.js';
 import {
@@ -62,6 +71,7 @@ import {
 } from './merge.js';
 import { classifyBuildTool, READ_ONLY_TOOLS, realPathOf } from './policy.js';
 import { ProtocolError } from './protocol.js';
+import { steeredPrompt, type SteerControl } from './steer.js';
 import { readUsage, textDelta, toolCalls, type RunUsage } from './stream.js';
 import {
   carryForward,
@@ -153,12 +163,31 @@ export const MAX_ANSWER_CHARS = 8000;
 /** The most threads one grading round may cover. Past it, answer in batches. */
 export const MAX_ANSWERS_PER_ROUND = 20;
 
+/**
+ * The SDK surface big-change mode needs. Wider than chat's on one axis only:
+ * a build turn may be driven by a stream of user messages rather than a single
+ * prompt string, which is what makes steering a running build possible.
+ */
+export interface BigSdk {
+  query: (params: {
+    prompt: string | AsyncIterable<SDKUserMessage>;
+    options?: Options;
+  }) => AsyncIterable<SDKMessage>;
+}
+
 export interface BigServiceOptions {
-  sdk: Pick<SdkBindings, 'query'>;
+  sdk: BigSdk;
   store: BigStore;
   claudePath: string;
   env: Env;
   emit: EmitEvent;
+  /**
+   * Set only in the detached runner: the queue a running build reads steers
+   * from, and the identity it records on the session while it holds the claim.
+   * Absent in the sidecar, where a build is editor-scoped and unsteerable.
+   */
+  steering?: SteerControl | undefined;
+  runner?: BigRunner | undefined;
 }
 
 /** What the picker lists: enough to choose, without the diff or the blocks. */
@@ -181,6 +210,12 @@ export interface SessionView extends BigSession {
   detached: boolean;
   /** Another editor holds a live claim: read-only here, not ours to resume. */
   heldElsewhere: boolean;
+  /**
+   * The recorded detached runner is really behind the claim. Distinct from
+   * `heldElsewhere`, which cannot tell a runner from a second Neovim: a live
+   * runner is something to attach to and steer, another editor is not.
+   */
+  runnerLive: boolean;
   worktreeExists: boolean;
   hasDiff: boolean;
   counts: TriageCounts;
@@ -228,14 +263,18 @@ interface TurnSpec {
   resume: string | null;
   schema?: Record<string, unknown>;
   worktreeRoot?: string;
+  /** Present only for a build turn a runner can steer; see `steer.ts`. */
+  steering?: SteerControl | undefined;
 }
 
 export class BigService {
-  readonly #sdk: Pick<SdkBindings, 'query'>;
+  readonly #sdk: BigSdk;
   readonly #store: BigStore;
   readonly #claudePath: string;
   readonly #env: Env;
   readonly #emit: EmitEvent;
+  readonly #steering: SteerControl | undefined;
+  readonly #runner: BigRunner | undefined;
   readonly #running = new Map<number, Run>();
   readonly #runningByKey = new Map<string, number>();
 
@@ -245,6 +284,8 @@ export class BigService {
     this.#claudePath = options.claudePath;
     this.#env = subscriptionEnv(options.env);
     this.#emit = options.emit;
+    this.#steering = options.steering;
+    this.#runner = options.runner;
   }
 
   get activeRuns(): number {
@@ -406,6 +447,7 @@ export class BigService {
         resume,
         worktreeRoot: worktree.path,
         dial: { model: params.model, effort: params.effort },
+        steering: this.#steering,
       });
       session.buildSessionId = result.sessionId;
       session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
@@ -452,6 +494,7 @@ export class BigService {
         resume: session.buildSessionId,
         worktreeRoot: worktree.path,
         dial: { model: params.model, effort: params.effort },
+        steering: this.#steering,
       });
       session.buildSessionId = result.sessionId;
       session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
@@ -839,6 +882,7 @@ export class BigService {
       resume: session.buildSessionId,
       worktreeRoot: clonePath,
       dial,
+      steering: this.#steering,
     });
     session.buildSessionId = result.sessionId;
     session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
@@ -1110,6 +1154,12 @@ export class BigService {
     const run: Run = { requestId, key, abort: new AbortController() };
     this.#running.set(requestId, run);
     this.#runningByKey.set(key, requestId);
+    // Holding the claim makes this process the record's only writer, so this is
+    // the one place the runner field is set and cleared. A sidecar run clears
+    // whatever a dead runner left behind; a runner writes its own identity, and
+    // the clear in `finally` is skipped when it is killed — which is precisely
+    // how a record ends up saying "a runner was driving this, and it is gone".
+    this.#writeRunnerField(session, this.#runner ?? null);
     try {
       return await body();
     } catch (cause) {
@@ -1117,17 +1167,50 @@ export class BigService {
     } finally {
       this.#running.delete(requestId);
       this.#runningByKey.delete(key);
+      this.#writeRunnerField(session, null);
       lock.release();
     }
   }
 
-  /** One agent turn, streamed into the panel and reduced to its result. */
+  /**
+   * Rewrites ONLY the runner field, on the record as it stands now. A run's
+   * body re-reads and saves the record (`merge` and `answer` both do), so
+   * saving the object this call started with would silently revert their work.
+   */
+  #writeRunnerField(session: BigSession, runner: BigRunner | null): void {
+    try {
+      const held = this.#store.read(session.repoRoot, session.id);
+      if (held === null || sameRunner(held.runner, runner)) {
+        session.runner = runner;
+        return;
+      }
+      held.runner = runner;
+      this.#store.save(held);
+      session.runner = runner;
+    } catch (cause) {
+      // A store removed under a live run. The run itself will fail on its own
+      // work; swallowing this would only hide which write went first.
+      process.stderr.write(`nvime: could not record the build runner: ${messageOf(cause)}\n`);
+    }
+  }
+
+  /**
+   * One agent turn, streamed into the panel and reduced to its result.
+   *
+   * A steerable turn is the same turn driven from a stream of user messages
+   * instead of one string: each steer the SDK takes runs as a further turn, so
+   * this loop keeps the LAST result rather than returning the first, and only
+   * ends the input stream once nothing is left to deliver.
+   */
   async #turn(requestId: number, spec: TurnSpec): Promise<TurnResult> {
     const abort = this.#abortFor(requestId);
     const options = this.#buildOptions(requestId, spec, abort);
+    const steering = spec.steering;
+    const prompt = steering === undefined ? spec.prompt : steeredPrompt(spec.prompt, steering);
     let sessionId = spec.resume ?? '';
+    let last: TurnResult | null = null;
 
-    for await (const message of this.#sdk.query({ prompt: spec.prompt, options })) {
+    for await (const message of this.#sdk.query({ prompt, options })) {
       if (message.type === 'system' && message.subtype === 'init') {
         sessionId = message.session_id;
         this.#emit('big.started', { id: requestId, phase: spec.phase, sessionId, model: message.model });
@@ -1149,15 +1232,25 @@ export class BigService {
           const detail = message.subtype === 'success' ? message.result : message.errors.join('; ');
           throw new ProtocolError('agent_error', `the ${spec.phase} turn failed (${message.subtype})`, detail);
         }
-        return {
+        last = {
           sessionId: sessionId === '' ? message.session_id : sessionId,
           text: message.result,
           structured: message.structured_output,
           usage: readUsage(message.usage),
           costUsd: message.total_cost_usd,
         };
+        if (steering === undefined) return last;
+        // Deciding this synchronously with the result is what makes it safe: a
+        // steer cannot arrive between reading the counts and closing the queue,
+        // so nothing accepted from an editor is ever dropped unrun.
+        const owed = steering.awaitingTurn;
+        steering.noteTurn();
+        if (!owed && steering.pending === 0 && (message.queued_turn_count ?? 0) === 0) {
+          steering.close('the build has finished — start a revision instead');
+        }
       }
     }
+    if (last !== null) return last;
     throw new ProtocolError('agent_error', `the ${spec.phase} turn ended without a result`);
   }
 
@@ -1249,11 +1342,31 @@ export class BigService {
       display: mergeable ? 'mergeable' : session.state,
       detached: result.detached,
       heldElsewhere: result.heldElsewhere,
+      runnerLive: this.#runnerLive(session),
       worktreeExists: this.#store.hasWorktree(session),
       hasDiff: this.#store.hasDiff(session),
       counts,
     };
   }
+
+  /**
+   * Whether the runner the record names is really the one holding the claim.
+   * Both halves are needed: a recorded runner alone proves nothing (it is left
+   * behind when one is killed), and a live claim alone could be a second
+   * Neovim — the pid is what ties the claim to the process the record names.
+   */
+  #runnerLive(session: BigSession): boolean {
+    const runner = session.runner;
+    if (runner === null) return false;
+    const lock = this.#store.readLock(session);
+    return lock !== null && lock.pid === runner.pid && isLockLive(lock);
+  }
+}
+
+/** Whether two runner records name the same run. Null is "nobody driving it". */
+function sameRunner(a: BigRunner | null, b: BigRunner | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.pid === b.pid && a.startedAt === b.startedAt;
 }
 
 /**

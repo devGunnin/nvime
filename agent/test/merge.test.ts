@@ -111,6 +111,7 @@ function session(overrides: Partial<BigSession> = {}): BigSession {
     gradeSessionId: null,
     base: { commit: baseCommit, branch: 'main' },
     worktree: null,
+    runner: null,
     merge: null,
     landAttempt: null,
     diffId: 'd1',
