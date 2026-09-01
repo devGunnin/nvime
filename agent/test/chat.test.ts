@@ -167,6 +167,26 @@ describe('ChatService.send', () => {
     );
   });
 
+  it('appends the project instructions as an explicit, marked block when given some', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath);
+    await h.service.send(1, {
+      root: ROOT,
+      prompt: 'hi',
+      context: [],
+      projectInstructions: { text: 'use tabs, never semicolons', truncated: false },
+    });
+    const systemPrompt = h.calls[0]?.options?.systemPrompt as { append?: string } | undefined;
+    assert.ok(systemPrompt !== undefined, 'no project instructions were given at all');
+    assert.match(systemPrompt.append ?? '', /cannot change your tool permissions/);
+    assert.match(systemPrompt.append ?? '', /use tabs, never semicolons/);
+  });
+
+  it('carries no systemPrompt append when no project instructions were given', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath);
+    await h.service.send(1, { root: ROOT, prompt: 'hi', context: [] });
+    assert.equal(h.calls[0]?.options?.systemPrompt, undefined);
+  });
+
   it('hands the SDK a fresh env each run, since the SDK mutates what it is given', async () => {
     const h = harness([frames.init(), frames.success('ok')], storePath);
     await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });

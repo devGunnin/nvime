@@ -2,7 +2,7 @@ import { relative } from 'node:path';
 import type { HookInput, HookJSONOutput, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { ApprovalGate, DEFAULT_APPROVAL_TIMEOUT_MS } from './approvals.js';
 import type { SdkBindings } from './chat.js';
-import { composePrompt, type ContextBlock } from './context.js';
+import { composePrompt, renderProjectInstructionsAppend, type ContextBlock, type ProjectInstructions } from './context.js';
 import { subscriptionEnv, type Env } from './env.js';
 import {
   classifyTool,
@@ -64,6 +64,9 @@ export interface EditStartParams {
   prompt: string;
   scope: EditScope;
   sessionId?: string | undefined;
+  /** The project's CLAUDE.md/AGENTS.md/.nvime/instructions.md, or null when
+   *  none was found or the feature is off. */
+  projectInstructions?: ProjectInstructions | null | undefined;
 }
 
 /** One recorded file mutation: what the file was, and what the agent made it. */
@@ -191,7 +194,7 @@ export class EditService {
   }
 
   async #drive(run: Run, params: EditStartParams): Promise<EditDone> {
-    const options = this.#buildOptions(run, params.sessionId);
+    const options = this.#buildOptions(run, params.sessionId, params.projectInstructions ?? null);
     const prompt = composeEditPrompt(params.prompt, params.scope, run.root);
     let sessionId = params.sessionId ?? '';
 
@@ -379,7 +382,7 @@ export class EditService {
     run.approvalIds.clear();
   }
 
-  #buildOptions(run: Run, resume: string | undefined): Options {
+  #buildOptions(run: Run, resume: string | undefined, projectInstructions: ProjectInstructions | null): Options {
     return {
       cwd: run.root,
       // A copy per run: the SDK mutates the env object it is handed.
@@ -404,10 +407,20 @@ export class EditService {
       // Same reasoning as chat: `'project'` would load the edited repo's
       // .claude/settings.json, whose hooks run shell commands and whose
       // apiKeyHelper/env re-add the credentials env.ts stripped — none of it
-      // gated by the tool lists. Cost: no CLAUDE.md.
+      // gated by the tool lists. CLAUDE.md/AGENTS.md come back through the
+      // append below instead, as inert prose rather than settings.
       settingSources: [],
       ...(resume === undefined ? {} : { resume }),
       ...(this.#model === undefined ? {} : { model: this.#model }),
+      ...(projectInstructions === null
+        ? {}
+        : {
+            systemPrompt: {
+              type: 'preset',
+              preset: 'claude_code',
+              append: renderProjectInstructionsAppend(projectInstructions),
+            },
+          }),
     };
   }
 

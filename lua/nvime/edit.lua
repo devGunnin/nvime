@@ -304,6 +304,7 @@ function M.send(text)
     prompt = text,
     scope = scope,
     sessionId = state.session_id,
+    projectInstructions = context.project_instructions(state.root),
   }, function(err, result)
     state.request_id = nil
     approval.dismiss_all()

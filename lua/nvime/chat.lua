@@ -214,6 +214,7 @@ function M.send(text, extra)
     prompt = text,
     context = blocks,
     sessionId = state.session_id,
+    projectInstructions = context.project_instructions(state.root),
   }, function(err, result)
     state.request_id = nil
     surface():stop_activity()

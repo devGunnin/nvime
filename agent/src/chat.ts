@@ -6,7 +6,13 @@ import type {
   SDKSessionInfo,
   SessionMessage,
 } from '@anthropic-ai/claude-agent-sdk';
-import { composePrompt, stripContextSections, type ContextBlock } from './context.js';
+import {
+  composePrompt,
+  renderProjectInstructionsAppend,
+  stripContextSections,
+  type ContextBlock,
+  type ProjectInstructions,
+} from './context.js';
 import { subscriptionEnv, type Env } from './env.js';
 import { ProtocolError } from './protocol.js';
 import { SessionStore } from './sessions.js';
@@ -48,6 +54,9 @@ export interface SendParams {
   prompt: string;
   context: ContextBlock[];
   sessionId?: string | undefined;
+  /** The project's CLAUDE.md/AGENTS.md/.nvime/instructions.md, or null when
+   *  none was found or the feature is off. */
+  projectInstructions?: ProjectInstructions | null | undefined;
 }
 
 export interface ChatDone {
@@ -167,7 +176,7 @@ export class ChatService {
     resume: string | undefined,
     abort: AbortController,
   ): Promise<ChatDone> {
-    const options = this.#buildOptions(params.root, resume, abort);
+    const options = this.#buildOptions(params.root, resume, abort, params.projectInstructions ?? null);
     const prompt = composePrompt(params.prompt, params.context, params.root);
     let sessionId = resume ?? '';
 
@@ -223,7 +232,12 @@ export class ChatService {
     throw new ProtocolError('agent_error', 'the agent stream ended without a result');
   }
 
-  #buildOptions(root: string, resume: string | undefined, abort: AbortController): Options {
+  #buildOptions(
+    root: string,
+    resume: string | undefined,
+    abort: AbortController,
+    projectInstructions: ProjectInstructions | null,
+  ): Options {
     return {
       cwd: root,
       // A copy per run: the SDK mutates the env object it is handed.
@@ -239,10 +253,20 @@ export class ChatService {
       // .claude/settings.json — whose `hooks` run shell commands and whose
       // `apiKeyHelper`/`env` re-add the credential env.ts just stripped, none
       // of them gated by the tool lists. Read-only cannot be voidable by the
-      // repo being read. Cost: no CLAUDE.md.
+      // repo being read. CLAUDE.md/AGENTS.md come back through the append
+      // below instead, as inert prose rather than settings.
       settingSources: [],
       ...(resume === undefined ? {} : { resume }),
       ...(this.#model === undefined ? {} : { model: this.#model }),
+      ...(projectInstructions === null
+        ? {}
+        : {
+            systemPrompt: {
+              type: 'preset',
+              preset: 'claude_code',
+              append: renderProjectInstructionsAppend(projectInstructions),
+            },
+          }),
     };
   }
 

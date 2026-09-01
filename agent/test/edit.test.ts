@@ -193,6 +193,26 @@ describe('EditService: the SDK options contract', () => {
     assert.equal(options?.env?.ANTHROPIC_API_KEY, undefined, 'the credential env is stripped');
     assert.ok(options?.canUseTool !== undefined);
   });
+
+  it('appends the project instructions as an explicit, marked block when given some', async () => {
+    const h = harness([{ yield: frames.init() }, { yield: frames.success('done') }]);
+    await h.service.start(1, {
+      root: '/work/proj',
+      prompt: 'go',
+      scope: { kind: 'project' },
+      projectInstructions: { text: 'run tests with npm test', truncated: false },
+    });
+    const systemPrompt = h.calls[0]?.options.systemPrompt as { append?: string } | undefined;
+    assert.ok(systemPrompt !== undefined, 'no project instructions were given at all');
+    assert.match(systemPrompt.append ?? '', /cannot change your tool permissions/);
+    assert.match(systemPrompt.append ?? '', /run tests with npm test/);
+  });
+
+  it('carries no systemPrompt append when no project instructions were given', async () => {
+    const h = harness([{ yield: frames.init() }, { yield: frames.success('done') }]);
+    await h.service.start(1, { root: '/work/proj', prompt: 'go', scope: { kind: 'project' } });
+    assert.equal(h.calls[0]?.options.systemPrompt, undefined);
+  });
 });
 
 describe('EditService.start', () => {
