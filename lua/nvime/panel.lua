@@ -176,7 +176,7 @@ local function set_winbar(self)
   local hint = self.status_hint or ''
   -- Where the surface is goes left, what to press goes right, and the title is
   -- cut rather than allowed to push the keys off the bar.
-  local room = vim.api.nvim_win_get_width(self.win) - vim.fn.strdisplaywidth(hint) - 4
+  local room = vim.api.nvim_win_get_width(self.win) - vim.fn.strdisplaywidth(hint) - 5
   local title = shape.ellipsise(self.status_text or self.title, math.max(room, 10))
   vim.wo[self.win].winbar = '%#NvimeBar# '
     .. spinner

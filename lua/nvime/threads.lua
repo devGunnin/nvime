@@ -307,15 +307,15 @@ local function status()
   if not win_valid(view.tree_win) then
     return
   end
-  -- Less the bar's own leading and trailing space, and one more: a bar that
-  -- exactly fills its window makes nvim scroll it and show a `<` instead.
-  local gate = shape.ellipsise(M.gate_status(view.session), vim.api.nvim_win_get_width(view.tree_win) - 3)
+  -- Well inside the border: a bar that exactly fills its window makes nvim
+  -- scroll it and show a `<` instead.
+  local gate = shape.ellipsise(M.gate_status(view.session), vim.api.nvim_win_get_width(view.tree_win) - 4)
   vim.wo[view.tree_win].winbar = '%#NvimeBar# ' .. M.escape_winbar(gate) .. ' %=%#NvimeBar# '
   if not win_valid(view.pane_win) then
     return
   end
   local keys = M.keys_hint(view.session)
-  local room = vim.api.nvim_win_get_width(view.pane_win) - vim.fn.strdisplaywidth(keys) - 3
+  local room = vim.api.nvim_win_get_width(view.pane_win) - vim.fn.strdisplaywidth(keys) - 4
   local title = shape.ellipsise((view.session or {}).title or 'big change', math.max(room, 12))
   vim.wo[view.pane_win].winbar = '%#NvimeBar# '
     .. M.escape_winbar(title)
