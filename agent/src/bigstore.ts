@@ -655,6 +655,9 @@ export function clearCapture(session: BigSession): void {
   session.diffId = null;
   session.diffCapturedAt = null;
   session.diffBytes = 0;
+  // A pinned land attempt names a commit built from THIS capture; a revision
+  // that clears the capture must stop honoring it as "already landed".
+  session.landAttempt = null;
 }
 
 function requireId(id: string): string {

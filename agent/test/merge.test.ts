@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import type { BigSession } from '../src/bigstore.js';
+import { clearCapture, type BigSession } from '../src/bigstore.js';
 import { DEFAULT_DIFFICULTY } from '../src/gate.js';
 import { branchNameFor, checkMerge, expectedTree, landDiff, type MergeRefusalCode } from '../src/merge.js';
 import { ProtocolError } from '../src/protocol.js';
@@ -445,6 +445,27 @@ describe('a merge whose record write did not survive', () => {
     });
     assert.deepEqual(refusals.map((refusal) => refusal.code), ['merged-elsewhere']);
     assert.match(refusals[0]?.message ?? '', new RegExp(landed.commit.slice(0, 8)));
+  });
+
+  it('stops pointing at a landed-but-unrecorded commit once the session is revised', async () => {
+    // The reported bug: the record write after landing THIS branch failed, so
+    // the session still says `reviewing` with the old land attempt pinned.
+    // The reader then revises the change (a new build capture), which must
+    // disown that pin — otherwise the REVISED session is told it "already
+    // landed" as the stale, pre-revision commit.
+    const tree = await ownTree();
+    await landDiff(landRequest({ branch: OWN_BRANCH }));
+    const revised = session({
+      base: { commit: baseCommit, branch: 'main' },
+      landAttempt: { branch: OWN_BRANCH, tree },
+    });
+    clearCapture(revised);
+    const refusals = await checkMerge(revised, {
+      diff: parseUnifiedDiff(patch()),
+      counts: { total: 1, open: 0, substantial: 1, defended: 1 },
+      heldElsewhere: false,
+    });
+    assert.deepEqual(refusals.map((refusal) => refusal.code), ['base-moved']);
   });
 
   it('still calls somebody else\'s commit a base that moved', async () => {

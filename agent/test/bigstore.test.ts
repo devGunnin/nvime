@@ -10,6 +10,7 @@ import { setTimeout } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
   BigStore,
+  clearCapture,
   LOCK_HEARTBEAT_MS,
   LOCK_STALE_MS,
   MAX_CONVERSATION_TURNS,
@@ -308,6 +309,22 @@ describe('reconcile', () => {
     const result = reconcile(session, reality({ diffExists: true }));
     assert.deepEqual(result, { changed: false, detached: false, heldElsewhere: false });
     assert.equal(session.state, 'reviewing');
+  });
+});
+
+describe('clearCapture', () => {
+  it('nulls a pinned land attempt along with the capture it was built from', () => {
+    // A land attempt pins branch+tree from the CAPTURE it lands (bigstore.ts's
+    // `withDefaults` doc). Once a revision disowns that capture, the pin must
+    // go with it — otherwise a later, unrelated capture is judged against a
+    // land attempt that describes different content (P4 gate-reviewer LOW).
+    const session = built();
+    session.diffId = 'abc';
+    session.diffCapturedAt = Date.now();
+    session.landAttempt = { branch: 'nvime/big/old', tree: 'f'.repeat(40) };
+    clearCapture(session);
+    assert.equal(session.landAttempt, null);
+    assert.equal(session.diffId, null);
   });
 });
 
