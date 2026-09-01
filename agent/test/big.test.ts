@@ -243,6 +243,71 @@ describe('big intake', () => {
     assert.equal(view.conversation[1]?.text, 'prose only');
   });
 
+  it('carries the choice the question offered onto the turn that asked it', () => {
+    const created = service.create(repo, 'version flag', 'medium');
+    turns.push({
+      frames: [
+        frames.init(),
+        frames.result('q', {
+          ready: false,
+          message: 'which version?',
+          options: { options: [{ label: 'a constant' }, { label: 'pyproject' }] },
+        }),
+      ],
+    });
+    return service.intake(1, { root: repo, id: created.id, message: 'a flag' }).then((view) => {
+      const turn = view.conversation[1];
+      assert.equal(turn?.role, 'agent');
+      assert.deepEqual(turn?.options?.options, [{ label: 'a constant' }, { label: 'pyproject' }]);
+    });
+  });
+
+  it('carries no choice when the model asked an open question', async () => {
+    const created = service.create(repo, 'version flag', 'medium');
+    turns.push({ frames: [frames.init(), frames.result('q', { ready: false, message: 'which file?' })] });
+    const view = await service.intake(1, { root: repo, id: created.id, message: 'a flag' });
+    assert.equal(view.conversation[1]?.options, undefined);
+  });
+
+  /**
+   * A schema turn's streamed text is a draft of a payload the panel renders
+   * from the PARSED result. Streaming it showed the reader the working out and
+   * then the answer again, as two `claude` turns saying the same thing.
+   */
+  it('streams no deltas for a turn whose answer is a structured payload', async () => {
+    const created = service.create(repo, 'version flag', 'medium');
+    turns.push({
+      frames: [
+        frames.init(),
+        frames.delta('{"ready":false,'),
+        frames.delta('"message":"which file?"}'),
+        frames.result('q', { ready: false, message: 'which file?' }),
+      ],
+    });
+    await service.intake(1, { root: repo, id: created.id, message: 'a flag' });
+    assert.deepEqual(events.filter((entry) => entry.event === 'big.delta'), []);
+    assert.ok(events.some((entry) => entry.event === 'big.started'), 'the reader still sees the turn begin');
+  });
+
+  /** `StructuredOutput` is how a schema turn returns its payload. Announcing
+   *  it in the transcript describes the wire, not the task. */
+  it('does not report the SDK’s own structured-output tool as work', async () => {
+    const created = service.create(repo, 'version flag', 'medium');
+    turns.push({
+      frames: [
+        frames.init(),
+        frames.tool('t1', 'Read', { file_path: `${repo}/tool.py` }),
+        frames.tool('t2', 'StructuredOutput', {}),
+        frames.result('q', { ready: false, message: 'which file?' }),
+      ],
+    });
+    await service.intake(1, { root: repo, id: created.id, message: 'a flag' });
+    assert.deepEqual(
+      events.filter((entry) => entry.event === 'big.tool').map((entry) => entry.params.tool),
+      ['Read'],
+    );
+  });
+
   it('refuses more intake once the spec is approved', async () => {
     const view = await approved();
     await assert.rejects(

@@ -5,6 +5,7 @@ local agent = require('nvime.agent')
 local config = require('nvime.config')
 local context = require('nvime.context')
 local models = require('nvime.models')
+local options = require('nvime.options')
 local panel = require('nvime.panel')
 local picker = require('nvime.picker')
 
@@ -38,7 +39,21 @@ local state = {
   -- `restored` goes true. At most one: a second send while still restoring
   -- replaces it, since only the latest prompt matters.
   pending_send = nil,
+  -- The choice the last reply offered, while it is still unanswered:
+  -- { block, handle }. At most one — a new turn retires the old question.
+  offer = nil,
 }
+
+--- Retires the question the last reply offered, giving its keys back. Called
+--- before every send, so a block can never outlive the turn that raised it.
+local function retire_offer()
+  local offer = state.offer
+  state.offer = nil
+  if offer ~= nil then
+    offer.handle.detach()
+  end
+  return offer
+end
 
 local function short(session_id)
   return session_id == nil and 'new session' or ('session ' .. session_id:sub(1, 8))
@@ -87,6 +102,9 @@ end
 --- Panel closed with a turn still running: nobody will read the reply, and the
 --- subscription pays for it either way, so stop it.
 local function on_panel_close()
+  -- The choice's keys are bound to a buffer that is going away; a handle left
+  -- behind would answer the next panel's question with the old one's block.
+  retire_offer()
   local target = state.request_id
   if target == nil then
     return
@@ -109,7 +127,7 @@ local function finish_restore()
     return
   end
   state.pending_send = nil
-  M.send(pending.text, pending.extra)
+  M.send(pending.text, pending.extra, pending.echo)
 end
 
 --- Renders the resumed transcript so a reopened panel is not mysteriously empty.
@@ -177,13 +195,24 @@ end
 
 --- @param text string the prompt
 --- @param extra table|nil an additional context block (a visual selection)
-function M.send(text, extra)
+--- @param echo string|nil what the transcript shows instead of `text`; a
+---   picked option reads back as the choice, not as the number that made it
+function M.send(text, extra, echo)
   assert(type(text) == 'string', 'chat.send needs prompt text')
   assert(type(state.root) == 'string', 'chat.send needs an open panel with a captured root')
+  local offer = retire_offer()
+  if offer ~= nil and echo == nil then
+    -- They typed rather than pressed. A bare number in range is still the
+    -- option they meant; anything else is their own words, sent as written.
+    local pick = options.pick_from_text(offer.block, text)
+    if pick ~= nil then
+      text, echo = pick, options.echo(pick)
+    end
+  end
   if not state.restored then
     -- Restore (session lookup + history) is still running: sending now would
     -- guess at the session and let the resumed transcript land mid-stream.
-    state.pending_send = { text = text, extra = extra }
+    state.pending_send = { text = text, extra = extra, echo = echo }
     return
   end
   if state.request_id ~= nil then
@@ -196,7 +225,7 @@ function M.send(text, extra)
   end
 
   surface():append('you', 'NvimeUser')
-  surface():append_markdown(text, 'NvimeUserBody')
+  surface():append_markdown(echo or text, 'NvimeUserBody')
   for _, warning in ipairs(warnings) do
     surface():append('  ' .. warning, 'NvimeError')
   end
@@ -223,6 +252,7 @@ function M.send(text, extra)
     end
     state.session_id = result.sessionId
     refresh_status(string.format('%d out · $%.4f', result.usage.output, result.costUsd))
+    M.offer(result.options)
   end, {
     -- A turn streams for as long as the model takes; <C-c> bounds it, not a timer.
     no_deadline = true,
@@ -230,6 +260,26 @@ function M.send(text, extra)
       state.request_id = id
     end,
   })
+end
+
+--- Renders the choice a reply offered, and binds the keys that answer it.
+--- A payload the panel cannot use is simply not a choice: the prose question
+--- it arrived with is already in the transcript, and that still gets answered.
+--- @param raw any the `options` block the sidecar returned, or nil
+function M.offer(raw)
+  local block = options.parse(raw)
+  local live = panel.get(PANEL)
+  if block == nil or live == nil then
+    return
+  end
+  local handle = options.attach(live, block, function(reply)
+    state.offer = nil
+    M.send(reply, nil, options.echo(reply))
+  end, function()
+    state.offer = nil
+    live:focus()
+  end)
+  state.offer = { block = block, handle = handle }
 end
 
 --- Sends the visual selection with its file and line range attached.

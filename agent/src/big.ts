@@ -418,7 +418,13 @@ export class BigService {
     // but nothing here will invent a spec the user would then approve.
     const text = answer?.message ?? result.text;
     if (answer?.spec != null) session.spec = answer.spec;
-    session.conversation.push({ role: 'agent', text, at: Date.now() });
+    const options = answer?.options ?? null;
+    session.conversation.push({
+      role: 'agent',
+      text,
+      at: Date.now(),
+      ...(options === null ? {} : { options }),
+    });
     this.#store.save(session);
     return this.#view(session);
   }
@@ -1266,7 +1272,11 @@ export class BigService {
           sessionId = message.session_id;
           this.#emit('big.started', { id: requestId, phase: spec.phase, sessionId, model: message.model });
         } else if (message.type === 'stream_event') {
-          const delta = textDelta(message.event);
+          // A schema turn's text is a draft of a payload the caller renders
+          // from the PARSED result. Streaming it showed the reader the working
+          // out and then the answer again, as two `claude` turns saying the
+          // same thing; the spinner covers the wait instead.
+          const delta = spec.schema === undefined ? textDelta(message.event) : null;
           if (delta !== null) this.#emit('big.delta', { id: requestId, text: delta });
         } else if (message.type === 'assistant') {
           if (message.error === 'authentication_failed') {

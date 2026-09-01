@@ -14,6 +14,7 @@ import {
 } from './context.js';
 import { dialOptions, type Dial } from './dial.js';
 import { subscriptionEnv, type Env } from './env.js';
+import { CHAT_OPTIONS_RULE, extractOptions, type OptionsBlock } from './options.js';
 import { ProtocolError } from './protocol.js';
 import { SessionStore } from './sessions.js';
 import { readUsage, textDelta, toolCalls, type RunUsage } from './stream.js';
@@ -65,6 +66,8 @@ export interface ChatDone {
   numTurns: number;
   usage: RunUsage;
   costUsd: number;
+  /** The choice this reply offered, when the model opted into one. */
+  options: OptionsBlock | null;
 }
 
 export interface SessionSummary {
@@ -174,7 +177,13 @@ export class ChatService {
     abort: AbortController,
   ): Promise<ChatDone> {
     const options = this.#buildOptions(params, resume, abort);
-    const prompt = composePrompt(params.prompt, params.context, params.root, params.projectInstructions ?? null);
+    const prompt = composePrompt(
+      params.prompt,
+      params.context,
+      params.root,
+      params.projectInstructions ?? null,
+      CHAT_OPTIONS_RULE,
+    );
     let sessionId = resume ?? '';
 
     try {
@@ -214,12 +223,16 @@ export class ChatService {
           }
           this.#authOk = true;
           this.#store.remember(params.root, sessionId);
+          // The panel swallowed the options fence as it streamed; lift the
+          // block out of the text so the stored turn reads the same way.
+          const offered = extractOptions(message.result);
           return {
             sessionId,
-            text: message.result,
+            text: offered.text,
             numTurns: message.num_turns,
             usage: readUsage(message.usage),
             costUsd: message.total_cost_usd,
+            options: offered.options,
           };
         }
       }

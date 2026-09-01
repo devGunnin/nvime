@@ -10,6 +10,7 @@ local config = require('nvime.config')
 local context = require('nvime.context')
 local models = require('nvime.models')
 local organization = require('nvime.organization')
+local options = require('nvime.options')
 local panel = require('nvime.panel')
 local picker = require('nvime.picker')
 local threads = require('nvime.threads')
@@ -43,7 +44,21 @@ local state = {
   --- The last event seq rendered, so a re-attach picks up rather than repeats.
   seq = 0,
   subscribed = false,
+  --- The choice the last intake question offered, while it is still
+  --- unanswered: { block, handle }. At most one — a new turn retires it.
+  offer = nil,
 }
+
+--- Retires the question the last turn offered, giving its keys back. Called
+--- before every send, so a block can never outlive the turn that raised it.
+local function retire_offer()
+  local offer = state.offer
+  state.offer = nil
+  if offer ~= nil then
+    offer.handle.detach()
+  end
+  return offer
+end
 
 local function show_error(err)
   surface():interject('! ' .. (err.message or 'the big change failed'), 'NvimeError')
@@ -103,26 +118,35 @@ local function refresh_status()
   surface():status(string.format('%s · %s', session.title, M.describe(session)))
 end
 
+--- The spec, as `label   value` rows. The LABEL is the dim part; the value is
+--- the spec itself and reads in body, like everything else anyone said. The
+--- whole block used to be one grey wall in which the labels and the substance
+--- looked exactly alike.
 local function render_spec(spec)
   if spec == nil then
     return
   end
-  local self = surface()
-  self:append('spec', 'NvimeHeading')
-  self:append('  goal      ' .. spec.goal, 'NvimeDim')
+  local rows = { { 'goal', spec.goal } }
   if spec.approach ~= nil and spec.approach ~= '' then
-    self:append('  approach  ' .. spec.approach, 'NvimeDim')
+    rows[#rows + 1] = { 'approach', spec.approach }
   end
-  local sections = {
-    { 'scope', spec.scope },
-    { 'accept', spec.acceptance },
-    { 'not', spec.outOfScope },
-  }
-  for _, section in ipairs(sections) do
+  for _, section in ipairs({ { 'scope', spec.scope }, { 'accept', spec.acceptance }, { 'not', spec.outOfScope } }) do
     for _, item in ipairs(section[2] or {}) do
-      self:append(string.format('  %-9s %s', section[1], item), 'NvimeDim')
+      rows[#rows + 1] = { section[1], item }
     end
   end
+
+  local lines, marks = {}, {}
+  for _, row in ipairs(rows) do
+    local label = string.format('  %-9s ', row[1])
+    lines[#lines + 1] = label .. row[2]
+    marks[#marks + 1] = { row = #lines, col = 0, end_col = #label, hl = 'NvimeDim' }
+    marks[#marks + 1] = { row = #lines, col = #label, end_col = #lines[#lines], hl = 'NvimeBody' }
+  end
+
+  local self = surface()
+  self:append('spec', 'NvimeHeading')
+  self:append_marked(lines, marks)
   self:blank()
 end
 
@@ -245,6 +269,9 @@ end
 --- told to let go, or the sidecar keeps a socket open onto a surface that is
 --- no longer there.
 local function on_panel_close()
+  -- The choice's keys are bound to a buffer that is going away; a handle left
+  -- behind would answer the next panel's question with the old one's block.
+  retire_offer()
   state.request_id = nil
   local attached = state.attach_id
   state.attach_id = nil
@@ -257,12 +284,16 @@ end
 --- @param method string
 --- @param params table
 --- @param done fun(session: table) called with the returned SessionView
-local function stream(method, params, done)
+--- @param speaker string|nil the header for what streams, or nil when nothing
+---   does. An intake turn answers with a structured payload the caller renders
+---   afterwards, so its stream carries only tool lines and heading them
+---   `claude` would announce a turn that says nothing.
+local function stream(method, params, done, speaker)
   if state.request_id ~= nil then
     vim.notify('nvime: this big change is already running (<C-c> to stop it)', vim.log.levels.WARN)
     return
   end
-  surface():begin_stream('claude', 'NvimeAgentBody')
+  surface():begin_stream(speaker, speaker ~= nil and 'NvimeAgentBody' or nil)
   surface():start_activity()
   agent.request(method, params, function(err, result)
     state.request_id = nil
@@ -356,10 +387,31 @@ function M.ask(text)
       surface():append('claude', 'NvimeAgent')
       surface():append_markdown(last.text, 'NvimeAgentBody')
       surface():blank()
+      M.offer(last.options)
     end
     render_spec(session.spec)
     render_next_step()
+  end, nil)
+end
+
+--- Renders the choice an intake question offered, and binds the keys that
+--- answer it. A payload the panel cannot use is simply not a choice: the prose
+--- question is already in the transcript, and that still gets answered.
+--- @param raw any the `options` block the sidecar returned, or nil
+function M.offer(raw)
+  local block = options.parse(raw)
+  local live = panel.get(PANEL)
+  if block == nil or live == nil then
+    return
+  end
+  local handle = options.attach(live, block, function(reply)
+    state.offer = nil
+    M.send(reply, options.echo(reply))
+  end, function()
+    state.offer = nil
+    live:focus()
   end)
+  state.offer = { block = block, handle = handle }
 end
 
 --- Freezes the spec and records the base commit; `M.build` makes the clone.
@@ -423,14 +475,14 @@ end
 --- Runs (or resumes) the build, then captures and triages what it produced.
 function M.build()
   assert(state.session ~= nil, 'big.build needs a selected session')
-  stream('big.build', build_and_triage_params(), settle_threads)
+  stream('big.build', build_and_triage_params(), settle_threads, 'claude')
 end
 
 --- `retriage`: sorts an already-built change into threads again, without
 --- re-running the build agent over work it has already done.
 function M.capture()
   assert(state.session ~= nil, 'big.capture needs a selected session')
-  stream('big.capture', build_and_triage_params(), settle_threads)
+  stream('big.capture', build_and_triage_params(), settle_threads, 'claude')
 end
 
 --- Throws the clone and the record away. Only ever on an explicit `discard`.
@@ -455,11 +507,22 @@ end
 --- The panel's prompt. What it means depends on where the session is, and the
 --- panel says which words it is listening for at every step.
 --- @param text string
-function M.send(text)
+--- @param echo string|nil what the transcript shows instead of `text`; a
+---   picked option reads back as the choice, not as the number that made it
+function M.send(text, echo)
   assert(type(text) == 'string', 'big.send needs prompt text')
   assert(type(state.root) == 'string', 'big.send needs an open panel with a captured root')
+  local offer = retire_offer()
+  if offer ~= nil and echo == nil then
+    -- They typed rather than pressed. A bare number in range is still the
+    -- option they meant; anything else is their own words, sent as written.
+    local pick = options.pick_from_text(offer.block, text)
+    if pick ~= nil then
+      text, echo = pick, options.echo(pick)
+    end
+  end
   surface():append('you', 'NvimeUser')
-  surface():append_markdown(text, 'NvimeUserBody')
+  surface():append_markdown(echo or text, 'NvimeUserBody')
   surface():blank()
 
   if state.session == nil then
@@ -683,10 +746,17 @@ function M.select(id)
     adopt(result.session)
     local self = surface()
     self:append('— ' .. result.session.title .. ' —', 'NvimeSession')
-    for _, turn in ipairs(result.session.conversation or {}) do
+    local conversation = result.session.conversation or {}
+    for _, turn in ipairs(conversation) do
       self:append(turn.role == 'user' and 'you' or 'claude', turn.role == 'user' and 'NvimeUser' or 'NvimeAgent')
       self:append_markdown(turn.text, turn.role == 'user' and 'NvimeUserBody' or 'NvimeAgentBody')
       self:blank()
+    end
+    -- A question the reader never answered is still open; a session past
+    -- drafting has moved on and its old choices are history.
+    local last = conversation[#conversation]
+    if result.session.display == 'drafting' and last ~= nil and last.role == 'agent' then
+      M.offer(last.options)
     end
     render_spec(result.session.spec)
     render_next_step()

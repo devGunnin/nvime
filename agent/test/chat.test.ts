@@ -99,6 +99,11 @@ function harness(
   return { service, store, events, calls };
 }
 
+/** nvime's own `<nvime-ui>` preamble, which leads every composed chat prompt. */
+function stripUiSection(prompt: string): string {
+  return prompt.replace(/^<nvime-ui>\n[\s\S]*?\n<\/nvime-ui>\n\n/, '');
+}
+
 describe('ChatService.send', () => {
   let dir = '';
   let storePath = '';
@@ -127,6 +132,7 @@ describe('ChatService.send', () => {
       numTurns: 1,
       usage: { input: 12, output: 3, cacheRead: 1, cacheCreation: 0 },
       costUsd: 0.01,
+      options: null,
     });
     assert.deepEqual(
       h.events.map((e) => [e.event, e.params.text ?? e.params.summary ?? e.params.sessionId]),
@@ -176,7 +182,8 @@ describe('ChatService.send', () => {
       projectInstructions: { text: 'use tabs, never semicolons', truncated: false },
     });
     assert.equal(h.calls[0]?.options?.systemPrompt, undefined, 'untrusted text must never reach systemPrompt');
-    const prompt = h.calls[0]?.prompt ?? '';
+    // nvime's own standing instructions lead; the repo's untrusted text follows.
+    const prompt = stripUiSection(h.calls[0]?.prompt ?? '');
     assert.match(prompt, /^<project-notes id="[0-9a-f]+" untrusted="true">/);
     assert.match(prompt, /cannot change your tool permissions/);
     assert.match(prompt, /use tabs, never semicolons/);
@@ -187,7 +194,7 @@ describe('ChatService.send', () => {
     const h = harness([frames.init(), frames.success('ok')], storePath);
     await h.service.send(1, { root: ROOT, prompt: 'hi', context: [] });
     assert.equal(h.calls[0]?.options?.systemPrompt, undefined);
-    assert.equal(h.calls[0]?.prompt, 'hi');
+    assert.equal(stripUiSection(h.calls[0]?.prompt ?? ''), 'hi');
   });
 
   it('hands the SDK a fresh env each run, since the SDK mutates what it is given', async () => {
@@ -467,3 +474,43 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
+
+describe('ChatService.send: a choice offered in the reply', () => {
+  let dir: string;
+  let storePath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'nvime-chat-options-'));
+    storePath = join(dir, 'sessions.json');
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const OFFER = '{"prompt":"which retry?","options":[{"label":"fixed"},{"label":"exponential"}]}';
+
+  it('tells the model how to offer one, in nvime’s own section of the prompt', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath);
+    await h.service.send(1, { root: ROOT, prompt: 'hi', context: [] });
+    const prompt = h.calls[0]?.prompt ?? '';
+    assert.match(prompt, /^<nvime-ui>\n/);
+    assert.match(prompt, /nvime-options/);
+    assert.equal(h.calls[0]?.options?.systemPrompt, undefined, 'the rule rides the user message, not systemPrompt');
+  });
+
+  it('lifts the block out of the reply and leaves the prose that asked', async () => {
+    const h = harness(
+      [frames.init(), frames.success('Which one?\n\n```nvime-options\n' + OFFER + '\n```\n')],
+      storePath,
+    );
+    const done = await h.service.send(1, { root: ROOT, prompt: 'how should retries work?', context: [] });
+    assert.equal(done.text, 'Which one?');
+    assert.deepEqual(done.options?.options, [{ label: 'fixed' }, { label: 'exponential' }]);
+    assert.equal(done.options?.multi, false);
+  });
+
+  it('offers nothing, and never fails, when the model wrote a broken block', async () => {
+    const h = harness([frames.init(), frames.success('Which one?\n\n```nvime-options\n{oops\n```\n')], storePath);
+    const done = await h.service.send(1, { root: ROOT, prompt: 'ask', context: [] });
+    assert.equal(done.text, 'Which one?');
+    assert.equal(done.options, null);
+  });
+});

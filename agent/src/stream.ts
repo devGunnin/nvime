@@ -39,6 +39,13 @@ export interface ToolCall {
   summary: string;
 }
 
+/**
+ * The SDK's own plumbing, not work the reader asked for. `StructuredOutput` is
+ * how a `json_schema` turn returns its payload; announcing it in the transcript
+ * describes the wire, not the task.
+ */
+const INTERNAL_TOOLS = new Set(['StructuredOutput']);
+
 /** One dim status line per tool call in an assistant message, in call order. */
 export function toolCalls(message: unknown, cwd: string): ToolCall[] {
   const content = (message as { content?: unknown } | null)?.content;
@@ -47,6 +54,7 @@ export function toolCalls(message: unknown, cwd: string): ToolCall[] {
   for (const block of content) {
     const b = block as { type?: string; id?: string; name?: string; input?: Record<string, unknown> };
     if (b.type !== 'tool_use' || typeof b.name !== 'string') continue;
+    if (INTERNAL_TOOLS.has(b.name)) continue;
     out.push({
       id: typeof b.id === 'string' ? b.id : '',
       tool: b.name,

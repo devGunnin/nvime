@@ -179,8 +179,26 @@ Answer box (paste-blocked) ~
 6. CHAT                                                            *nvime-chat*
 
 A persistent, read-only conversation with full session history. Streaming
-markdown is rendered as it arrives, with fenced code highlighted by the real
-grammar for its language when a parser is installed.
+markdown is rendered as it arrives. nvime classifies every line itself and
+paints nothing else over it, so a line never changes colour between streaming
+and settled; markup delimiters are concealed, fenced code is set apart by its
+own ground, and a `---` separator becomes a short gap marker rather than a
+rule across the panel.
+
+Choices ~                                                       *nvime-options*
+    When the agent's question is a pick between alternatives rather than an
+    open one, it offers them and the panel renders them numbered, inline in
+    the conversation — in chat and in big-change intake alike. `1` to `9`
+    answers; a question that takes several answers toggles them and sends on
+    <CR>; `o`, or just typing in the prompt, answers in your own words, and
+    typing the number works too. Your pick reads back into the transcript as
+    `-> 2: Environment variable`, so the history still reads as dialogue.
+
+    The keys are buffer-local to the panel's scrollback — never bound while
+    you are typing in the prompt — and released the moment the question is
+    answered or the next turn starts. Intake carries the block in its
+    structured output; in chat the model opts in with a fenced
+    `nvime-options` block, which the panel swallows rather than showing.
 
 Context ~
     Write `@path/to/file` or `@path/to/dir` in a prompt and nvime attaches it:
@@ -248,6 +266,9 @@ Intake ~
     of scope) as schema-enforced structured output. No spec is ever invented
     from prose. Answer, revise, or type `approve`. Typing `vibe`, `easy`,
     `medium` or `extreme` while drafting moves the gate.
+
+    A question with discrete alternatives arrives as a numbered choice you
+    pick from with a keypress; see |nvime-options|.
 
 Build ~
     Approving records HEAD and returns; the build then makes a local clone of

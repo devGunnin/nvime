@@ -1,5 +1,6 @@
 import type { BigSpec } from './bigstore.js';
 import type { GateRound } from './gate.js';
+import { INTAKE_OPTIONS_RULE, OPTIONS_SCHEMA, parseOptionsBlock, type OptionsBlock } from './options.js';
 import type { TriageBlock } from './triage.js';
 
 /**
@@ -24,6 +25,7 @@ export const INTAKE_SCHEMA: Record<string, unknown> = {
       type: 'string',
       description: 'the next question when not ready; otherwise a short plain-language playback of the spec',
     },
+    options: OPTIONS_SCHEMA,
     spec: {
       type: 'object',
       additionalProperties: false,
@@ -46,6 +48,7 @@ const INTAKE_INSTRUCTION = [
   'answer yourself by reading the code. When nothing material is left open, set ready to true and',
   'fill in the spec: goal, scope, approach, acceptance criteria, and what is explicitly out of scope.',
   'Never set ready true with a spec you had to guess at.',
+  INTAKE_OPTIONS_RULE,
 ].join(' ');
 
 /** The first intake turn. Later turns are plain replies on the same session. */
@@ -270,6 +273,8 @@ export interface IntakeAnswer {
   ready: boolean;
   message: string;
   spec: BigSpec | null;
+  /** The choice this question offers, when it is a choice at all. */
+  options: OptionsBlock | null;
 }
 
 /**
@@ -283,8 +288,9 @@ export function parseIntakeOutput(raw: unknown): IntakeAnswer | null {
   const message = typeof answer.message === 'string' ? answer.message.trim() : '';
   const spec = parseSpec(answer.spec);
   if (message === '' && spec === null) return null;
-  // Ready without a spec is a contradiction; the answer is treated as a question.
-  return { ready: answer.ready === true && spec !== null, message, spec };
+  // A finished spec is not a question, so it carries no choice to make.
+  const ready = answer.ready === true && spec !== null;
+  return { ready, message, spec, options: ready ? null : parseOptionsBlock(answer.options) };
 }
 
 function parseSpec(raw: unknown): BigSpec | null {

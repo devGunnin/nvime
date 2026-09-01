@@ -87,7 +87,6 @@ function M.resolve()
     added = pick({ 'Added', 'diffAdded', 'DiagnosticOk', 'String' }, 'fg') or FALLBACK.ok,
     changed = pick({ 'Changed', 'diffChanged', 'DiagnosticInfo', 'Function' }, 'fg') or FALLBACK.agent,
     removed = pick({ 'Removed', 'diffRemoved', 'DiagnosticError', 'ErrorMsg' }, 'fg') or FALLBACK.error,
-    code = pick({ 'String', 'Constant' }, 'fg') or fg,
   }
   p.surface = M.blend(p.fg, bg, ALPHA.surface)
   p.user_surface = M.blend(p.accent, bg, ALPHA.speaker)
@@ -100,6 +99,48 @@ function M.resolve()
   return p
 end
 
+--- Every group a conversation line can carry, by the role it plays. A text
+--- group outside this table is a colour the reader has to learn twice.
+---
+---   body   what the conversation says
+---   dim    metadata about it: tool lines, details, guidance, de-emphasis
+---   accent what to press, and what is chosen
+---   role   who is speaking, and the machine's own transitions
+---   error  what failed
+---
+--- The diff tier (added/changed/removed, and the badges built from them) is a
+--- separate axis and deliberately outside this table: it colours what changed,
+--- not what is being said. `tests/lua/palette_spec.lua` pins every group here
+--- to exactly one of the five, so a new group cannot add a sixth colour.
+M.ROLE_GROUPS = {
+  NvimeBody = 'body',
+  NvimeCode = 'body',
+  NvimeFile = 'body',
+  NvimeInlineCode = 'body',
+  NvimeDim = 'dim',
+  NvimeFence = 'dim',
+  NvimeLabel = 'dim',
+  NvimeAccent = 'accent',
+  NvimeActivity = 'accent',
+  NvimeHeading = 'accent',
+  NvimeKey = 'accent',
+  NvimeOptionKey = 'accent',
+  NvimeSelected = 'accent',
+  NvimeUser = 'accent',
+  NvimeWarn = 'accent',
+  NvimeAgent = 'role',
+  NvimeSession = 'role',
+  NvimeError = 'error',
+  NvimeTool = 'dim',
+}
+
+--- The foreground each tier resolves to, for the pin above.
+--- @param p table a resolved palette
+--- @return table<string, string>
+function M.tiers(p)
+  return { body = p.fg, dim = p.dim, accent = p.accent, role = p.agent, error = p.error }
+end
+
 --- nvime's own highlight groups, defined from the resolved palette.
 --- @param p table a resolved palette
 --- @return table<string, table>
@@ -108,22 +149,31 @@ function M.groups(p)
     return { fg = colour, bg = M.blend(colour, p.bg, ALPHA.badge), bold = true }
   end
   return {
+    -- The reading tiers. Everything a conversation line can be is one of these.
+    NvimeBody = { fg = p.fg },
+    NvimeDim = { fg = p.dim },
+    NvimeAccent = { fg = p.accent },
+    -- Role labels: the two speakers, bold so the eye finds the turn boundary.
     NvimeUser = { fg = p.accent, bold = true },
     NvimeAgent = { fg = p.agent, bold = true },
     NvimeUserBody = { bg = p.user_surface },
     NvimeAgentBody = { bg = p.agent_surface },
     NvimeTool = { fg = p.dim, bg = p.surface, italic = true },
     NvimeHeading = { fg = p.accent, bold = true },
-    NvimeCode = { fg = p.code, bg = p.code_bg },
+    -- Code is set apart by its GROUND, not by a foreground of its own: a sixth
+    -- text colour is exactly what this palette exists to prevent.
+    NvimeCode = { fg = p.fg, bg = p.code_bg },
     NvimeFence = { fg = p.dim, bg = p.code_bg },
-    NvimeInlineCode = { fg = p.code },
+    NvimeInlineCode = { fg = p.fg, bg = p.code_bg },
+    -- Weight and slant only: emphasis must not become a sixth colour.
     NvimeBold = { bold = true },
     NvimeItalic = { italic = true },
-    NvimeDim = { fg = p.dim },
-    NvimeActivity = { fg = p.session },
+    NvimeActivity = { fg = p.accent },
     NvimeError = { fg = p.error },
-    NvimeSession = { fg = p.session },
+    NvimeSession = { fg = p.agent },
     NvimeSelected = { fg = p.accent, bold = true },
+    -- The key that picks a choice offered in the conversation.
+    NvimeOptionKey = { fg = p.accent, bold = true },
     -- Chrome: a winbar reads as a bar, not as another line of scrollback.
     NvimeBar = { fg = p.session, bg = p.surface, bold = true },
     NvimeBarDim = { fg = p.dim, bg = p.surface },

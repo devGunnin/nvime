@@ -683,6 +683,147 @@ describe('a build that outlives the editor', function()
   end)
 end)
 
+describe('big change intake: a choice offered instead of a question', function()
+  local CHOICE = {
+    prompt = 'where should the version live?',
+    options = {
+      { label = 'a __version__ constant', detail = 'one source of truth in tool.py' },
+      { label = 'read it from pyproject.toml' },
+    },
+  }
+
+  --- The intake turn carries its choice on the agent turn it belongs to.
+  local function intake_reply(options, overrides)
+    return {
+      result = {
+        session = session(vim.tbl_extend('force', {
+          conversation = {
+            { role = 'user', text = 'a flag' },
+            { role = 'agent', text = 'which version?', options = options },
+          },
+        }, overrides or {})),
+      },
+    }
+  end
+
+  it('renders the choice under the question and answers it on a digit', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.create'] = { result = { session = session() } }
+    fake.replies['big.intake'] = intake_reply(CHOICE)
+    big.send('add a --version flag')
+
+    ok(has_line('^  1  a __version__ constant$'), vim.inspect(scrollback()))
+    ok(has_line('one source of truth in tool%.py'), 'the detail is rendered under its choice')
+    ok(big.state().offer ~= nil, 'the choice is live until it is answered')
+
+    fake.requests = {}
+    fake.replies['big.intake'] = intake_reply(nil)
+    vim.api.nvim_set_current_win(panel.get('big').win)
+    vim.api.nvim_feedkeys('1', 'x', false)
+    eq('1: a __version__ constant', sent('big.intake').params.message)
+    ok(has_line('^→ 1: a __version__ constant$'), 'the pick reads back as the reply it was')
+    cleanup()
+  end)
+
+  it('reads a typed number as the pick, and anything else as their own words', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.create'] = { result = { session = session() } }
+    fake.replies['big.intake'] = intake_reply(CHOICE)
+    big.send('add a --version flag')
+
+    fake.requests = {}
+    fake.replies['big.intake'] = intake_reply(nil)
+    big.send('2')
+    eq('2: read it from pyproject.toml', sent('big.intake').params.message)
+
+    fake.replies['big.intake'] = intake_reply(CHOICE)
+    big.send('ask again')
+    fake.requests = {}
+    fake.replies['big.intake'] = intake_reply(nil)
+    big.send('neither, use git describe')
+    eq('neither, use git describe', sent('big.intake').params.message)
+    eq(nil, big.state().offer)
+    cleanup()
+  end)
+
+  --- `approve` is a word the panel listens for. A pending choice must not
+  --- swallow it, and it is not a number, so it never could.
+  it('still hears approve while a choice is open', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.create'] = { result = { session = session() } }
+    fake.replies['big.intake'] = intake_reply(CHOICE, { spec = SPEC })
+    big.send('add a --version flag')
+    fake.requests = {}
+    big.send('approve')
+    ok(sent('big.approve') ~= nil, 'approve still approves')
+    eq(nil, big.state().offer)
+    cleanup()
+  end)
+
+  it('re-offers an unanswered choice when the session is opened again', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.open'] = intake_reply(CHOICE).result
+        and {
+          result = {
+            session = session({
+              conversation = { { role = 'agent', text = 'which version?', options = CHOICE } },
+            }),
+          },
+        }
+      or nil
+    big.select('abc123')
+    ok(big.state().offer ~= nil, 'a question nobody answered is still open')
+    ok(has_line('^  2  read it from pyproject%.toml$'), vim.inspect(scrollback()))
+    cleanup()
+  end)
+
+  it('does not re-offer a choice from a session that has moved past drafting', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.open'] = {
+      result = {
+        session = session({
+          state = 'reviewing',
+          display = 'reviewing',
+          conversation = { { role = 'agent', text = 'which version?', options = CHOICE } },
+        }),
+      },
+    }
+    big.select('abc123')
+    eq(nil, big.state().offer)
+    cleanup()
+  end)
+end)
+
+describe('big change spec rendering', function()
+  --- The whole block used to be one grey wall: the label and the substance
+  --- looked exactly alike, which is the report this task started from.
+  it('dims the label and leaves the spec itself in body colour', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.create'] = { result = { session = session() } }
+    fake.replies['big.intake'] = {
+      result = { session = session({ spec = SPEC, conversation = { { role = 'agent', text = 'here it is' } } }) },
+    }
+    big.send('add a --version flag')
+
+    ok(has_line('^  goal      add a %-%-version flag$'), vim.inspect(scrollback()))
+    local groups = {}
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(panel.get('big').buf, panel.NS, 0, -1, { details = true })) do
+      if mark[4].hl_group ~= nil then
+        groups[mark[4].hl_group] = true
+      end
+    end
+    ok(groups.NvimeDim, 'the labels are dim')
+    ok(groups.NvimeBody, 'and the values are not')
+    cleanup()
+  end)
+end)
+
 package.loaded['nvime.agent'] = real_agent
 package.loaded['nvime.big'] = nil
 package.loaded['nvime.threads'] = nil
