@@ -67,4 +67,9 @@ M.statusline = statusline.get
 --- anyone who has not wired `statusline()` into their own config.
 M.toggle_statusline = statusline.toggle_winbar
 
+--- `:Nvime doctor`: the full preflight as one glanceable pass/warn/fail list —
+--- node, the claude CLI, a best-effort login-file check, the sidecar build,
+--- and this repo's git identity (a big change's local merge needs one).
+M.doctor = require('nvime.doctor').open
+
 return M
