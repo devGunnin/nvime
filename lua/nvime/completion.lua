@@ -26,6 +26,37 @@ local CHUNK = 200
 --- root -> { files = string[], dirs = string[], truncated = boolean } | 'loading'
 local cache = {}
 
+--- Where the character class that opened at `open` ends.
+---
+--- POSIX, which is what git follows: a `]` in the FIRST position of a class is
+--- a literal member, not the terminator — `[]]` is how git spells "a literal
+--- `]`". Scanning for the first `]` from `open + 1` instead closes the class on
+--- that member and leaves an empty one behind.
+--- @param segment string
+--- @param open integer index of the `[`
+--- @return integer|nil index of the closing `]`
+local function class_end(segment, open)
+  local at = open + 1
+  local first = segment:sub(at, at)
+  if first == '!' or first == '^' then
+    at = at + 1
+  end
+  if segment:sub(at, at) == ']' then
+    at = at + 1
+  end
+  return segment:find(']', at, true)
+end
+
+--- `body` with the two characters Lua's class syntax reads specially escaped.
+--- An unescaped `]` would close the class early, and Lua then scans past the
+--- end of the pattern and raises "malformed pattern" — at MATCH time, not
+--- build time, so it escapes the load-time check and aborts the walk instead.
+--- @param body string
+--- @return string
+local function escape_class(body)
+  return (body:gsub('[%%%]]', '%%%0'))
+end
+
 --- One gitignore glob SEGMENT (no `/` of its own) translated to a Lua
 --- pattern: `*` -> any run of characters, `?` -> one character, `[...]` -> a
 --- Lua character class (a leading `!` negates, matching git's `[!...]`),
@@ -44,7 +75,7 @@ local function segment_to_pattern(segment)
       out[#out + 1] = '.'
       i = i + 1
     elseif char == '[' then
-      local close = segment:find(']', i + 1, true)
+      local close = class_end(segment, i)
       if close == nil then
         -- No matching `]`: git treats a malformed class as a literal `[`.
         out[#out + 1] = '%['
@@ -54,7 +85,7 @@ local function segment_to_pattern(segment)
         if vim.startswith(body, '!') then
           body = '^' .. body:sub(2)
         end
-        out[#out + 1] = '[' .. (body:gsub('%%', '%%%%')) .. ']'
+        out[#out + 1] = '[' .. escape_class(body) .. ']'
         i = close + 1
       end
     elseif char:match('%p') ~= nil then
