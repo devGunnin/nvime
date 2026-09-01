@@ -396,14 +396,20 @@ require('nvime').setup({
     claude = nil,               -- absolute path; nil resolves from PATH
     request_timeout_ms = 15000, -- control requests; a chat turn has no deadline
   },
+  -- Replaces the old, single global `agent.model` — `setup()` now refuses
+  -- that key outright, naming the lane it moved to.
   models = {
-    -- Per-lane model + reasoning-effort overrides; nil uses the CLI default.
-    -- `:Nvime model` layers a session-scoped override on top of these.
+    -- Per-lane model + reasoning-effort overrides; nil model uses the CLI
+    -- default. `:Nvime model` layers a session-scoped override on top of these.
     chat = { model = nil, effort = nil },
     edit = { model = nil, effort = nil },
     big_build = { model = nil, effort = nil },
     big_intake = { model = nil, effort = nil },
-    big_grade = { model = nil, effort = nil }, -- effort may not be 'low': grading is the gate
+    -- Triage decides what the gate reviews, and grading IS the gate: neither
+    -- may be 'low', and neither defaults to nil — an unset gate effort names
+    -- 'medium' rather than silently inheriting the shell's own.
+    big_triage = { model = nil, effort = 'medium' },
+    big_grade = { model = nil, effort = 'medium' },
     explain = { model = nil, effort = nil },
   },
   context = {

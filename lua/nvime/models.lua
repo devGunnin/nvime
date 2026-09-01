@@ -19,13 +19,13 @@ local function require_lane(caller, lane)
   )
 end
 
---- Grading is the comprehension gate; running it at the shallowest effort
---- would let the gate itself miss what it exists to catch. Mirrors the
---- config-time refusal in `nvime.config`, so a runtime override cannot do
---- what `setup()` already refuses.
-local function refuse_low_grade(lane, effort)
-  if lane == 'big_grade' and effort == 'low' then
-    error("nvime: models.big_grade.effort may not be 'low' — grading is the gate", 0)
+--- Triage decides what the gate reviews, and grading IS the gate; running
+--- either at the shallowest effort would let the gate miss what it exists to
+--- catch. Mirrors the config-time refusal in `nvime.config`, so a runtime
+--- override cannot do what `setup()` already refuses.
+local function refuse_low_gate(lane, effort)
+  if vim.tbl_contains(config.GATE_LANES, lane) and effort == 'low' then
+    error(string.format("nvime: models.%s.effort may not be 'low' — it feeds the comprehension gate", lane), 0)
   end
 end
 
@@ -39,10 +39,13 @@ function M.dial(lane)
   return overrides[lane] or config.get().models[lane]
 end
 
---- Sets a session-scoped override for `lane`, replacing whatever it held.
+--- Sets a session-scoped override for `lane`, layered field-by-field over the
+--- configured default — only the field actually chosen replaces it. Passing
+--- nil for a field means "leave it at the configured value", not "force the
+--- CLI default"; `M.reset` is how a lane goes back to nothing but config.
 --- @param lane string
---- @param model string|nil
---- @param effort string|nil one of `config.EFFORTS`, or nil for the CLI default
+--- @param model string|nil already-chosen model, or nil to keep the configured one
+--- @param effort string|nil one of `config.EFFORTS`, or nil to keep the configured one
 function M.set(lane, model, effort)
   require_lane('models.set', lane)
   if model ~= nil then
@@ -51,8 +54,11 @@ function M.set(lane, model, effort)
   if effort ~= nil then
     assert(vim.tbl_contains(config.EFFORTS, effort), 'models.set: bad effort ' .. tostring(effort))
   end
-  refuse_low_grade(lane, effort)
-  overrides[lane] = { model = model, effort = effort }
+  local configured = config.get().models[lane]
+  local merged_model = model ~= nil and model or configured.model
+  local merged_effort = effort ~= nil and effort or configured.effort
+  refuse_low_gate(lane, merged_effort)
+  overrides[lane] = { model = merged_model, effort = merged_effort }
 end
 
 --- Clears the session override for `lane`, back to its configured default.
@@ -62,17 +68,21 @@ function M.reset(lane)
   overrides[lane] = nil
 end
 
---- Whether `lane` differs from "use the CLI default": either the config or a
---- session override names a model or an effort.
+--- Whether `lane` differs from nvime's own shipped default: either the
+--- user's config or a session override changed it. A gate lane's shipped
+--- default effort is 'medium', never nil (see `nvime.config`) — that floor
+--- is not itself a change, only picking something else is.
 --- @param lane string
 --- @return boolean
 function M.active(lane)
   local dial = M.dial(lane)
-  return dial.model ~= nil or dial.effort ~= nil
+  local shipped = config.defaults.models[lane]
+  return dial.model ~= shipped.model or dial.effort ~= shipped.effort
 end
 
 --- One `<lane>:<model|->/<effort|->` entry per lane whose dial is active, in
---- `config.MODEL_LANES` order. Empty when every lane is at the CLI default.
+--- `config.MODEL_LANES` order. Empty when nothing differs from nvime's own
+--- shipped defaults.
 --- @return string[]
 function M.summary()
   local lines = {}
@@ -90,7 +100,12 @@ function M.reset_all()
   overrides = {}
 end
 
-local EFFORT_CHOICES = { 'default', 'low', 'medium', 'high' }
+--- Derives from `config.EFFORTS` so the picker can never drift from the one
+--- list nvime otherwise validates against.
+local EFFORT_CHOICES = { 'default' }
+for _, effort in ipairs(config.EFFORTS) do
+  EFFORT_CHOICES[#EFFORT_CHOICES + 1] = effort
+end
 
 --- Step 3: pick the effort (or reset the whole override), then commit.
 --- @param lane string
@@ -98,7 +113,7 @@ local EFFORT_CHOICES = { 'default', 'low', 'medium', 'high' }
 local function open_effort_step(lane, model)
   local items = { { label = 'reset — use the configured default', value = 'reset' } }
   for _, effort in ipairs(EFFORT_CHOICES) do
-    if not (lane == 'big_grade' and effort == 'low') then
+    if not (vim.tbl_contains(config.GATE_LANES, lane) and effort == 'low') then
       items[#items + 1] = { label = effort, value = effort }
     end
   end
@@ -123,7 +138,7 @@ local function open_model_step(lane)
   local current = M.dial(lane)
   compose.open({
     title = string.format(' %s model ', lane),
-    hint = "type a model id, or 'default' for the CLI default",
+    hint = "type a model id, or 'default' to leave it at the configured value",
     text = current.model ~= nil and { current.model } or nil,
     on_submit = function(text)
       local trimmed = vim.trim(text)

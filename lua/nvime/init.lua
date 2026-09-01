@@ -76,8 +76,8 @@ M.toggle_statusline = statusline.toggle_winbar
 --- and this repo's git identity (a big change's local merge needs one).
 M.doctor = require('nvime.doctor').open
 
---- `:Nvime model`: pick a lane (chat/edit/big_build/big_intake/big_grade/
---- explain), then type/choose its model and reasoning effort — a
+--- `:Nvime model`: pick a lane (chat/edit/big_build/big_intake/big_triage/
+--- big_grade/explain), then type/choose its model and reasoning effort — a
 --- session-scoped override on top of `models.*` from `setup()`.
 M.model = models.open
 

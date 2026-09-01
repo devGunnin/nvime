@@ -35,6 +35,11 @@ end
 --- while at least one lane is off the CLI default) which model/effort dial is
 --- active — e.g. "nvime: chat ●  big_build:opus/high". Empty when there is
 --- nothing to report and every lane is at its default.
+---
+--- Returned as plain text, `%` included unescaped: the documented call form
+--- for a user's own 'statusline' is `%{v:lua...get()}`, which does NOT
+--- re-scan its result for more `%` items — only the built-in winbar's
+--- `%{%...%}` form does that, and `M.get_for_winbar` escapes for it instead.
 --- @return string
 function M.get()
   local status = base_status()
@@ -42,19 +47,23 @@ function M.get()
   if dial == '' then
     return status
   end
-  -- A model name is user-typed (`:Nvime model`) and this string ends up
-  -- inside a `%{expr}` winbar/statusline item, which re-scans its result for
-  -- more `%` items — double it before it ever reaches one.
-  dial = dial:gsub('%%', '%%%%')
   if status == '' then
     return 'nvime: ' .. dial
   end
   return status .. '  ' .. dial
 end
 
+--- `get()`, escaped for the built-in winbar's `%{%...%}` form, which DOES
+--- re-scan its result for more `%` items — a user-typed model name
+--- (`:Nvime model`) needs doubling before it ever reaches one.
+--- @return string
+function M.get_for_winbar()
+  return (M.get():gsub('%%', '%%%%'))
+end
+
 --- Neovim re-evaluates a `%{%...%}` winbar item on its own redraws — this is
 --- what makes the toggle event-driven with no extra timer.
-local WINBAR_EXPR = "%{%v:lua.require('nvime.statusline').get()%}"
+local WINBAR_EXPR = "%{%v:lua.require('nvime.statusline').get_for_winbar()%}"
 
 local enabled = false
 

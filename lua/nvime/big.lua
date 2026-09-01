@@ -321,27 +321,34 @@ local function settle_threads(session)
   end
 end
 
+--- The build lane's dial, plus the triage lane's on top: every request that
+--- captures and triages a build needs both. The sidecar resolves triage's
+--- own model against the build's when it is left at the configured default
+--- (`big.ts`) — nothing here guesses at that fallback.
+local function build_and_triage_params()
+  local build_dial = models.dial('big_build')
+  local triage_dial = models.dial('big_triage')
+  return {
+    root = state.root,
+    sessionId = state.session.id,
+    model = build_dial.model,
+    effort = build_dial.effort,
+    triageModel = triage_dial.model,
+    triageEffort = triage_dial.effort,
+  }
+end
+
 --- Runs (or resumes) the build, then captures and triages what it produced.
 function M.build()
   assert(state.session ~= nil, 'big.build needs a selected session')
-  local dial = models.dial('big_build')
-  stream(
-    'big.build',
-    { root = state.root, sessionId = state.session.id, model = dial.model, effort = dial.effort },
-    settle_threads
-  )
+  stream('big.build', build_and_triage_params(), settle_threads)
 end
 
 --- `retriage`: sorts an already-built change into threads again, without
 --- re-running the build agent over work it has already done.
 function M.capture()
   assert(state.session ~= nil, 'big.capture needs a selected session')
-  local dial = models.dial('big_build')
-  stream(
-    'big.capture',
-    { root = state.root, sessionId = state.session.id, model = dial.model, effort = dial.effort },
-    settle_threads
-  )
+  stream('big.capture', build_and_triage_params(), settle_threads)
 end
 
 --- Throws the clone and the record away. Only ever on an explicit `discard`.

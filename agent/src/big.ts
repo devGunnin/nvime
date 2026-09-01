@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { HookInput, HookJSONOutput, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { EffortLevel, HookInput, HookJSONOutput, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import {
   composeBuildPrompt,
   composeExplainPrompt,
@@ -26,7 +26,7 @@ import {
 } from './bigstore.js';
 import type { EmitEvent, SdkBindings } from './chat.js';
 import { dialOptions, type Dial } from './dial.js';
-import { subscriptionEnv, type Env } from './env.js';
+import { stripGateEnv, subscriptionEnv, type Env } from './env.js';
 import {
   clears,
   gateArmed,
@@ -115,6 +115,23 @@ export const MAX_TRIAGE_BYTES = 128 * 1024;
 
 type Phase = 'intake' | 'build' | 'triage' | 'grade' | 'explain';
 
+/** The phases whose output the comprehension gate depends on: never effort 'low'. */
+const GATE_PHASES: ReadonlySet<Phase> = new Set(['triage', 'grade']);
+
+/** The floor a gate phase's effort defaults to when its own dial leaves it unset. */
+const GATE_EFFORT_FLOOR: EffortLevel = 'medium';
+
+/**
+ * A build/capture/revise/rebase call's own dial, plus the triage lane's on
+ * top: every call that captures and triages a build carries both. The triage
+ * half is optional here only because the wire format allows omitting it —
+ * `#captureAndTriage` still resolves a concrete triage dial for every call.
+ */
+export interface BuildDial extends Dial {
+  triageModel?: string | undefined;
+  triageEffort?: EffortLevel | undefined;
+}
+
 /** How much typed defense one thread accepts in one round. */
 export const MAX_ANSWER_CHARS = 8000;
 
@@ -183,8 +200,13 @@ interface TurnResult {
   costUsd: number;
 }
 
-/** What one `#turn` call needs — `model`/`effort` come from `Dial`, the lane's dial. */
-interface TurnSpec extends Dial {
+/**
+ * What one `#turn` call needs. `dial` is required so a call site that forgets
+ * it fails to compile — the exact regression this shape exists to prevent —
+ * while its own `model`/`effort` fields may still be undefined.
+ */
+interface TurnSpec {
+  dial: Dial;
   prompt: string;
   cwd: string;
   phase: Phase;
@@ -293,8 +315,7 @@ export class BigService {
         phase: 'intake',
         resume: session.intakeSessionId,
         schema: INTAKE_SCHEMA,
-        model: params.model,
-        effort: params.effort,
+        dial: { model: params.model, effort: params.effort },
       }),
     );
 
@@ -344,7 +365,8 @@ export class BigService {
    * on a session whose build was cut short, it resumes the same SDK session in
    * the same clone rather than starting over on top of half a change.
    */
-  async build(requestId: number, params: { root: string; id: string } & Dial): Promise<SessionView> {
+  async build(requestId: number, params: { root: string; id: string } & BuildDial): Promise<SessionView> {
+    refuseLowTriage(params);
     const session = this.#requireBuildable(params.root, params.id);
     const spec = session.spec;
     if (spec === null) throw new ProtocolError('bad_request', 'this big change has no approved spec');
@@ -368,8 +390,7 @@ export class BigService {
         phase: 'build',
         resume,
         worktreeRoot: worktree.path,
-        model: params.model,
-        effort: params.effort,
+        dial: { model: params.model, effort: params.effort },
       });
       session.buildSessionId = result.sessionId;
       session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
@@ -379,7 +400,8 @@ export class BigService {
   }
 
   /** Capture and triage on their own: the recovery path for a detached build. */
-  async capture(requestId: number, params: { root: string; id: string } & Dial): Promise<SessionView> {
+  async capture(requestId: number, params: { root: string; id: string } & BuildDial): Promise<SessionView> {
+    refuseLowTriage(params);
     const session = this.#requireBuildable(params.root, params.id);
     return this.#run(requestId, session, 'capture', () => this.#captureAndTriage(requestId, session, params));
   }
@@ -387,8 +409,9 @@ export class BigService {
   /** The reviewer's `r`: send one block's comment back to the build agent. */
   async revise(
     requestId: number,
-    params: { root: string; id: string; blockId: string; comment: string } & Dial,
+    params: { root: string; id: string; blockId: string; comment: string } & BuildDial,
   ): Promise<SessionView> {
+    refuseLowTriage(params);
     const session = this.#store.require(params.root, params.id);
     this.#reconcileOrThrow(session);
     const worktree = session.worktree;
@@ -413,8 +436,7 @@ export class BigService {
         phase: 'build',
         resume: session.buildSessionId,
         worktreeRoot: worktree.path,
-        model: params.model,
-        effort: params.effort,
+        dial: { model: params.model, effort: params.effort },
       });
       session.buildSessionId = result.sessionId;
       session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
@@ -530,8 +552,7 @@ export class BigService {
         phase: 'grade',
         resume: session.gradeSessionId,
         schema: GRADE_SCHEMA,
-        model: dial.model,
-        effort: dial.effort,
+        dial,
       });
       const byThread = parseGradeOutput(result.structured);
       const grades: RoundGrades =
@@ -604,8 +625,7 @@ export class BigService {
         cwd: worktree.path,
         phase: 'explain',
         resume: null,
-        model: params.model,
-        effort: params.effort,
+        dial: { model: params.model, effort: params.effort },
       });
       return { text: result.text };
     });
@@ -749,7 +769,8 @@ export class BigService {
    * re-captures and re-triages. Content the reader already cleared carries
    * forward by signature; anything the move changed comes back open.
    */
-  async rebase(requestId: number, params: { root: string; id: string } & Dial): Promise<SessionView> {
+  async rebase(requestId: number, params: { root: string; id: string } & BuildDial): Promise<SessionView> {
+    refuseLowTriage(params);
     const session = this.#requireBuildable(params.root, params.id);
     const base = requireBase(session);
     const branch = base.branch;
@@ -802,8 +823,7 @@ export class BigService {
       phase: 'build',
       resume: session.buildSessionId,
       worktreeRoot: clonePath,
-      model: dial.model,
-      effort: dial.effort,
+      dial,
     });
     session.buildSessionId = result.sessionId;
     session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
@@ -974,7 +994,7 @@ export class BigService {
    * build's hunks, which would show a reviewer content nobody sorted and hide
    * content that was.
    */
-  async #captureAndTriage(requestId: number, session: BigSession, dial: Dial): Promise<SessionView> {
+  async #captureAndTriage(requestId: number, session: BigSession, dial: BuildDial): Promise<SessionView> {
     const worktree = session.worktree;
     if (worktree === null || !worktree.ready) {
       throw new ProtocolError('bad_request', 'this big change has nothing built to capture');
@@ -1023,9 +1043,14 @@ export class BigService {
     session: BigSession,
     parsed: ParsedDiff,
     rendered: RenderedTriage,
-    dial: Dial,
+    dial: BuildDial,
   ): Promise<RawBlock[]> {
     const worktree = session.worktree;
+    // Its own model if named; otherwise the build's, so a build+triage pair
+    // reads the same code under the same identity by default. Effort never
+    // inherits the build's — `#buildOptions` floors an unset gate effort to
+    // 'medium' on its own, regardless of what the build turn ran at.
+    const triageDial: Dial = { model: dial.triageModel ?? dial.model, effort: dial.triageEffort };
     let reason: string;
     try {
       const result = await this.#turn(requestId, {
@@ -1040,8 +1065,7 @@ export class BigService {
         phase: 'triage',
         resume: null,
         schema: TRIAGE_SCHEMA,
-        model: dial.model,
-        effort: dial.effort,
+        dial: triageDial,
       });
       const blocks = parseTriageOutput(result.structured);
       if (blocks !== null) return blocks;
@@ -1130,11 +1154,18 @@ export class BigService {
 
   #buildOptions(requestId: number, spec: TurnSpec, abort: AbortController): Options {
     const build = spec.phase === 'build';
+    // Triage decides what the gate reviews and grade IS the gate; neither may
+    // silently inherit an unset ambient effort — floored to 'medium' here,
+    // the single place every gate turn's options are actually assembled.
+    const gate = GATE_PHASES.has(spec.phase);
+    const dial: Dial = gate ? { model: spec.dial.model, effort: spec.dial.effort ?? GATE_EFFORT_FLOOR } : spec.dial;
     const realWorktree = buildWriteBoundary(build, spec.worktreeRoot);
     return {
       cwd: spec.cwd,
-      // A copy per turn: the SDK mutates the env object it is handed.
-      env: { ...this.#env },
+      // A copy per turn: the SDK mutates the env object it is handed. A gate
+      // turn also loses its own effort/model env overrides, so the floor
+      // above cannot be undercut by a variable in the shell it was launched from.
+      env: gate ? stripGateEnv(this.#env) : { ...this.#env },
       pathToClaudeCodeExecutable: this.#claudePath,
       abortController: abort,
       includePartialMessages: true,
@@ -1159,7 +1190,7 @@ export class BigService {
           }),
       ...(spec.schema === undefined ? {} : { outputFormat: { type: 'json_schema', schema: spec.schema } }),
       ...(spec.resume === null ? {} : { resume: spec.resume }),
-      ...dialOptions(spec),
+      ...dialOptions(dial),
     };
   }
 
@@ -1233,6 +1264,17 @@ function keyOf(session: BigSession): string {
 
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/**
+ * Refuses an explicit `triageEffort: 'low'` before any run starts — mirrors
+ * `answer`'s grade-effort refusal: triage decides what the gate reviews, so
+ * it never runs at the shallowest effort either.
+ */
+function refuseLowTriage(dial: BuildDial): void {
+  if (dial.triageEffort === 'low') {
+    throw new ProtocolError('bad_request', 'triage never runs at effort low — it decides what the gate reviews');
+  }
 }
 
 /**

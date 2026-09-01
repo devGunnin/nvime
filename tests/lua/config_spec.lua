@@ -65,12 +65,29 @@ describe('config.setup', function()
 end)
 
 describe('the models table', function()
-  it('defaults every lane to the CLI default (nil model, nil effort)', function()
+  it('defaults every lane to the CLI default model, and every effort too — except the gate lanes', function()
     local opts = config.setup(nil)
+    local gate = {}
+    for _, lane in ipairs(config.GATE_LANES) do
+      gate[lane] = true
+    end
     for _, lane in ipairs(config.MODEL_LANES) do
       eq(nil, opts.models[lane].model, lane)
-      eq(nil, opts.models[lane].effort, lane)
+      if gate[lane] then
+        -- The gate lanes never nil-inherit an ambient effort: unset means
+        -- 'medium', not "whatever the CLI would otherwise pick".
+        eq('medium', opts.models[lane].effort, lane)
+      else
+        eq(nil, opts.models[lane].effort, lane)
+      end
     end
+  end)
+
+  it('rejects the dead `agent.model` key rather than silently ignoring it', function()
+    t.throws(function()
+      config.setup({ agent = { model = 'claude-haiku-5' } })
+    end, 'agent%.model')
+    config.setup(nil)
   end)
 
   it('sets one lane without disturbing the others', function()
@@ -94,13 +111,15 @@ describe('the models table', function()
     config.setup(nil)
   end)
 
-  it('refuses the grader lane at effort low — grading is the gate', function()
-    t.throws(function()
-      config.setup({ models = { big_grade = { effort = 'low' } } })
-    end, 'big_grade')
-    -- medium/high still work; low is the only refused value.
-    eq('high', config.setup({ models = { big_grade = { effort = 'high' } } }).models.big_grade.effort)
-    config.setup(nil)
+  it('refuses the gate lanes at effort low — grading is the gate, and triage decides what it reviews', function()
+    for _, lane in ipairs(config.GATE_LANES) do
+      t.throws(function()
+        config.setup({ models = { [lane] = { effort = 'low' } } })
+      end, lane)
+      -- medium/high still work; low is the only refused value.
+      eq('high', config.setup({ models = { [lane] = { effort = 'high' } } }).models[lane].effort)
+      config.setup(nil)
+    end
   end)
 end)
 

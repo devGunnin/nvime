@@ -16,23 +16,34 @@ export interface Dial {
 
 /** Reads `params.model`/`params.effort`, the per-request shape every lane sends. */
 export function parseDial(params: Record<string, unknown>): Dial {
-  return { model: optionalModel(params), effort: optionalEffort(params) };
+  return { model: optionalModel(params, 'model'), effort: optionalEffort(params, 'effort') };
 }
 
-function optionalModel(params: Record<string, unknown>): string | undefined {
-  const value = params.model;
+/** A build call's own dial, plus the triage lane's: `params.triageModel`/`params.triageEffort`. */
+export interface TriageDial {
+  triageModel: string | undefined;
+  triageEffort: EffortLevel | undefined;
+}
+
+/** Reads the triage lane's own fields, carried alongside a `parseDial` call on the same params. */
+export function parseTriageDial(params: Record<string, unknown>): TriageDial {
+  return { triageModel: optionalModel(params, 'triageModel'), triageEffort: optionalEffort(params, 'triageEffort') };
+}
+
+function optionalModel(params: Record<string, unknown>, key: string): string | undefined {
+  const value = params[key];
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string' || value === '') {
-    throw new ProtocolError('bad_request', 'params.model must be a non-empty string');
+    throw new ProtocolError('bad_request', `params.${key} must be a non-empty string`);
   }
   return value;
 }
 
-function optionalEffort(params: Record<string, unknown>): EffortLevel | undefined {
-  const value = params.effort;
+function optionalEffort(params: Record<string, unknown>, key: string): EffortLevel | undefined {
+  const value = params[key];
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string' || !(EFFORT_LEVELS as readonly string[]).includes(value)) {
-    throw new ProtocolError('bad_request', `params.effort must be one of: ${EFFORT_LEVELS.join(', ')}`);
+    throw new ProtocolError('bad_request', `params.${key} must be one of: ${EFFORT_LEVELS.join(', ')}`);
   }
   return value as EffortLevel;
 }

@@ -45,14 +45,32 @@ describe('models.dial', function()
     end, 'unknown lane')
   end)
 
-  it('refuses to set the grade lane at effort low — grading is the gate', function()
-    t.throws(function()
-      models.set('big_grade', nil, 'low')
-    end, "'low'")
-    -- medium/high still work; low is the only refused value.
-    models.set('big_grade', nil, 'high')
-    eq('high', models.dial('big_grade').effort)
+  it('refuses to set a gate lane at effort low — grading is the gate, triage decides what it reviews', function()
+    for _, lane in ipairs(config.GATE_LANES) do
+      t.throws(function()
+        models.set(lane, nil, 'low')
+      end, "'low'")
+      -- medium/high still work; low is the only refused value.
+      models.set(lane, nil, 'high')
+      eq('high', models.dial(lane).effort)
+      models.reset(lane)
+    end
+  end)
+
+  it('layers a session override over the config: only the field actually chosen replaces it', function()
+    config.setup({ models = { big_grade = { model = 'claude-opus-5', effort = 'high' } } })
+    -- Picking only a new model (effort left at 'default', i.e. nil) must not
+    -- discard the configured effort.
+    models.set('big_grade', 'claude-sonnet-5', nil)
+    eq({ model = 'claude-sonnet-5', effort = 'high' }, models.dial('big_grade'), 'the configured effort must survive')
     models.reset('big_grade')
+
+    -- And the other way round: picking only an effort must not discard the
+    -- configured model.
+    models.set('big_grade', nil, 'medium')
+    eq({ model = 'claude-opus-5', effort = 'medium' }, models.dial('big_grade'), 'the configured model must survive')
+    models.reset('big_grade')
+    config.setup(nil)
   end)
 end)
 
@@ -128,29 +146,31 @@ describe('models.open (the :Nvime model picker)', function()
     models.reset('chat')
   end)
 
-  it("excludes low from the grade lane's effort choices", function()
-    config.setup(nil)
-    models.reset_all()
-    local win = models.open()
-    local grade_row = nil
-    for row, lane in ipairs(config.MODEL_LANES) do
-      if lane == 'big_grade' then
-        grade_row = row
+  it("excludes low from a gate lane's effort choices", function()
+    for _, gate_lane in ipairs(config.GATE_LANES) do
+      config.setup(nil)
+      models.reset_all()
+      local win = models.open()
+      local gate_row = nil
+      for row, lane in ipairs(config.MODEL_LANES) do
+        if lane == gate_lane then
+          gate_row = row
+        end
       end
-    end
-    vim.api.nvim_win_set_cursor(win, { grade_row, 0 })
-    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, true, true), 'x', false)
-    local float = compose.current()
-    vim.api.nvim_buf_set_lines(float.buf, 0, -1, false, { 'default' })
-    vim.cmd('stopinsert')
-    press(float.buf, '<CR>')
+      vim.api.nvim_win_set_cursor(win, { gate_row, 0 })
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, true, true), 'x', false)
+      local float = compose.current()
+      vim.api.nvim_buf_set_lines(float.buf, 0, -1, false, { 'default' })
+      vim.cmd('stopinsert')
+      press(float.buf, '<CR>')
 
-    local effort_win = vim.api.nvim_get_current_win()
-    local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(effort_win), 0, -1, false)
-    for _, line in ipairs(lines) do
-      ok(line ~= ' low', 'low must not be offered for the grader lane: ' .. line)
+      local effort_win = vim.api.nvim_get_current_win()
+      local lines = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(effort_win), 0, -1, false)
+      for _, line in ipairs(lines) do
+        ok(line ~= ' low', 'low must not be offered for ' .. gate_lane .. ': ' .. line)
+      end
+      vim.api.nvim_win_close(effort_win, true)
     end
-    vim.api.nvim_win_close(effort_win, true)
   end)
 
   it("'reset' clears a session override back to the configured default", function()

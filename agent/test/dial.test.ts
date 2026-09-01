@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { dialOptions, parseDial } from '../src/dial.js';
+import { dialOptions, parseDial, parseTriageDial } from '../src/dial.js';
 import { ProtocolError } from '../src/protocol.js';
 
 describe('parseDial', () => {
@@ -26,6 +26,33 @@ describe('parseDial', () => {
     assert.throws(
       () => parseDial({ effort: 'xhigh' }),
       (error: unknown) => error instanceof ProtocolError && error.code === 'bad_request' && /params\.effort/.test(error.message),
+    );
+  });
+});
+
+describe('parseTriageDial', () => {
+  it('reads triageModel/triageEffort independently of model/effort', () => {
+    assert.deepEqual(
+      parseTriageDial({ model: 'claude-opus-5', effort: 'high', triageModel: 'claude-haiku-5', triageEffort: 'low' }),
+      { triageModel: 'claude-haiku-5', triageEffort: 'low' },
+    );
+  });
+
+  it('leaves both undefined when neither triage key is present', () => {
+    assert.deepEqual(parseTriageDial({}), { triageModel: undefined, triageEffort: undefined });
+  });
+
+  it('rejects a non-string triageModel, naming the right field', () => {
+    assert.throws(
+      () => parseTriageDial({ triageModel: 5 }),
+      (error: unknown) => error instanceof ProtocolError && /params\.triageModel/.test(error.message),
+    );
+  });
+
+  it('rejects a triageEffort outside low/medium/high, naming the right field', () => {
+    assert.throws(
+      () => parseTriageDial({ triageEffort: 'xhigh' }),
+      (error: unknown) => error instanceof ProtocolError && /params\.triageEffort/.test(error.message),
     );
   });
 });

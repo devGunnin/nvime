@@ -162,12 +162,34 @@ describe('statusline.get: the model dial suffix', function()
     models.reset('big_build')
   end)
 
-  it('doubles a literal % in a typed model name before it reaches a winbar %{expr}', function()
+  it('leaves a literal % alone — the documented plain %{expr} form does not re-scan', function()
     models.set('chat', '100%-local', nil)
     with_surfaces({}, function()
-      eq('nvime: chat:100%%-local/-', statusline.get())
+      eq('nvime: chat:100%-local/-', statusline.get())
     end)
     models.reset('chat')
+  end)
+end)
+
+describe('statusline.get_for_winbar', function()
+  local models = require('nvime.models')
+
+  it('doubles a literal % in a typed model name before it reaches a winbar %{%...%} item', function()
+    models.set('chat', '100%-local', nil)
+    with_surfaces({}, function()
+      eq('nvime: chat:100%%-local/-', statusline.get_for_winbar())
+    end)
+    models.reset('chat')
+  end)
+
+  it('matches get() exactly when there is nothing to escape', function()
+    with_surfaces({ chat = {
+      is_running = function()
+        return true
+      end,
+    } }, function()
+      eq(statusline.get(), statusline.get_for_winbar())
+    end)
   end)
 end)
 
@@ -192,5 +214,21 @@ describe('statusline.toggle_winbar', function()
       eq(false, off)
       eq('', vim.o.winbar)
     end)
+  end)
+
+  it('renders a single % through the real winbar, though get() itself carries a doubled one', function()
+    local models = require('nvime.models')
+    models.set('chat', '100%-local', nil)
+    vim.o.winbar = ''
+    if statusline.winbar_enabled() then
+      statusline.toggle_winbar()
+    end
+    with_surfaces({}, function()
+      statusline.toggle_winbar()
+      local rendered = vim.api.nvim_eval_statusline(vim.o.winbar, { winid = vim.api.nvim_get_current_win() })
+      eq('nvime: chat:100%-local/-', rendered.str, 'the winbar re-scans the doubled %% back down to one %')
+      statusline.toggle_winbar()
+    end)
+    models.reset('chat')
   end)
 end)

@@ -84,11 +84,14 @@ require('nvime').setup({opts})
                         change — and say so if none is.
 
 :Nvime model            Pick a lane (chat, edit, big_build, big_intake,
-                        big_grade, explain), then type/choose its model and
-                        reasoning effort — a session-scoped override on top of
-                        `models.*` from `setup()`. Its effort step's `reset`
-                        entry clears the override back to the configured
-                        default. See |nvime-configuration|.
+                        big_triage, big_grade, explain), then type/choose its
+                        model and reasoning effort — a session-scoped override
+                        on top of `models.*` from `setup()` (see
+                        |nvime-configuration| for what "session-scoped" means
+                        here). Only the field you actually pick replaces the
+                        configured one; leaving a field at 'default' keeps it.
+                        Its effort step's `reset` entry clears the whole
+                        override back to the configured default.
 
 :Nvime doctor           Run every preflight check and render the result as one
                         pass/warn/fail list, with the fix named under each
@@ -315,7 +318,8 @@ Defaults: >
         edit = { model = nil, effort = nil },
         big_build = { model = nil, effort = nil },
         big_intake = { model = nil, effort = nil },
-        big_grade = { model = nil, effort = nil },
+        big_triage = { model = nil, effort = 'medium' },
+        big_grade = { model = nil, effort = 'medium' },
         explain = { model = nil, effort = nil },
       },
       context = {
@@ -362,19 +366,30 @@ agent.request_timeout_ms
                        number >= 1000. Deadline for control requests. A
                        streaming turn is exempt: it is bounded by your stop
                        key, not a timer.
+                       `agent.model` was replaced by `models.<lane>.model`
+                       below; `setup()` refuses the old key outright rather
+                       than silently ignoring it.
 
 models.{lane}.model    string or nil, for each of `chat`, `edit`, `big_build`,
-                       `big_intake`, `big_grade`, `explain`. A model id or
-                       alias (e.g. `claude-opus-5`, `haiku`); nil uses the
-                       CLI's own default. Not whitelisted: any string passes
-                       through to the SDK unchanged.
+                       `big_intake`, `big_triage`, `big_grade`, `explain`. A
+                       model id or alias (e.g. `claude-opus-5`, `haiku`); nil
+                       uses the CLI's own default. Not whitelisted: any string
+                       passes through to the SDK unchanged.
 models.{lane}.effort   'low' | 'medium' | 'high' | nil. Reasoning effort for
-                       that lane; nil uses the CLI default. `models.big_grade
-                       .effort` may not be 'low' — grading is the comprehension
-                       gate itself, and refuses to run at the shallowest
-                       effort; `setup()` raises if it is configured that way.
-                       `:Nvime model` sets a session-scoped override on top of
-                       these, per lane — see |nvime-commands|.
+                       that lane; nil uses the CLI default. `big_triage` and
+                       `big_grade` are different: triage decides what the gate
+                       reviews and grading IS the gate, so neither may be
+                       'low' — `setup()` raises if either is configured that
+                       way — and neither's effort defaults to nil; an unset
+                       one names 'medium' rather than silently inheriting the
+                       shell's own effort (e.g. `CLAUDE_CODE_EFFORT_LEVEL`).
+                       `:Nvime model` sets a SESSION-SCOPED override on top of
+                       these, per lane — "session" here means this Neovim
+                       session: the override lives in memory, survives a
+                       sidecar restart, and is gone once you quit. Only the
+                       field you actually choose replaces the configured one
+                       (picking 'default' for the other keeps it); see
+                       |nvime-commands|.
 
 context.max_file_bytes number >= 1024. Ceiling on one `@file` attachment.
 context.max_dir_entries

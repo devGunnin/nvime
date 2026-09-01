@@ -1621,15 +1621,102 @@ describe('the model dial', () => {
     assert.equal(calls[0]?.options.effort, 'high');
   });
 
-  it('threads the build lane\'s model and effort into both the build and the triage turn', async () => {
+  it('threads the build lane\'s model into the build turn, and the triage turn inherits it', async () => {
     const approvedView = await approved();
     calls.length = 0; // drop the intake call `approved()` already made
     scriptBuild([{ title: 'behavior', substantial: true }]);
-    await service.build(2, { root: repo, id: approvedView.id, model: 'claude-sonnet-5', effort: 'medium' });
+    // The build runs at 'high'; triage has no dial of its own, so its model
+    // follows the build but its effort must NOT — see the next test.
+    await service.build(2, { root: repo, id: approvedView.id, model: 'claude-sonnet-5', effort: 'high' });
     assert.equal(calls[0]?.options.model, 'claude-sonnet-5', 'the build turn');
-    assert.equal(calls[0]?.options.effort, 'medium', 'the build turn');
-    assert.equal(calls[1]?.options.model, 'claude-sonnet-5', 'triage shares the build lane');
-    assert.equal(calls[1]?.options.effort, 'medium', 'triage shares the build lane');
+    assert.equal(calls[0]?.options.effort, 'high', 'the build turn');
+    assert.equal(calls[1]?.options.model, 'claude-sonnet-5', 'triage defaults to the build lane\'s model');
+  });
+
+  it('never lets triage inherit a low build effort — it decides what the gate reviews', async () => {
+    // The reviewer's probe: a build lane set to 'low' (fully legal — nothing
+    // guards `big_build`) must not carry into triage, the turn that decides
+    // what `substantial` even means for the gate.
+    const approvedView = await approved();
+    calls.length = 0;
+    scriptBuild([{ title: 'behavior', substantial: true }]);
+    await service.build(2, { root: repo, id: approvedView.id, model: 'claude-sonnet-5', effort: 'low' });
+    assert.equal(calls[0]?.options.effort, 'low', 'the build turn really did run at low');
+    assert.equal(calls[1]?.options.effort, 'medium', 'triage floors to medium regardless');
+  });
+
+  it('lets an explicit triage dial override the build lane entirely', async () => {
+    const approvedView = await approved();
+    calls.length = 0;
+    scriptBuild([{ title: 'behavior', substantial: true }]);
+    await service.build(2, {
+      root: repo,
+      id: approvedView.id,
+      model: 'claude-sonnet-5',
+      effort: 'high',
+      triageModel: 'claude-haiku-5',
+      triageEffort: 'high',
+    });
+    assert.equal(calls[1]?.options.model, 'claude-haiku-5', 'triage\'s own model wins');
+    assert.equal(calls[1]?.options.effort, 'high', 'triage\'s own effort wins');
+  });
+
+  it('refuses an explicit triageEffort low before any run starts', async () => {
+    const approvedView = await approved();
+    const callsBefore = calls.length;
+    await assert.rejects(
+      service.build(2, { root: repo, id: approvedView.id, triageEffort: 'low' }),
+      (error: unknown) => error instanceof ProtocolError && error.code === 'bad_request' && /triage never runs at effort low/.test(error.message),
+    );
+    assert.equal(calls.length, callsBefore, 'the refusal never reaches the SDK');
+  });
+
+  it('defaults the grade lane\'s effort to medium rather than inheriting an unset one', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 70 }]);
+    await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'an answer' }] });
+    assert.equal(calls[calls.length - 1]?.options.effort, 'medium');
+  });
+
+  it('strips the gate turn\'s own effort/model env overrides so an ambient CLAUDE_CODE_EFFORT_LEVEL cannot undercut the floor', async () => {
+    // The reviewer's export-low probe: a shell-level effort override, which
+    // `subscriptionEnv` alone does not strip because it is not a credential.
+    const gateEnvService = new BigService({
+      sdk: { query: ({ prompt, options }: { prompt: string; options?: Options }) => {
+        calls.push({ prompt, options: options as Options });
+        const turn = turns.shift();
+        assert.ok(turn !== undefined, `no scripted turn for: ${prompt.slice(0, 60)}`);
+        return (async function* () {
+          if (turn.act !== undefined) await turn.act(options as Options);
+          for (const frame of typeof turn.frames === 'function' ? turn.frames(prompt) : turn.frames) yield frame;
+        })();
+      } },
+      store,
+      claudePath: '/usr/bin/true',
+      env: { PATH: process.env.PATH, CLAUDE_CODE_EFFORT_LEVEL: 'low', ANTHROPIC_MODEL: 'claude-haiku-5' },
+      emit: (event, params) => events.push({ event, params }),
+    });
+    const created = gateEnvService.create(repo, 'version flag', 'medium');
+    turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ok', spec: SPEC })] });
+    await gateEnvService.intake(1, { root: repo, id: created.id, message: 'go' });
+    const intakeEnv = calls[calls.length - 1]?.options.env as Record<string, string | undefined>;
+    assert.equal(intakeEnv.CLAUDE_CODE_EFFORT_LEVEL, 'low', 'a non-gate turn keeps honoring the ambient default');
+
+    const approvedGateView = await gateEnvService.approve(repo, created.id);
+    turns.push({
+      act: async (options) => {
+        const target = join(String(options.cwd), 'tool.py');
+        await useTool(options, 'Write', { file_path: target, content: 'v2\n' }, () => writeFileSync(target, 'v2\n'));
+      },
+      frames: [frames.init(), frames.result('built it')],
+    });
+    turns.push({ frames: [frames.init(), frames.result('t', { blocks: [] })] });
+    await gateEnvService.build(2, { root: repo, id: approvedGateView.id });
+    const triageEnv = calls[calls.length - 1]?.options.env as Record<string, string | undefined>;
+    assert.equal(triageEnv.CLAUDE_CODE_EFFORT_LEVEL, undefined, 'triage must not see the ambient effort override');
+    assert.equal(triageEnv.ANTHROPIC_MODEL, undefined, 'triage must not see the ambient model override');
+    assert.equal(calls[calls.length - 1]?.options.effort, 'medium', 'and the turn itself never ran at low');
   });
 
   it('omits model and effort from SDK options when neither lane value is set', async () => {

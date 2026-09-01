@@ -5,7 +5,7 @@ import { BigService } from './big.js';
 import { BigStore, defaultBigRoot } from './bigstore.js';
 import { ChatService } from './chat.js';
 import { parseContextBlocks, parseProjectInstructions } from './context.js';
-import { parseDial } from './dial.js';
+import { parseDial, parseTriageDial } from './dial.js';
 import { EditService, parseScope } from './edit.js';
 import { resolveClaudeExecutable, strippedNames } from './env.js';
 import { DEFAULT_DIFFICULTY, DIFFICULTIES, isDifficulty, type Difficulty } from './gate.js';
@@ -282,6 +282,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
       ...parseDial(params),
+      ...parseTriageDial(params),
     }),
   }));
 
@@ -290,6 +291,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
       ...parseDial(params),
+      ...parseTriageDial(params),
     }),
   }));
 
@@ -300,6 +302,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
       blockId: requireString(params, 'blockId'),
       comment: requireString(params, 'comment'),
       ...parseDial(params),
+      ...parseTriageDial(params),
     }),
   }));
 
@@ -351,6 +354,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
       ...parseDial(params),
+      ...parseTriageDial(params),
     }),
   }));
 

@@ -3,12 +3,16 @@
 ## Unreleased
 
 - **Per-mode model + reasoning-effort dial.** A new `models` config table
-  (`chat`, `edit`, `big_build`, `big_intake`, `big_grade`, `explain`) sets the
-  model and effort each lane's agent turns run at; nil keeps the CLI default.
-  `:Nvime model` layers a session-scoped override on top, visible in `:Nvime
-  doctor` and appended to `statusline()`. The grader lane refuses effort
-  `low` — grading is the comprehension gate itself. Replaces the old, single
-  global `agent.model` setting.
+  (`chat`, `edit`, `big_build`, `big_intake`, `big_triage`, `big_grade`,
+  `explain`) sets the model and effort each lane's agent turns run at; nil
+  model keeps the CLI default. `:Nvime model` layers a session-scoped override
+  on top — only the field you actually pick replaces the configured one —
+  visible in `:Nvime doctor` and appended to `statusline()`. `big_triage` and
+  `big_grade` both refuse effort `low` and never nil-inherit an ambient one
+  (defaulting to `medium`, with the shell's own `CLAUDE_CODE_EFFORT_LEVEL`
+  stripped from their turns): triage decides what the comprehension gate
+  reviews, and grading IS the gate. Replaces the old, single global
+  `agent.model` setting — `setup()` now refuses that key outright.
 
 ## 2.0.0
 

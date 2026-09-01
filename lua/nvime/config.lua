@@ -12,7 +12,12 @@ M.ICON_SETS = { 'unicode', 'ascii' }
 M.EFFORTS = { 'low', 'medium', 'high' }
 
 --- The per-mode dials `models.*` covers, and the lanes `:Nvime model` offers.
-M.MODEL_LANES = { 'chat', 'edit', 'big_build', 'big_intake', 'big_grade', 'explain' }
+M.MODEL_LANES = { 'chat', 'edit', 'big_build', 'big_intake', 'big_triage', 'big_grade', 'explain' }
+
+--- Lanes whose output the comprehension gate depends on: they may never run
+--- at effort 'low', and their configured effort never falls back to nil —
+--- see `validate()` and the `models` defaults below.
+M.GATE_LANES = { 'big_triage', 'big_grade' }
 
 --- Defaults. `setup()` deep-merges the user table over this and validates the result.
 local defaults = {
@@ -60,16 +65,19 @@ local defaults = {
     request_timeout_ms = 15000,
   },
   -- Per-mode model + reasoning-effort overrides, threaded into every agent
-  -- turn that mode runs. `model`/`effort` nil means the CLI's own default;
+  -- turn that mode runs. `model` nil means the CLI's own default;
   -- `:Nvime model` layers a session-scoped override on top of these.
   models = {
     chat = { model = nil, effort = nil },
     edit = { model = nil, effort = nil },
     big_build = { model = nil, effort = nil },
     big_intake = { model = nil, effort = nil },
-    -- Grading is the comprehension gate itself; it may never run at effort
-    -- 'low' — validated below, and enforced again in `nvime.models`.
-    big_grade = { model = nil, effort = nil },
+    -- Triage decides what the gate reviews, and grading IS the gate; neither
+    -- may run at effort 'low' (validated below, and enforced again in
+    -- `nvime.models`), and neither defaults to nil — an unset gate effort
+    -- must never silently inherit an ambient one, so it names 'medium'.
+    big_triage = { model = nil, effort = 'medium' },
+    big_grade = { model = nil, effort = 'medium' },
     explain = { model = nil, effort = nil },
   },
   context = {
@@ -132,6 +140,9 @@ local function validate(opts)
   end
   check_type(opts.big.cleanup_on_merge, 'boolean', 'big.cleanup_on_merge')
   check_type(opts.agent.node, 'string', 'agent.node')
+  if opts.agent.model ~= nil then
+    fail('agent.model was replaced by models.<lane>.model — see :h nvime-configuration')
+  end
   if opts.agent.claude ~= nil then
     check_type(opts.agent.claude, 'string', 'agent.claude')
   end
@@ -153,8 +164,15 @@ local function validate(opts)
       end
     end
   end
-  if opts.models.big_grade.effort == 'low' then
-    fail('models.big_grade.effort may not be low — grading is the gate and never runs at the shallowest effort')
+  for _, lane in ipairs(M.GATE_LANES) do
+    if opts.models[lane].effort == 'low' then
+      fail(
+        'models.'
+          .. lane
+          .. '.effort may not be low — it feeds the comprehension gate '
+          .. 'and never runs at the shallowest effort'
+      )
+    end
   end
   check_type(opts.context.max_file_bytes, 'number', 'context.max_file_bytes')
   if opts.context.max_file_bytes < 1024 then
