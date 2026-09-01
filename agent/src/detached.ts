@@ -4,7 +4,7 @@ import { closeSync, fstatSync, mkdirSync, openSync, readSync, writeFileSync } fr
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { BigService, BuildDial, SessionView } from './big.js';
-import type { BigSession, BigStore } from './bigstore.js';
+import { isLockLive, type BigSession, type BigStore } from './bigstore.js';
 import type { EmitEvent } from './chat.js';
 import type { Env } from './env.js';
 import { ProtocolError } from './protocol.js';
@@ -40,6 +40,10 @@ export const STOP_GRACE_MS = 5_000;
  * and then went quiet, and the log backstop never runs.
  */
 export const ATTACH_ACK_TIMEOUT_MS = 10_000;
+
+/** How long a just-finished run's own claim gets to clear before `start()`
+ *  gives up waiting on it and returns anyway. */
+export const CLAIM_RELEASE_TIMEOUT_MS = 5_000;
 
 export interface DetachedOptions {
   big: BigService;
@@ -115,7 +119,10 @@ export class DetachedService {
       this.#refuseIfTakenElsewhere(params);
       return this.#fallback(requestId, kind, params, this.#runnerStderr(params, spawned.errFrom));
     }
-    await this.#follow(requestId, params, from);
+    const followed = await this.#follow(requestId, params, from);
+    // Only a run that reached its own terminal event live is still shutting
+    // down its claim; a killed runner's is deliberately left stale for later.
+    if (followed.ended) await this.#awaitClaimReleased(params);
     return this.#settle(params, from);
   }
 
@@ -126,7 +133,9 @@ export class DetachedService {
    */
   async attach(requestId: number, params: { root: string; id: string; after: number }): Promise<{ seq: number }> {
     this.#store.require(params.root, params.id);
-    return { seq: await this.#follow(requestId, params, params.after) };
+    const followed = await this.#follow(requestId, params, params.after);
+    if (followed.ended) await this.#awaitClaimReleased(params);
+    return { seq: followed.cursor };
   }
 
   /** Hands one message to a running build. Refused when nothing is running. */
@@ -293,6 +302,19 @@ export class DetachedService {
     }
   }
 
+  /** Waits for a just-ended run's own claim to clear, released well after
+   *  start()/attach() resolves, so its own run never reads as held elsewhere. */
+  async #awaitClaimReleased(params: { root: string; id: string }): Promise<void> {
+    const deadline = Date.now() + CLAIM_RELEASE_TIMEOUT_MS;
+    for (;;) {
+      const session = this.#store.read(params.root, params.id);
+      const lock = session === null ? null : this.#store.readLock(session);
+      if (lock === null || !isLockLive(lock)) return;
+      if (Date.now() >= deadline) return;
+      await sleep(HANDSHAKE_POLL_MS);
+    }
+  }
+
   /**
    * Streams the run into the editor until it ends, and answers with the last
    * seq it delivered.
@@ -304,14 +326,18 @@ export class DetachedService {
    * holds the whole story either way, and re-reading it from the cursor cannot
    * duplicate what the socket already delivered.
    */
-  async #follow(requestId: number, params: { root: string; id: string }, after: number): Promise<number> {
+  async #follow(
+    requestId: number,
+    params: { root: string; id: string },
+    after: number,
+  ): Promise<{ cursor: number; ended: boolean }> {
     const token = tokenOf(this.#store.read(params.root, params.id));
-    if (token === null) return this.#replay(requestId, params, after);
+    if (token === null) return { cursor: this.#replay(requestId, params, after), ended: false };
     let client: ControlClient;
     try {
       client = await connectControl(this.#socketFor(params), token);
     } catch {
-      return this.#replay(requestId, params, after);
+      return { cursor: this.#replay(requestId, params, after), ended: false };
     }
     let cursor = after;
     let ended = false;
@@ -364,7 +390,7 @@ export class DetachedService {
           reject(cause instanceof Error ? cause : new Error(String(cause)));
         });
     });
-    return ended ? cursor : this.#replay(requestId, params, cursor);
+    return ended ? { cursor, ended: true } : { cursor: this.#replay(requestId, params, cursor), ended: false };
   }
 
   /** Emits everything after `from` straight from the log. Returns the new cursor. */

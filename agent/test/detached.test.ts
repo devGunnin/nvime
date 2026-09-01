@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { BigService, type SessionView } from '../src/big.js';
-import { BigStore, type BigRunner } from '../src/bigstore.js';
+import { BigStore, isLockLive, type BigRunner } from '../src/bigstore.js';
 import { DetachedService } from '../src/detached.js';
 import { readLogAfter, type RunEvent } from '../src/runlog.js';
 import { newControlToken, socketPathFor } from '../src/runsock.js';
@@ -613,6 +613,23 @@ describe('the control socket', () => {
     const path = socketPathFor({ XDG_RUNTIME_DIR: runtime }, repo, session.id);
     assert.ok(!path.startsWith(store.root), 'never in the deep store directory');
     assert.ok(Buffer.byteLength(path, 'utf8') <= 100, path);
+  });
+});
+
+describe('a build, the moment it finishes', () => {
+  it('does not read its own just-released claim as another editor still driving it', async () => {
+    const session = await approved();
+    writeScript({ write: { path: 'tool.py', content: 'def main():\n    print("v1")\n' }, holdMs: 20 });
+    await detached.start(1, 'build', { root: repo, id: session.id });
+
+    const lock = store.readLock(store.require(repo, session.id));
+    assert.ok(lock === null || !isLockLive(lock), 'the runner releases its claim before start() returns');
+
+    const check = await big.mergeCheck(repo, session.id);
+    assert.ok(
+      !check.refusals.some((refusal) => refusal.code === 'held-elsewhere'),
+      `a build cannot be held by the run that just finished it: ${JSON.stringify(check.refusals)}`,
+    );
   });
 });
 
