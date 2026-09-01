@@ -781,6 +781,30 @@ describe('big change intake: a choice offered instead of a question', function()
     cleanup()
   end)
 
+  --- A caller that re-renders (`M.select`, or two intake turns without an
+  --- answer in between) used to leave the old handle's spare keys bound —
+  --- pressing one answered a question that was no longer on screen.
+  it('retires a still-open choice before offering a new one, so its stray keys go dead', function()
+    local _, path = sandbox()
+    open_on(path)
+    local function block(count)
+      local options = {}
+      for index = 1, count do
+        options[index] = { label = 'choice ' .. index }
+      end
+      return { options = options }
+    end
+
+    big.offer(block(9))
+    vim.api.nvim_set_current_win(panel.get('big').win)
+    ok(vim.fn.maparg('9', 'n') ~= '', 'the first block bound all nine digits')
+
+    big.offer(block(2))
+    ok(vim.fn.maparg('9', 'n') == '', 'the retired block gives its spare digit back')
+    ok(vim.fn.maparg('2', 'n') ~= '', 'the new block is live')
+    cleanup()
+  end)
+
   it('does not re-offer a choice from a session that has moved past drafting', function()
     local _, path = sandbox()
     open_on(path)

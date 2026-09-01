@@ -584,12 +584,12 @@ describe('panel — the body colour never eats its own markup', function()
     return out
   end
 
-  it('leaves a heading its accent and a struck span its dim', function()
+  it('leaves a heading its accent and a struck span its own strikethrough group', function()
     local self = open()
     self:append_markdown('## Findings')
     self:append_markdown('the ~~simplest~~ option')
     eq({ { 'NvimeBody', 90 }, { 'NvimeDim', 4096 }, { 'NvimeHeading', 4096 } }, groups_on(0))
-    eq({ { 'NvimeBody', 90 }, { 'NvimeDim', 4096 } }, groups_on(1))
+    eq({ { 'NvimeBody', 90 }, { 'NvimeStrike', 4096 } }, groups_on(1))
     panel.close(NAME)
   end)
 end)

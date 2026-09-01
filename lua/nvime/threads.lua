@@ -10,6 +10,7 @@
 --- merge while anything is open.
 local agent = require('nvime.agent')
 local models = require('nvime.models')
+local panel = require('nvime.panel')
 local shape = require('nvime.text')
 
 local M = {}
@@ -1197,7 +1198,9 @@ local function build_tab()
   vim.wo[view.pane_win].wrap = true
   vim.wo[view.pane_win].linebreak = true
   vim.wo[view.pane_win].breakindent = true
-  vim.wo[view.pane_win].breakindentopt = 'shift:2'
+  -- Same shift as the main panel: the "you · " answer text wraps next to
+  -- its own two-space-indented grade/hint lines, the same aliasing risk.
+  vim.wo[view.pane_win].breakindentopt = 'shift:' .. panel.WRAP_SHIFT
   vim.wo[view.tree_win].cursorline = true
 
   local group = vim.api.nvim_create_augroup('NvimeThreads', { clear = true })

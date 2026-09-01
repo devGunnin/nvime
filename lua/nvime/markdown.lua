@@ -39,6 +39,13 @@ local function is_boundary(char)
   return char == nil or char == '' or char:match('[%s%p]') ~= nil
 end
 
+--- Whether `content` (the run, markers stripped) opens and closes on a
+--- non-space char — CommonMark's flanking rule, and what tells `2 * 3 * 4`
+--- (both outer edges next to a space too) apart from real `*emphasis*`.
+local function is_flanked(content)
+  return content ~= '' and not content:match('^%s') and not content:match('%s$')
+end
+
 local function overlaps(taken, first, last)
   for i = first, last do
     if taken[i] then
@@ -60,10 +67,14 @@ end
 --- what keeps `snake_case_names` from rendering as italics).
 local MARKERS = {
   { pattern = '`[^`]+`', hl = 'NvimeInlineCode', marker = 1, boundary = false },
-  { pattern = '~~[^~]+~~', hl = 'NvimeDim', marker = 2, boundary = false },
+  -- `~~x~~` renders struck, never simply dim: concealing the markers must
+  -- not also erase that the text is struck out.
+  { pattern = '~~[^~]+~~', hl = 'NvimeStrike', marker = 2, boundary = false },
   { pattern = '%*%*[^*]+%*%*', hl = 'NvimeBold', marker = 2, boundary = false },
   { pattern = '__[^_]+__', hl = 'NvimeBold', marker = 2, boundary = true },
-  { pattern = '%*[^*]+%*', hl = 'NvimeItalic', marker = 1, boundary = false },
+  -- A single `*` needs a boundary outside AND a non-space run inside, or
+  -- `2 * 3 * 4` matches too — both outer edges already sit next to a space.
+  { pattern = '%*[^*]+%*', hl = 'NvimeItalic', marker = 1, boundary = true, flank = true },
   { pattern = '_[^_]+_', hl = 'NvimeItalic', marker = 1, boundary = true },
 }
 
@@ -80,6 +91,9 @@ local function scan_marker(line, rule, taken, spans, conceal)
     local ok = not overlaps(taken, first, last)
     if ok and rule.boundary then
       ok = is_boundary(line:sub(first - 1, first - 1)) and is_boundary(line:sub(last + 1, last + 1))
+    end
+    if ok and rule.flank then
+      ok = is_flanked(line:sub(first + rule.marker, last - rule.marker))
     end
     if ok then
       take(taken, first, last)

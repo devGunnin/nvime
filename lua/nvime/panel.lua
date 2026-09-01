@@ -240,6 +240,11 @@ end
 
 --- One space of left gutter, and a wrapped line that keeps its own indent —
 --- the difference between a wall of text and something laid out.
+---
+--- Not 2: a tool/detail/status line opens with a literal two-space indent of
+--- its own, and a wrapped continuation landing there reads as another one.
+local WRAP_SHIFT = 4
+M.WRAP_SHIFT = WRAP_SHIFT
 local function tune_window(win)
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
@@ -247,7 +252,7 @@ local function tune_window(win)
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
   vim.wo[win].breakindent = true
-  vim.wo[win].breakindentopt = 'shift:2'
+  vim.wo[win].breakindentopt = 'shift:' .. WRAP_SHIFT
   vim.wo[win].statuscolumn = ' '
   vim.wo[win].fillchars = 'eob: '
   vim.wo[win].winhighlight = 'CursorLine:NvimeCursorLine'

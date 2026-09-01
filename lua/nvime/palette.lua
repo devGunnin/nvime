@@ -120,6 +120,7 @@ M.ROLE_GROUPS = {
   NvimeDim = 'dim',
   NvimeFence = 'dim',
   NvimeLabel = 'dim',
+  NvimeStrike = 'dim',
   NvimeAccent = 'accent',
   NvimeActivity = 'accent',
   NvimeHeading = 'accent',
@@ -152,6 +153,9 @@ function M.groups(p)
     -- The reading tiers. Everything a conversation line can be is one of these.
     NvimeBody = { fg = p.fg },
     NvimeDim = { fg = p.dim },
+    -- `~~struck~~`: the same dim foreground, struck through as an attribute
+    -- rather than concealing the sense along with the markers.
+    NvimeStrike = { fg = p.dim, strikethrough = true },
     NvimeAccent = { fg = p.accent },
     -- Role labels: the two speakers, bold so the eye finds the turn boundary.
     NvimeUser = { fg = p.accent, bold = true },
@@ -183,14 +187,17 @@ function M.groups(p)
     NvimeLabel = { fg = p.dim },
     NvimeKey = { fg = p.accent, bold = true },
     NvimeOk = { fg = p.added, bold = true },
-    NvimeWarn = { fg = p.accent, bold = true },
+    -- Same accent as NvimeUser (a speaker label): italic keeps a caution from
+    -- reading as someone's own words, without borrowing a colour to say it.
+    NvimeWarn = { fg = p.accent, bold = true, italic = true },
     -- Changeset rows: the file, then what changed in it.
     NvimeFile = { fg = p.fg, bold = true },
     NvimeAdded = { fg = p.added },
     NvimeChanged = { fg = p.changed },
     NvimeRemoved = { fg = p.removed },
-    -- Big change review: the chip a thread carries in the list.
-    NvimeThreadDefend = badge(p.error),
+    -- Big change review chips. Needing defence is expected, not a failure —
+    -- accent hue, not error's; underline sets it apart from a reopened trivia thread.
+    NvimeThreadDefend = vim.tbl_extend('force', badge(p.accent), { underline = true }),
     NvimeThreadClear = badge(p.added),
     NvimeThreadAuto = { fg = p.dim, bg = p.surface },
     NvimeThreadOpen = badge(p.accent),

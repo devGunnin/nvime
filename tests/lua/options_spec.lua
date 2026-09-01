@@ -122,6 +122,21 @@ describe('options.lines', function()
     ok(options.hint(options.parse(raw(2, { multi = true }))):match('<CR> sends') ~= nil)
     eq(nil, options.hint(options.parse(raw(2))):match('<CR> sends'))
   end)
+
+  --- Past nine choices the index grows a digit; unpadded, choice 10 pushed
+  --- its label one cell right of every single-digit row above it. `raw`
+  --- always sets a prompt, so option `i` renders at `rendered[i + 1]`.
+  it('pads the index so 10-12 line up under 1-9, not one cell to their right', function()
+    local rendered = options.lines(options.parse(raw(11)))
+    eq('   1  choice 1', rendered[2])
+    eq('   9  choice 9', rendered[10])
+    eq('  10  choice 10', rendered[11])
+    eq('  11  choice 11', rendered[12])
+    local label_at = function(line)
+      return line:find('choice')
+    end
+    eq(label_at(rendered[2]), label_at(rendered[11]), 'labels must start in the same column')
+  end)
 end)
 
 describe('options.reply and options.pick_from_text', function()
@@ -145,6 +160,15 @@ describe('options.reply and options.pick_from_text', function()
     eq(nil, options.pick_from_text(block, '2.5'))
     eq(nil, options.pick_from_text(block, ''))
     eq(nil, options.pick_from_text(block, '1 2'), 'several picks need a multi block')
+  end)
+
+  --- `tonumber` alone also accepts a Lua numeric literal — none of these
+  --- read as a reader plainly typing the number of the choice they meant.
+  it('refuses a hex, float, or exponent literal as a pick', function()
+    local block = options.parse(raw(3))
+    eq(nil, options.pick_from_text(block, '0x2'))
+    eq(nil, options.pick_from_text(block, '2.0'))
+    eq(nil, options.pick_from_text(block, '1e0'))
   end)
 
   it('takes several typed numbers on a multi block, in the offered order', function()
@@ -242,6 +266,44 @@ describe('options.attach', function()
     ok(vim.fn.maparg('9', 'n') ~= '', 'the ninth choice has a key')
     -- There is no tenth digit; the reader types the number in the prompt.
     eq(options.DIGIT_KEYS, 9)
+    panel.close(NAME)
+  end)
+
+  --- A digit is a pick only over the block's own rows; everywhere else in
+  --- the scrollback it is a plain count, the way it is everywhere in normal
+  --- mode — reproduces the reviewer's `3j` probe against a pending block.
+  it('lets a digit outside the block count a motion instead of answering', function()
+    local self = open()
+    for index = 1, 30 do
+      self:append('scrollback line ' .. index, nil)
+    end
+    local answered = nil
+    options.attach(self, options.parse(raw(3)), function(reply)
+      answered = reply
+    end, function() end)
+    vim.api.nvim_set_current_win(self.win)
+    vim.api.nvim_win_set_cursor(self.win, { 1, 0 })
+
+    vim.api.nvim_feedkeys('3j', 'x', false)
+    eq(nil, answered, '3 must not have picked an option')
+    eq(4, vim.api.nvim_win_get_cursor(self.win)[1], '3j must still move the cursor three lines')
+    panel.close(NAME)
+  end)
+
+  it('still answers on a digit once the cursor is actually on the block', function()
+    local self = open()
+    for index = 1, 30 do
+      self:append('scrollback line ' .. index, nil)
+    end
+    local answered = nil
+    local handle = options.attach(self, options.parse(raw(3)), function(reply)
+      answered = reply
+    end, function() end)
+    vim.api.nvim_set_current_win(self.win)
+    vim.api.nvim_win_set_cursor(self.win, { handle.row + 1, 0 })
+
+    vim.api.nvim_feedkeys('2', 'x', false)
+    eq('2: choice 2', answered)
     panel.close(NAME)
   end)
 end)

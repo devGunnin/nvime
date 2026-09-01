@@ -387,10 +387,14 @@ function M.ask(text)
       surface():append('claude', 'NvimeAgent')
       surface():append_markdown(last.text, 'NvimeAgentBody')
       surface():blank()
-      M.offer(last.options)
     end
     render_spec(session.spec)
     render_next_step()
+    -- Offered last: the cursor follows the tail, and the tail has to be the
+    -- block for one keystroke to answer it, not whatever rendered after it.
+    if last ~= nil and last.role == 'agent' then
+      M.offer(last.options)
+    end
   end, nil)
 end
 
@@ -399,6 +403,9 @@ end
 --- question is already in the transcript, and that still gets answered.
 --- @param raw any the `options` block the sidecar returned, or nil
 function M.offer(raw)
+  -- A caller that re-renders (M.select) can run this with an offer already
+  -- live; retiring it first keeps the old block's spare keys from outliving it.
+  retire_offer()
   local block = options.parse(raw)
   local live = panel.get(PANEL)
   if block == nil or live == nil then
@@ -752,14 +759,16 @@ function M.select(id)
       self:append_markdown(turn.text, turn.role == 'user' and 'NvimeUserBody' or 'NvimeAgentBody')
       self:blank()
     end
+    render_spec(result.session.spec)
+    render_next_step()
     -- A question the reader never answered is still open; a session past
     -- drafting has moved on and its old choices are history.
+    -- Offered last (after the spec and the hint) so the tail — where the
+    -- cursor follows to — is the block, and one keystroke still answers it.
     local last = conversation[#conversation]
     if result.session.display == 'drafting' and last ~= nil and last.role == 'agent' then
       M.offer(last.options)
     end
-    render_spec(result.session.spec)
-    render_next_step()
     -- Opening a session whose build is still going picks the stream back up
     -- where this editor left it, which is what makes a restart continuous.
     M.attach()

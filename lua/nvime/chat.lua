@@ -267,6 +267,9 @@ end
 --- it arrived with is already in the transcript, and that still gets answered.
 --- @param raw any the `options` block the sidecar returned, or nil
 function M.offer(raw)
+  -- M.send already retires before it offers again, but that is an ordering
+  -- accident of this one caller, not an invariant of M.offer itself.
+  retire_offer()
   local block = options.parse(raw)
   local live = panel.get(PANEL)
   if block == nil or live == nil then

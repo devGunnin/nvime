@@ -30,6 +30,19 @@ describe('markdown.scan', function()
     eq({ { 0, 4, 'NvimeItalic' } }, markdown.scan('_em_ text', markdown.new_state()).spans)
   end)
 
+  --- The reviewer's own repro: `boundary` alone still passes `* 3 *` — both
+  --- its outer edges sit next to a space, indistinguishable from real
+  --- emphasis between two words. Content starting or ending with a space
+  --- (never true emphasis) is what actually gives arithmetic away.
+  it('does not italicise arithmetic across a bare *, only a real code span', function()
+    local info = markdown.scan('run with 2 * 3 * 4 workers, glob *.py, and `a * b`', markdown.new_state())
+    eq({ { 43, 50, 'NvimeInlineCode' } }, info.spans)
+  end)
+
+  it('does not italicise a lone bullet asterisk paired with unrelated text', function()
+    eq({}, markdown.scan('* not a pair * still just a bullet', markdown.new_state()).spans)
+  end)
+
   it('does not decorate markers inside inline code', function()
     local info = markdown.scan('`**not bold**` after', markdown.new_state())
     eq({ { 0, 14, 'NvimeInlineCode' } }, info.spans)
@@ -105,12 +118,11 @@ describe('markdown.scan — the calm surface', function()
     eq('code', markdown.scan('---', state).kind)
   end)
 
-  --- The operator's report, exactly: `~~x~~` used to render with a literal
-  --- line struck through it, because vim's own markdown syntax painted
-  --- `htmlStrike` under nvime's fg-only extmark and the two attributes merged.
-  it('dims struck-through text and never asks for a line through it', function()
+  --- `~~x~~` reads as struck, not merely dim: concealing the markers must
+  --- not also erase that the text was struck through in the first place.
+  it('renders struck-through text with the strikethrough attribute', function()
     local info = markdown.scan('the ~~simplest~~ option', markdown.new_state())
-    eq({ { 4, 16, 'NvimeDim' } }, info.spans)
+    eq({ { 4, 16, 'NvimeStrike' } }, info.spans)
     eq({ { 4, 6 }, { 14, 16 } }, info.conceal)
   end)
 

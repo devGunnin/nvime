@@ -399,6 +399,32 @@ describe('chat: a choice offered in the conversation', function()
     vim.fn.delete(dir, 'rf')
   end)
 
+  --- `M.offer` retires whatever was open before attaching a new block, so a
+  --- caller cannot leave a stale handle's spare keys bound no matter how it
+  --- got there — not just on the one path (`M.send`) that happens to retire
+  --- first today.
+  it('retires a still-open choice before offering a new one, so its stray keys go dead', function()
+    local dir = sandbox()
+    open_on(dir)
+    local function block(count)
+      local options = {}
+      for index = 1, count do
+        options[index] = { label = 'choice ' .. index }
+      end
+      return { options = options }
+    end
+
+    chat.offer(block(9))
+    vim.api.nvim_set_current_win(panel.get('chat').win)
+    ok(vim.fn.maparg('9', 'n') ~= '', 'the first block bound all nine digits')
+
+    chat.offer(block(2))
+    ok(vim.fn.maparg('9', 'n') == '', 'the retired block gives its spare digit back')
+    ok(vim.fn.maparg('2', 'n') ~= '', 'the new block is live')
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
   --- The block crosses a process boundary. An unusable one is not a choice —
   --- the prose question is already in the transcript and still gets answered.
   it('offers nothing when the sidecar sent no usable block', function()

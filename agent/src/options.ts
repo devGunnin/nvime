@@ -113,29 +113,81 @@ export function parseOptionsBlock(raw: unknown): OptionsBlock | null {
   };
 }
 
-/** Every `nvime-options` fence in a reply, with the JSON each one holds. */
-const OPTIONS_FENCE = new RegExp('^[ \\t]*```' + OPTIONS_FENCE_LANG + '[ \\t]*\\n([\\s\\S]*?)\\n?^[ \\t]*```[ \\t]*$', 'gm');
+/** A line opening or closing a fence: 3+ backticks or 3+ tildes, either can
+ *  close the other — the panel's own rule (`markdown.lua`'s `fence_marker`),
+ *  not CommonMark's stricter "same character, at least as long" rule. */
+function fenceMarker(line: string): { lang: string | null } | null {
+  const match = line.match(/^[ \t]*(?:`{3,}|~{3,})(.*)$/);
+  if (match === null) return null;
+  const rest = (match[1] ?? '').trim();
+  return { lang: rest === '' ? null : (rest.split(/\s+/)[0] ?? null) };
+}
+
+/**
+ * Strips every top-level `nvime-options` fence from a reply, the same way
+ * `markdown.lua`'s `M.scan` does it live: one open/closed flag, not a depth
+ * counter, so a fence nested inside another fence never opens a *second*
+ * one — the first fence-marker line seen while already inside one just
+ * closes it, whatever language or marker character either side used. A
+ * fence that never closes swallows everything after it, same as the panel
+ * mid-stream never un-swallowing.
+ * @returns the reply with every options fence removed, plus each fence's
+ *   raw (unparsed) body in the order the fences closed
+ */
+function stripOptionsFences(text: string): { text: string; payloads: string[] } {
+  const kept: string[] = [];
+  const payloads: string[] = [];
+  let current: string[] = [];
+  let inFence = false;
+  let swallowing = false;
+
+  for (const line of text.split('\n')) {
+    const fence = fenceMarker(line);
+    if (fence === null) {
+      (swallowing ? current : kept).push(line);
+      continue;
+    }
+    if (!inFence) {
+      inFence = true;
+      if (fence.lang === OPTIONS_FENCE_LANG) {
+        swallowing = true;
+      } else {
+        kept.push(line);
+      }
+      continue;
+    }
+    inFence = false;
+    if (swallowing) {
+      payloads.push(current.join('\n'));
+      current = [];
+      swallowing = false;
+    } else {
+      kept.push(line);
+    }
+  }
+  return { text: kept.join('\n'), payloads };
+}
 
 /**
  * Lifts the options block out of a finished chat reply.
  *
- * The fence is always removed from the returned text, parseable or not: the
- * panel already swallowed it as it streamed, so leaving it in the stored
- * transcript would make a resumed session read differently from the live one.
- * The LAST fence wins — a reply that shows the format before using it should
- * be read as offering the block it ended with.
+ * A swallowed fence is always removed from the returned text, parseable or
+ * not: the panel already swallowed it as it streamed, so leaving it in the
+ * stored transcript would make a resumed session read differently from the
+ * live one. The LAST fence wins — a reply that shows the format before using
+ * it should be read as offering the block it ended with. A reply with no
+ * options fence at all comes back byte-for-byte unchanged.
  */
 export function extractOptions(text: string): { text: string; options: OptionsBlock | null } {
-  OPTIONS_FENCE.lastIndex = 0;
-  let payload: string | null = null;
-  const stripped = text.replace(OPTIONS_FENCE, (_match, body: string) => {
-    payload = body;
-    return '';
-  });
-  if (payload === null) return { text, options: null };
+  const { text: stripped, payloads } = stripOptionsFences(text);
+  if (payloads.length === 0) {
+    return stripped === text ? { text, options: null } : { text: stripped.trimEnd(), options: null };
+  }
+  const lastPayload = payloads[payloads.length - 1];
+  if (lastPayload === undefined) return { text: stripped.trimEnd(), options: null };
   let raw: unknown;
   try {
-    raw = JSON.parse(payload);
+    raw = JSON.parse(lastPayload);
   } catch {
     // A malformed block is not an error the reader can act on: the prose above
     // it still asks the question, and that is what they answer.

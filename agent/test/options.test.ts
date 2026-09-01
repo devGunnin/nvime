@@ -87,6 +87,55 @@ describe('extractOptions', () => {
     const text = 'here:\n```json\n{"options":[{"label":"a"},{"label":"b"}]}\n```\n';
     assert.deepEqual(extractOptions(text), { text, options: null });
   });
+
+  /** The panel's own classifier (`markdown.lua`) treats a fence-marker line
+   *  seen while already inside a fence as CLOSING it, not as opening a
+   *  nested one — so a `nvime-options` fence quoted inside another fence is
+   *  inert: never swallowed, never a live widget. The sidecar has to agree,
+   *  or a reopened session reads differently from the live one, and repo
+   *  content the model merely quoted becomes a pressable choice. */
+  describe('a fence nested inside another fence', () => {
+    it('is inert — text and options both come back exactly as sent', () => {
+      const text = 'From README.md:\n```md\n```nvime-options\n{"options":[{"label":"a"},{"label":"b"}]}\n```\n```\n';
+      assert.deepEqual(extractOptions(text), { text, options: null });
+    });
+
+    it('stays inert with a 4-backtick outer fence too', () => {
+      const text =
+        'quoting it:\n````md\n```nvime-options\n{"options":[{"label":"a"},{"label":"b"}]}\n```\n````\n';
+      assert.deepEqual(extractOptions(text), { text, options: null });
+    });
+  });
+
+  /** `markdown.lua`'s fence tracking is one open/closed flag: 4+ backticks,
+   *  a tilde fence, and an unterminated fence all have to agree with what
+   *  the panel actually swallowed live, not just the plain 3-backtick case. */
+  describe('fence marker parity with the panel', () => {
+    it('takes a 4-backtick fence the same as a 3-backtick one', () => {
+      const result = extractOptions(`Which one?\n\n\`\`\`\`${OPTIONS_FENCE_LANG}\n${JSON.stringify({ options: CHOICES })}\n\`\`\`\`\n`);
+      assert.equal(result.text, 'Which one?');
+      assert.deepEqual(result.options?.options, CHOICES);
+    });
+
+    it('takes a tilde fence the same as a backtick one', () => {
+      const result = extractOptions(`Which one?\n\n~~~${OPTIONS_FENCE_LANG}\n${JSON.stringify({ options: CHOICES })}\n~~~\n`);
+      assert.equal(result.text, 'Which one?');
+      assert.deepEqual(result.options?.options, CHOICES);
+    });
+
+    it('lets a tilde fence close a backtick-opened one, matching the panel', () => {
+      const result = extractOptions(`Which one?\n\n\`\`\`${OPTIONS_FENCE_LANG}\n${JSON.stringify({ options: CHOICES })}\n~~~\n`);
+      assert.equal(result.text, 'Which one?');
+      assert.deepEqual(result.options?.options, CHOICES);
+    });
+
+    /** A cut-off reply: the panel swallows everything from the fence open
+     *  onward with nothing left to render, and offers no choice for it. */
+    it('drops everything from an unterminated fence onward, and offers no choice', () => {
+      const text = `Which one?\n\n\`\`\`${OPTIONS_FENCE_LANG}\n${JSON.stringify({ options: CHOICES })}`;
+      assert.deepEqual(extractOptions(text), { text: 'Which one?', options: null });
+    });
+  });
 });
 
 describe('the intake turn’s options', () => {

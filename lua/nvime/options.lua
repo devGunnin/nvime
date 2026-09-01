@@ -110,11 +110,14 @@ function M.lines(block, chosen)
     add('  ' .. block.prompt, 0, nil, 'NvimeBody')
   end
   local GAP = '  '
+  -- Padded to the widest index in the block, so 10-12 line up under 1-9
+  -- rather than pushing their row one cell to the right of everyone else's.
+  local width = #tostring(#block.options)
   for index, option in ipairs(block.options) do
     -- The box is two display cells whether or not it holds a tick, so the
     -- labels line up either way. Widths in cells, extmark columns in bytes:
     -- the tick is multi-byte and would otherwise throw one of the two off.
-    local number = string.format('  %d', index)
+    local number = string.format('  %' .. width .. 'd', index)
     local box = block.multi and (' ' .. (chosen[index] and tick or ' ')) or ''
     local key = number .. box
     local text = key .. GAP .. option.label
@@ -162,8 +165,10 @@ function M.pick_from_text(block, text)
   assert(type(text) == 'string', 'options.pick_from_text needs the typed text')
   local indices, seen = {}, {}
   for word in vim.trim(text):gmatch('[^%s,]+') do
-    local index = tonumber(word)
-    if index == nil or index % 1 ~= 0 or block.options[index] == nil or seen[index] then
+    -- Digits only: `tonumber` alone also takes `0x2`, `2.0`, `1e0` — none of
+    -- which is what a reader typing a plain pick looks like.
+    local index = word:match('^%d+$') and tonumber(word) or nil
+    if index == nil or block.options[index] == nil or seen[index] then
       return nil
     end
     seen[index] = true
@@ -186,6 +191,16 @@ end
 local function bind(handle, lhs, fn, desc)
   vim.keymap.set('n', lhs, fn, { buffer = handle.buf, nowait = true, silent = true, desc = desc })
   handle.bound[#handle.bound + 1] = lhs
+end
+
+--- Whether the cursor sits somewhere inside the block's own rows. A digit
+--- means "pick" only there; everywhere else in the scrollback it is a plain
+--- count prefixing a motion, exactly as it is anywhere else in normal mode.
+--- @param handle table an attached handle, with `row`/`height` already set
+--- @return boolean
+local function cursor_in_block(handle)
+  local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+  return row >= handle.row and row < handle.row + handle.height
 end
 
 --- The picks currently toggled on, in the order the agent offered them.
@@ -258,11 +273,20 @@ function M.attach(surface, block, on_answer, on_other)
 
   local lines, marks = M.lines(block, handle.chosen)
   handle.row = surface:append_marked(lines, marks)
+  -- +1: covers the blank spacer `blank()` writes below the block, where a
+  -- pinned scrollback's cursor lands the instant the block renders.
+  handle.height = #lines + 1
   surface:blank()
 
+  -- A digit picks only over the block's own rows; elsewhere it is fed back
+  -- literally, so Vim's own count-then-motion handling takes it from there.
   for index = 1, math.min(#block.options, M.DIGIT_KEYS) do
-    bind(handle, tostring(index), function()
-      if handle.spent then
+    local lhs = tostring(index)
+    bind(handle, lhs, function()
+      if handle.spent or not cursor_in_block(handle) then
+        -- 'n' skips this mapping; 'i' queues ahead of the rest of e.g. `3j`,
+        -- not after it (feedkeys appends by default).
+        vim.api.nvim_feedkeys(lhs, 'ni', false)
         return
       end
       if block.multi then
