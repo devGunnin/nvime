@@ -102,6 +102,22 @@ describe('doctor.render', function()
       ok(mark.row >= 0 and mark.row < #lines, vim.inspect(mark))
     end
   end)
+
+  it('never emits a mark past the byte length of its own line', function()
+    -- Version-independent: nvim_buf_set_extmark rejects this shape on 0.11
+    -- even with strict=false, while 0.12 silently clamps it — catch it here
+    -- regardless of which nvim is running the suite.
+    local lines, marks = doctor.render({
+      { level = 'ok', message = 'first' },
+      { level = 'error', message = 'second', advice = 'do this' },
+    })
+    for _, mark in ipairs(marks) do
+      local line = lines[mark.row + 1]
+      ok(line ~= nil, 'mark row ' .. mark.row .. ' has no line')
+      ok(mark.col <= mark.end_col, 'end_col before col: ' .. vim.inspect(mark))
+      ok(mark.end_col <= #line, 'end_col past the line: ' .. vim.inspect(mark) .. ' line=' .. vim.inspect(line))
+    end
+  end)
 end)
 
 describe('doctor.open', function()

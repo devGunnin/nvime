@@ -83,14 +83,16 @@ function M.render(entries, width)
     for index, line in ipairs(rendered) do
       lines[#lines + 1] = line
       if index > 1 then
-        marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = -1, hl = 'NvimeDim' }
+        marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #line, hl = 'NvimeDim' }
       end
     end
   end
   local summary, summary_hl = summarise(entries)
   lines[#lines + 1] = ''
   lines[#lines + 1] = summary
-  marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = -1, hl = summary_hl }
+  -- end_col is the line's own byte length: a whole-line mark never needs
+  -- end_row, and nvim 0.11 errors on end_row given without an end_col.
+  marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #summary, hl = summary_hl }
   lines[#lines + 1] = ''
   return lines, marks
 end
@@ -115,9 +117,12 @@ function M.open()
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   for _, mark in ipairs(marks) do
-    vim.api.nvim_buf_set_extmark(buf, NS, mark.row, mark.col, {
-      end_col = mark.end_col < 0 and nil or mark.end_col,
-      end_row = mark.end_col < 0 and mark.row + 1 or nil,
+    -- Belt: a future render bug degrades to a short highlight here, never
+    -- an open() error — clamp against the line actually written to the buffer.
+    local line_bytes = #(lines[mark.row + 1] or '')
+    local end_col = math.min(mark.end_col, line_bytes)
+    vim.api.nvim_buf_set_extmark(buf, NS, mark.row, math.min(mark.col, end_col), {
+      end_col = end_col,
       hl_group = mark.hl,
       strict = false,
     })
