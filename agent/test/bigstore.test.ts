@@ -438,6 +438,46 @@ describe('the cross-process run claim', () => {
   });
 });
 
+describe('holderOf', () => {
+  it('reads the claim file exactly once — foreignLock + liveRunner used to each read it separately', () => {
+    const session = built();
+    session.runner = {
+      pid: process.pid,
+      socket: '/tmp/nvime-holderof-test.sock',
+      log: store.logPathFor(repo, session.id),
+      what: 'rebase',
+      startedAt: Date.now(),
+      token: 'tok',
+    };
+    store.save(session);
+    const lock = store.acquireLock(session, 'rebase');
+
+    // A fresh handle, the way the sidecar reads a session it does not own.
+    const other = new BigStore(store.root);
+    const reread = other.require(repo, session.id);
+    let reads = 0;
+    const originalReadLock = other.readLock.bind(other);
+    other.readLock = (arg: BigSession) => {
+      reads += 1;
+      return originalReadLock(arg);
+    };
+
+    const held = other.holderOf(reread);
+    assert.equal(reads, 1, 'holderOf must read the claim file exactly once, not once per helper it used to call');
+    assert.deepEqual(held, { detached: true, what: 'rebase' }, 'the recorded runner ties the claim to this session');
+
+    lock.release();
+  });
+
+  it('reports no holder for its own claim, and null once released', () => {
+    const session = built();
+    const lock = store.acquireLock(session, 'build');
+    assert.equal(store.holderOf(session), null, 'our own run is not a holder to report');
+    lock.release();
+    assert.equal(store.holderOf(session), null, 'a released claim holds nothing');
+  });
+});
+
 describe('stale takeover under real contention', () => {
   const LOCK_CONTENDER = fileURLToPath(new URL('./fixtures/lock-contender.ts', import.meta.url));
   const CONTENDER_TIMEOUT_MS = 10_000;

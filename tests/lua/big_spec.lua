@@ -431,7 +431,7 @@ describe('big change session states', function()
     fake.replies['big.create'] = { result = { session = session() } }
     fake.replies['big.intake'] = { result = { session = session() } }
     big.send('a flag')
-    ok(fake.subscriber ~= nil, 'the panel subscribes to sidecar events')
+    ok(#fake.subscribers > 0, 'the panel subscribes to sidecar events')
     fake.subscriber('big.denied', { id = 999, tool = 'Write', reason = 'outside' })
     ok(not has_line('refused'), "another run's events are not this panel's")
     cleanup()

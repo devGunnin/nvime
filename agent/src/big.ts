@@ -962,12 +962,13 @@ export class BigService {
     if (this.#runningByKey.has(keyOf(session))) {
       throw new ProtocolError('busy', 'this big change is still running — stop it first');
     }
-    // A discard from here would pull the clone out from under another editor's
-    // live build, which dies with an opaque git failure and then re-saves the
-    // record this just destroyed.
-    const held = this.#store.foreignLock(session);
+    // A discard from here would pull the clone out from under a live build —
+    // this session's own detached runner just as much as another editor's —
+    // which dies with an opaque git failure and then re-saves the record this
+    // just destroyed.
+    const held = this.#heldBy(session);
     if (held !== null) {
-      throw new ProtocolError('busy', `this big change is running in another editor (${held.what}) — stop it there`);
+      throw new ProtocolError('busy', holderMessage(held));
     }
     if (session.worktree !== null) await this.#guardedRemoveClone(session, session.worktree.path);
     this.#store.destroy(root, id);
@@ -1011,12 +1012,10 @@ export class BigService {
   /**
    * Who holds this session's claim, when it is not this run. The claim alone
    * cannot tell a detached runner from a second Neovim, so the recorded runner
-   * is checked against it — `liveRunner` demands both.
+   * is checked against it — `holderOf` demands both, off one lock read.
    */
   #heldBy(session: BigSession): SessionHolder | null {
-    const lock = this.#store.foreignLock(session);
-    if (lock === null) return null;
-    return { detached: this.#store.liveRunner(session) !== null, what: lock.what };
+    return this.#store.holderOf(session);
   }
 
   /**

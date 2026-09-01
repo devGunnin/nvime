@@ -38,11 +38,26 @@ local ACTIVITY_DELAY_MS = 300
 --- The spinner's own cadence, matching the panel's.
 local ACTIVITY_TICK_MS = 90
 
+--- The pane's title always keeps at least this many cells, whatever the
+--- streamed detail beside it wants — the floor `status()` cuts the detail to.
+local PANE_TITLE_ROOM = 12
+
 --- The one review-tab request in flight, or nil. A rebase or a grading round
 --- is a full agent turn — minutes — and a tab that says nothing while one runs
 --- is indistinguishable from a wedged one (issue #10).
---- @type table|nil { label, detail, request_id, frame, shown, timer }
+---
+--- Survives `M.close`: the sidecar keeps running a build turn after the tab
+--- closes, so the one-at-a-time latch must too — only the timer, which would
+--- otherwise tick against dead windows, is paused. `generation` is what keeps
+--- a stale callback from touching a LATER request's record: `run_op` captures
+--- it when the request goes out, and only clears the indicator, stops the
+--- timer, or frees the latch when that generation is still the current one.
+--- @type table|nil { label, detail, request_id, frame, shown, timer, generation }
 local activity = nil
+
+--- Bumped once per request; `activity.generation` pins a callback to the
+--- record it started with, so nothing has to compare table identity.
+local next_generation = 0
 
 local view = {
   root = nil,
@@ -347,9 +362,19 @@ local function status()
   if not win_valid(view.pane_win) then
     return
   end
-  local keys = activity ~= nil and (activity.detail or '') or M.keys_hint(view.session)
-  local room = vim.api.nvim_win_get_width(view.pane_win) - vim.fn.strdisplaywidth(keys) - 4
-  local title = shape.ellipsise((view.session or {}).title or 'big change', math.max(room, 12))
+  local pane_width = vim.api.nvim_win_get_width(view.pane_win)
+  local keys
+  if activity ~= nil then
+    -- The streamed detail is whatever the sidecar sent — unbounded, and often
+    -- multi-line (runner stderr, a git error). Collapsed to one line and cut
+    -- to fit before it ever reaches the winbar, the same as the left bar
+    -- already was; the static keys hint below is short enough it never needed this.
+    keys = shape.ellipsise(((activity.detail or ''):gsub('%s+', ' ')), math.max(pane_width - PANE_TITLE_ROOM - 4, 8))
+  else
+    keys = M.keys_hint(view.session)
+  end
+  local room = pane_width - vim.fn.strdisplaywidth(keys) - 4
+  local title = shape.ellipsise((view.session or {}).title or 'big change', math.max(room, PANE_TITLE_ROOM))
   vim.wo[view.pane_win].winbar = '%#NvimeBar# '
     .. M.escape_winbar(title)
     .. ' %=%#NvimeBarDim#'
@@ -435,6 +460,29 @@ local function notify_error(err, fallback)
   end
 end
 
+--- Arms `record`'s timer, showing the spinner immediately when `immediate` is
+--- true (resuming a request that was already shown before the tab closed) or
+--- after `ACTIVITY_DELAY_MS` otherwise.
+--- @param record table the activity record the timer belongs to
+--- @param immediate boolean
+local function arm_timer(record, immediate)
+  local timer = vim.uv.new_timer()
+  record.timer = timer
+  timer:start(immediate and 0 or ACTIVITY_DELAY_MS, ACTIVITY_TICK_MS, function()
+    vim.schedule(function()
+      -- The record is the authority, not the closure: a request that settled,
+      -- or a record whose timer was re-armed, between the tick and this
+      -- callback has already moved on from `timer`.
+      if activity ~= record or record.timer ~= timer then
+        return
+      end
+      record.shown = true
+      record.frame = record.frame + 1
+      status()
+    end)
+  end)
+end
+
 --- Starts the indicator for one request. Nothing is drawn for the first
 --- `ACTIVITY_DELAY_MS`, so a round trip the reader would not have noticed
 --- anyway never flashes a spinner at them.
@@ -442,32 +490,55 @@ end
 local function begin_activity(label)
   assert(type(label) == 'string' and label ~= '', 'threads.begin_activity needs a label')
   assert(activity == nil, 'the review tab runs one request at a time')
-  local timer = vim.uv.new_timer()
-  activity = { label = label, detail = nil, request_id = nil, frame = 0, shown = false, timer = timer }
-  timer:start(ACTIVITY_DELAY_MS, ACTIVITY_TICK_MS, function()
-    vim.schedule(function()
-      -- The record is the authority, not the closure: a request that settled
-      -- between the tick and this callback has already closed `timer`.
-      if activity == nil or activity.timer ~= timer then
-        return
-      end
-      activity.shown = true
-      activity.frame = activity.frame + 1
-      status()
-    end)
-  end)
+  next_generation = next_generation + 1
+  activity = {
+    label = label,
+    detail = nil,
+    request_id = nil,
+    frame = 0,
+    shown = false,
+    timer = nil,
+    generation = next_generation,
+  }
+  arm_timer(activity, false)
 end
 
---- Clears the indicator and stops its timer. Safe to call when nothing is in
---- flight — a request settling after the tab closed lands here.
+--- Stops the ticking timer without releasing the latch — a tab close must not
+--- drop the record of a request that keeps running on the sidecar. Safe to
+--- call when nothing is in flight, or when the timer is already paused.
+local function pause_activity()
+  if activity == nil or activity.timer == nil then
+    return
+  end
+  activity.timer:stop()
+  activity.timer:close()
+  activity.timer = nil
+end
+
+--- Re-arms a paused activity's timer once the tab (and its windows) come
+--- back — showing it immediately when it was already shown before the pause,
+--- rather than making the reader wait out the delay a second time.
+local function resume_activity()
+  if activity == nil or activity.timer ~= nil then
+    return
+  end
+  arm_timer(activity, activity.shown)
+end
+
+--- Clears the indicator and stops its timer, unconditionally — whatever is
+--- currently live, not necessarily the request that is settling (see
+--- `run_op`, which only calls this when the settling request is still the
+--- current generation). Safe to call when nothing is in flight.
 local function end_activity()
   local live = activity
   activity = nil
   if live == nil then
     return
   end
-  live.timer:stop()
-  live.timer:close()
+  if live.timer ~= nil then
+    live.timer:stop()
+    live.timer:close()
+  end
   status()
 end
 
@@ -480,6 +551,19 @@ local function refuse_if_busy()
   end
   notify(activity.label .. ' — wait for that to finish', vim.log.levels.WARN)
   return true
+end
+
+--- `<C-c>`: give up waiting on a wedged request. Nothing tells the sidecar —
+--- there is no cancel channel every op can reach (see `answer()`) — so this
+--- only frees the local latch. The abandoned request keeps a generation that
+--- is no longer current, so if it does answer later it renders its outcome
+--- but can never re-arm the latch or touch whatever runs next.
+local function give_up()
+  if activity == nil then
+    return
+  end
+  end_activity()
+  notify('gave up waiting — the request may still land', vim.log.levels.WARN)
 end
 
 --- Every request the review tab makes, with the indicator around it.
@@ -497,8 +581,17 @@ local function run_op(spec, on_result)
     return
   end
   begin_activity(spec.label)
+  local generation = activity.generation
   agent.request(spec.method, spec.params, function(err, result)
-    end_activity()
+    -- Only touch the indicator/timer/latch when this answer is still for the
+    -- CURRENT request. A tab close preserves the latch (see `pause_activity`),
+    -- so the usual case is that generation still matches; it stops matching
+    -- once `give_up` released it, or once a later request took the latch
+    -- after this one settled stale. Either way the outcome below still
+    -- renders — a stale answer is shown, it just cannot touch what runs now.
+    if activity ~= nil and activity.generation == generation then
+      end_activity()
+    end
     if err ~= nil then
       if spec.on_failure ~= nil then
         spec.on_failure(err)
@@ -512,8 +605,10 @@ local function run_op(spec, on_result)
     no_deadline = spec.no_deadline,
     on_sent = function(id)
       -- Nil when the request already settled (a synchronous refusal); the
-      -- events it would have matched are gone with it.
-      if activity ~= nil then
+      -- events it would have matched are gone with it. Guarded by generation
+      -- too, though `on_sent` fires synchronously so this is only ever the
+      -- record `begin_activity` just created.
+      if activity ~= nil and activity.generation == generation then
         activity.request_id = id
       end
     end,
@@ -643,10 +738,10 @@ local function answer()
         label = 'grading your answer',
         method = 'big.answer',
         on_error = 'the grading turn failed',
-        -- A grading round is an agent turn with no bound at all: its request
-        -- id is never stored where `big.cancel` can see it, and closing the
-        -- answer box only destroys the window — the turn keeps running and
-        -- still holds the session lock. There is no <C-c> for this one.
+        -- A grading round is an agent turn with no bound at all, and closing
+        -- the answer box only destroys the window — the turn keeps running
+        -- and still holds the session lock. `<C-c>` gives up locally (see
+        -- `give_up`), but reaches no cancel channel on the sidecar for this.
         no_deadline = true,
         params = {
           root = view.root,
@@ -685,9 +780,9 @@ local function explain()
   run_op({
     label = 'explaining this thread',
     method = 'big.explain',
-    -- An agent turn with no cancel: closing the float only destroys the
-    -- window, not the request — the turn runs to completion regardless, and
-    -- other actions refuse with "already running" until it does.
+    -- Closing the float only destroys the window, not the request — the turn
+    -- runs to completion regardless (or until `<C-c>` gives up on it locally),
+    -- and other actions refuse with "wait for that to finish" until it does.
     no_deadline = true,
     params = {
       root = view.root,
@@ -883,8 +978,12 @@ function M.close()
   local tab = view.tab
   view.tab, view.tree_win, view.pane_win = nil, nil, nil
   -- The request itself keeps going — a build turn is meant to outlive the
-  -- surface watching it — but its timer must not tick against dead windows.
-  end_activity()
+  -- surface watching it — and so does the one-at-a-time latch it holds: only
+  -- the timer is paused, so it stops ticking against dead windows without
+  -- dropping the record. `M.open` re-adopts it if the tab comes back before
+  -- it settles (issue-#10 regression: a reopen used to drop the latch, so a
+  -- second request would go out while the sidecar still held the first).
+  pause_activity()
   -- nvim refuses to close the last tabpage; the buffers below still go, so the
   -- review does not linger as a husk in a session that had only this tab.
   if tab ~= nil and vim.api.nvim_tabpage_is_valid(tab) and #vim.api.nvim_list_tabpages() > 1 then
@@ -921,6 +1020,7 @@ local KEYS = {
   { lhs = 'e', fn = explain, desc = 'nvime: explain this thread' },
   { lhs = 'R', fn = rebase, desc = 'nvime: rebase onto the moved base' },
   { lhs = 'M', fn = merge, desc = 'nvime: merge' },
+  { lhs = '<C-c>', fn = give_up, desc = 'nvime: give up waiting on a wedged request' },
   {
     lhs = 'q',
     fn = function()
@@ -1018,7 +1118,28 @@ local function build_tab()
       end
     end,
   })
+  -- `:tabclose` or `:q` on the raw window (bypassing the `q` mapping's own
+  -- `M.close`) still hides this buffer, and `bufhidden = 'wipe'` wipes it —
+  -- the one signal every teardown path shares. Without this the indicator's
+  -- timer keeps ticking a `status()` against dead windows for the rest of
+  -- the run; harmless (guarded by `win_valid`) but wasteful.
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    group = group,
+    buffer = view.tree_buf,
+    desc = 'nvime: stop the indicator timer when the review tab is torn down',
+    callback = pause_activity,
+  })
   vim.api.nvim_set_current_win(view.tree_win)
+  -- Every key here is a normal-mode-only mapping (`KEYS`), but the caller can
+  -- land here mid-insert — the big panel's prompt is routinely left in insert
+  -- after sending, and `tabnew`ing away from it carries that mode along
+  -- verbatim. Left alone, a raw `a`/`M` types into the (briefly writable, see
+  -- `write`) buffer instead of firing `answer`/`merge` — the exact `aMDEFEND`
+  -- corruption a QA pass caught, with no error since nvim considers this a
+  -- perfectly normal insert.
+  if vim.fn.mode():match('^i') then
+    vim.cmd('stopinsert')
+  end
 end
 
 --- Re-reads the captured diff for `session` and redraws.
@@ -1068,6 +1189,11 @@ function M.open(root, session, on_update)
   view.on_update = on_update
   view.selected = 1
   build_tab()
+  -- Re-adopts a request that was already in flight when the tab last closed
+  -- (a plain reopen, or `<C-t>` from the big panel) rather than orphaning it:
+  -- the latch survived `M.close`, only its timer was paused.
+  resume_activity()
+  status()
   M.reload(session)
 end
 

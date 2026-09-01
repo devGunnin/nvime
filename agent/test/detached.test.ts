@@ -513,7 +513,7 @@ describe('when the runner cannot start', () => {
 
     await assert.rejects(
       makeDetached().start(2, 'build', { root: repo, id: session.id }),
-      /already running/,
+      /still running/,
     );
     await detached.stop({ root: repo, id: session.id });
     await assert.rejects(running);
@@ -682,6 +682,38 @@ describe('a base that moved under a finished build (issue #10)', () => {
     const held = check.refusals.find((refusal) => refusal.code === 'held-elsewhere');
     assert.ok(held !== undefined, JSON.stringify(check.refusals));
     assert.match(held.message, /outside the editor/);
+
+    await running;
+  });
+
+  it('refuses to discard or restart over your own detached rebase, without blaming another editor', async () => {
+    const built = await builtAndTriaged();
+    moveBase();
+
+    writeScript({ triageTitle: 'rebased', holdMs: 3_000 });
+    const running = detached.start(2, 'rebase', { root: repo, id: built.id });
+    await until(
+      'the runner to record itself behind its claim',
+      () => store.liveRunner(store.require(repo, built.id)) !== null,
+    );
+
+    await assert.rejects(
+      () => big.discard(repo, built.id),
+      (cause: Error) => {
+        assert.match(cause.message, /outside the editor/);
+        assert.doesNotMatch(cause.message, /another editor/, 'discarding over your own rebase is not somebody else');
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      () => makeDetached().start(3, 'rebase', { root: repo, id: built.id }),
+      (cause: Error) => {
+        assert.match(cause.message, /outside the editor/);
+        assert.doesNotMatch(cause.message, /another editor/, 'starting a second run over your own rebase is not somebody else');
+        return true;
+      },
+    );
 
     await running;
   });
