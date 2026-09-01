@@ -62,6 +62,7 @@ local function info(entries, message)
 end
 
 local function check_neovim(entries)
+  ok(entries, 'nvime ' .. require('nvime.version'))
   if vim.fn.has('nvim-0.10') == 1 then
     ok(entries, 'Neovim ' .. tostring(vim.version()))
   else

@@ -147,6 +147,21 @@ local function pane_text()
   return vim.api.nvim_buf_get_lines(threads.view().pane_buf, 0, -1, false)
 end
 
+local THREADS_NS = vim.api.nvim_create_namespace('nvime.threads')
+
+--- 0-based rows carrying a whole-line highlight (a `hunk_band` tint).
+local function tinted_rows()
+  local buf = threads.view().pane_buf
+  local marks = vim.api.nvim_buf_get_extmarks(buf, THREADS_NS, 0, -1, { details = true })
+  local rows = {}
+  for _, mark in ipairs(marks) do
+    if mark[4].line_hl_group ~= nil then
+      rows[mark[2]] = mark[4].line_hl_group
+    end
+  end
+  return rows
+end
+
 describe('review thread list', function()
   it('gives each thread the chip its state earns', function()
     local lines = threads.tree_lines({
@@ -206,6 +221,22 @@ describe('review thread list', function()
     threads.close()
   end)
 
+  --- The `'--- ' .. file` line `pane_lines` synthesizes for a new file never
+  --- goes through `hunk_band` at all (it is appended straight to `lines`,
+  --- not read from `view.diff_lines`), so it can never pick up a tint —
+  --- moved here from a `hunk_band('--- a/pool.py')` unit pin, since
+  --- `hunk_band` itself no longer special-cases the header shape.
+  it('never tints its own synthesized file-separator line', function()
+    open_review({ block({ hunkIds = { 'h1.1', 'h2.1' }, files = { 'pool.py', 'notes.md' } }) })
+    local pane = pane_text()
+    local tinted = tinted_rows()
+    eq('--- pool.py', pane[4])
+    eq(nil, tinted[3], 'the pool.py separator (row 3, 0-based) must not be tinted')
+    eq('--- notes.md', pane[10])
+    eq(nil, tinted[9], 'the notes.md separator (row 9, 0-based) must not be tinted')
+    threads.close()
+  end)
+
   it(']t and [t walk the list and follow with the pane', function()
     open_review({
       block(),
@@ -221,6 +252,30 @@ describe('review thread list', function()
     eq(1, threads.view().selected)
     press(buf, '[t')
     eq(1, threads.view().selected, 'the first thread is the floor, not a wrap')
+    threads.close()
+  end)
+end)
+
+describe('review window resize', function()
+  --- `WinResized` used to run a full `draw()`, which re-cuts the pane and
+  --- always ends by putting its cursor back at line 1 — throwing a reader
+  --- 200 lines into a hunk back to the top on every resize.
+  it('keeps the reader’s place in the pane', function()
+    open_review({ block({ hunkIds = { 'h1.1', 'h2.1' }, files = { 'pool.py', 'notes.md' } }) })
+    local view = threads.view()
+    vim.api.nvim_win_set_cursor(view.pane_win, { 3, 0 })
+    vim.api.nvim_exec_autocmds('WinResized', {})
+    eq({ 3, 0 }, vim.api.nvim_win_get_cursor(view.pane_win), 'the resize handler must not reset the cursor')
+    threads.close()
+  end)
+
+  it('does not raise when the tree window is resized narrower than its bar chrome', function()
+    open_review({ block() })
+    local view = threads.view()
+    vim.api.nvim_win_set_width(view.tree_win, 3)
+    vim.v.errmsg = ''
+    vim.api.nvim_exec_autocmds('WinResized', {})
+    eq('', vim.v.errmsg, 'a narrow tree window must not raise from the resize handler')
     threads.close()
   end)
 end)
@@ -566,5 +621,108 @@ describe('the merge key', function()
       'merged into main as deadbeef',
       threads.gate_status({ display = 'merged', merge = { baseBranch = 'main', commit = 'deadbeefcafe' } })
     )
+  end)
+end)
+
+describe('the review’s own typography', function()
+  it('names the speaker once per answer, not once per line', function()
+    local lines = threads.gate_lines(block({
+      rounds = { round(90, { answer = 'first line\nsecond line\nthird line' }) },
+    }))
+    local speakers = 0
+    for _, line in ipairs(lines) do
+      if line:match('^you · ') ~= nil then
+        speakers = speakers + 1
+      end
+    end
+    eq(1, speakers, vim.inspect(lines))
+    local first = lines[3]
+    local continuation = lines[4]
+    eq(
+      vim.fn.strdisplaywidth(first:sub(1, first:find('first') - 1)),
+      vim.fn.strdisplaywidth(continuation:sub(1, continuation:find('second') - 1)),
+      'a continuation aligns under the first line: ' .. vim.inspect(lines)
+    )
+  end)
+
+  it('marks the score green only on the round that actually cleared the thread', function()
+    local _, cleared = threads.gate_lines(block({ state = 'resolved', rounds = { round(40), round(90) } }))
+    local _, still_open = threads.gate_lines(block({ state = 'open', rounds = { round(40) } }))
+    local function grade_groups(marks)
+      local out = {}
+      for _, mark in ipairs(marks) do
+        if mark.hl == 'NvimeOk' or mark.hl == 'NvimeWarn' then
+          out[#out + 1] = mark.hl
+        end
+      end
+      return out
+    end
+    eq({ 'NvimeWarn', 'NvimeOk' }, grade_groups(cleared))
+    eq({ 'NvimeWarn' }, grade_groups(still_open))
+  end)
+
+  it('bands a changed diff line, ignores context and the hunk marker', function()
+    eq('NvimeEditAdd', threads.hunk_band('+    added'))
+    eq('NvimeEditDelete', threads.hunk_band('-    removed'))
+    eq(nil, threads.hunk_band(' context'))
+    eq(nil, threads.hunk_band('@@ -1,2 +1,3 @@'))
+  end)
+
+  --- `hunk_band` used to guess at the `+++`/`---` file-header shape and skip
+  --- it, but `pane_lines` never hands it a real header — only diff-body
+  --- lines bounded by `readHunk`'s own counters — so the guess only produced
+  --- false negatives. A removed Lua comment or bulleted item is exactly the
+  --- shape it wrongly matched, and still must be tinted.
+  it('bands a removed comment or bullet, even one that starts with a repeated marker', function()
+    eq('NvimeEditDelete', threads.hunk_band('-- a Lua comment being removed'))
+    eq('NvimeEditAdd', threads.hunk_band('++nested added'))
+    eq('NvimeEditDelete', threads.hunk_band('-  -- indented Lua comment removed'))
+    -- Removing a `-- comment` line prepends the diff's own `-`, producing
+    -- `--- comment` — the file-header shape exactly. The bug this regresses.
+    eq('NvimeEditDelete', threads.hunk_band('--- a plain Lua comment that is about to go'))
+  end)
+
+  it('cuts a long thread title to the list width instead of wrapping it', function()
+    local lines = threads.tree_lines({ block({ title = string.rep('long ', 40) }) }, 40)
+    eq(1, #lines, 'one thread is one row, whatever its title')
+    ok(vim.fn.strchars(lines[1]) <= 40, lines[1])
+  end)
+
+  it('offers only the keys that still do something once the change has landed', function()
+    local landed = threads.keys_hint({ display = 'merged' })
+    ok(landed:find('answer') == nil, landed)
+    ok(landed:find('M merge') == nil, landed)
+    ok(threads.keys_hint({ display = 'reviewing' }):find('a answer') ~= nil)
+  end)
+end)
+
+describe('the grade the reader is told about', function()
+  it('clips a long verdict so the toast never stops the editor on hit-enter', function()
+    local verdict = string.rep('a long verdict sentence. ', 20)
+    local graded = {
+      blocks = {
+        block({
+          id = 'b1',
+          state = 'resolved',
+          rounds = {
+            round(88, {
+              result = {
+                grade = 88,
+                verdict = verdict,
+                hint = '',
+                followup = '',
+              },
+            }),
+          },
+        }),
+      },
+    }
+    local seen = with_notices(function()
+      threads.report_grade(graded, 'b1')
+    end)
+    eq(1, #seen)
+    ok(seen[1]:find('\n') == nil, 'one line only: ' .. seen[1])
+    ok(vim.fn.strchars(seen[1]) < vim.fn.strchars(verdict), seen[1])
+    ok(seen[1]:find('88', 1, true) ~= nil, seen[1])
   end)
 end)

@@ -50,6 +50,76 @@ describe('panel', function()
     ok(not vim.api.nvim_buf_is_valid(self.buf), 'buffers are cleaned up')
   end)
 
+  --- The panel names its buffer `nvime-<name>` with no `scheme://`, so the
+  --- name resolves as a real relative path. If the user happens to have a
+  --- file open under that exact name (e.g. `nvime-chat` in the project
+  --- root), opening the panel used to force-delete their buffer — discarding
+  --- unsaved edits — because the old reclaim logic could not tell nvime's
+  --- own scratch buffer apart from a real one sharing its name.
+  it('never force-deletes a real file the user has open under the panel’s own name', function()
+    panel.close(NAME)
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local before_cwd = vim.fn.getcwd()
+    vim.fn.writefile({ 'the user is editing this real file' }, dir .. '/nvime-' .. NAME)
+    vim.cmd.cd(dir)
+    vim.cmd.edit('nvime-' .. NAME)
+    local user_buf = vim.api.nvim_get_current_buf()
+    vim.bo[user_buf].modifiable = true
+    vim.api.nvim_buf_set_lines(user_buf, -1, -1, false, { 'UNSAVED WORK the user just typed' })
+    ok(vim.bo[user_buf].modified, 'the probe needs a genuinely unsaved buffer')
+
+    config.setup({})
+    palette.apply()
+    panel.open(panel_opts())
+
+    ok(vim.api.nvim_buf_is_valid(user_buf), "the user's buffer must survive opening the panel")
+    eq(
+      { 'the user is editing this real file', 'UNSAVED WORK the user just typed' },
+      vim.api.nvim_buf_get_lines(user_buf, 0, -1, false)
+    )
+
+    panel.close(NAME)
+    vim.cmd.cd(before_cwd)
+  end)
+
+  --- With the real file still open, the panel's buffer falls back to the
+  --- `nvime://` scheme (above). That fallback buffer is `bufhidden = 'hide'`,
+  --- so it survives when the registry is dropped without a proper close (a
+  --- `:bd` on the prompt buffer does this — `M.get` sees the invalid prompt
+  --- and drops the whole entry). The next open collides on the plain name
+  --- again, falls back again, and used to raise E95 unguarded because the
+  --- surviving fallback buffer still held that name.
+  it('does not raise when a second collision hits the nvime:// fallback name too', function()
+    panel.close(NAME)
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local before_cwd = vim.fn.getcwd()
+    vim.fn.writefile({ 'the user is editing this real file' }, dir .. '/nvime-' .. NAME)
+    vim.cmd.cd(dir)
+    vim.cmd.edit('nvime-' .. NAME)
+    local user_buf = vim.api.nvim_get_current_buf()
+
+    config.setup({})
+    palette.apply()
+    local first = panel.open(panel_opts())
+    ok(vim.api.nvim_buf_is_valid(first.buf), 'the fallback-named buffer opened')
+
+    -- Drops the registry entry without deleting `first.buf`, which survives
+    -- (bufhidden = 'hide') and still holds the fallback name.
+    vim.api.nvim_buf_delete(first.prompt_buf, { force = true })
+    ok(not panel.is_open(NAME), 'a half-wiped panel is treated as closed')
+    ok(vim.api.nvim_buf_is_valid(first.buf), 'the survivor buffer is still there to collide with')
+
+    local second = panel.open(panel_opts())
+    ok(panel.is_open(NAME), 'the panel must still open on a second collision')
+    ok(vim.api.nvim_buf_is_valid(second.buf))
+    ok(vim.api.nvim_buf_is_valid(user_buf), "the user's real buffer is still untouched")
+
+    panel.close(NAME)
+    vim.cmd.cd(before_cwd)
+  end)
+
   it('reuses the panel instead of stacking splits', function()
     local first = open()
     local windows = #vim.api.nvim_list_wins()
@@ -169,7 +239,7 @@ describe('panel', function()
     current():finish_stream()
     eq({ 'claude', '```lua', 'local x = 1', '```', '' }, lines())
     local code = vim.tbl_filter(function(mark)
-      return mark[4].hl_group == 'NvimeCode'
+      return mark[4].line_hl_group == 'NvimeCode'
     end, marks())
     eq(1, #code)
     panel.close(NAME)
@@ -297,5 +367,41 @@ describe('panel', function()
 
     panel.close(NAME)
     vim.fn.delete(dir, 'rf')
+  end)
+end)
+
+describe('panel following', function()
+  it('stays glued to the tail when one delta commits many lines at once', function()
+    local self_ = open()
+    vim.api.nvim_win_set_height(self_.win, 5)
+    current():begin_stream('claude')
+    current():push_delta(('a\nb\nc\nd\ne\nf\ng\nh\n'):rep(4))
+    current():push_delta('tail')
+    local last = vim.api.nvim_buf_line_count(self_.buf)
+    eq(last, vim.api.nvim_win_get_cursor(self_.win)[1], 'a multi-line delta must not unpin the panel')
+    current():finish_stream()
+    panel.close(NAME)
+  end)
+
+  it('stops following once the reader scrolls up, and resumes at the tail', function()
+    local self_ = open()
+    current():begin_stream('claude')
+    current():push_delta(('line\n'):rep(30))
+    vim.api.nvim_set_current_win(self_.win)
+    vim.api.nvim_win_set_cursor(self_.win, { 2, 0 })
+    vim.api.nvim_exec_autocmds('CursorMoved', { buffer = self_.buf })
+    current():push_delta('more\n')
+    eq(2, vim.api.nvim_win_get_cursor(self_.win)[1], 'the reader keeps their place')
+
+    vim.api.nvim_win_set_cursor(self_.win, { vim.api.nvim_buf_line_count(self_.buf), 0 })
+    vim.api.nvim_exec_autocmds('CursorMoved', { buffer = self_.buf })
+    current():push_delta('again\n')
+    eq(
+      vim.api.nvim_buf_line_count(self_.buf),
+      vim.api.nvim_win_get_cursor(self_.win)[1],
+      'back at the tail means following again'
+    )
+    current():finish_stream()
+    panel.close(NAME)
   end)
 end)

@@ -33,6 +33,21 @@ describe('keymaps', function()
     end
   end)
 
+  --- `threads.lua` binds `e` (explain) but the registry used to omit it,
+  --- leaving the leaf-only check blind to a live mapping — the vimdoc
+  --- documented it correctly the whole time.
+  it('lists every key the review pane actually binds, e included', function()
+    local listed = {}
+    for _, entry in ipairs(keymaps.all(config.setup({}))) do
+      if entry.scope == 'threads' then
+        listed[entry.lhs] = true
+      end
+    end
+    for _, lhs in ipairs({ ']t', '[t', 'a', 'e', 'r', 'X', 'R', 'M', '<CR>', 'q' }) do
+      ok(listed[lhs], lhs .. ' is bound in the review pane but missing from the registry')
+    end
+  end)
+
   it('is leaf-only: no mapping is a prefix of another in the same mode', function()
     eq({}, keymaps.conflicts(keymaps.all(config.setup({}))))
   end)

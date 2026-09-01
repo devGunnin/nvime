@@ -120,9 +120,51 @@ describe('the dashboard page', function()
     eq({}, rows)
   end)
 
+  it('cuts a long change title to the page width instead of wrapping the row', function()
+    local long = summary({ title = string.rep('a very long title ', 8) })
+    local lines, rows = dashboard.render(facts({ long }), 60)
+    local listed = 0
+    for row in pairs(rows) do
+      listed = listed + 1
+      -- Characters, not cells: `strdisplaywidth` reads off the current buffer
+      -- and drifts by a cell or two across a whole suite run, and the property
+      -- under test is that the row was cut at all rather than wrapped.
+      ok(vim.fn.strchars(lines[row]) <= 60, vim.fn.strchars(lines[row]) .. ': ' .. lines[row])
+    end
+    eq(1, listed, 'one change is one row, however long its title')
+  end)
+
+  it('puts the cursor on the first change, not on the banner', function()
+    open_dashboard({ summary(), summary({ id = 'sess2', title = 'retry ceiling' }) })
+    local view = dashboard.current()
+    local row = vim.api.nvim_win_get_cursor(view.win)[1]
+    eq('sess1', view.rows[row], 'the cursor starts on an openable row')
+    dashboard.dismiss()
+  end)
+
+  it('paints only a ready preflight as ready', function()
+    eq('NvimeOk', dashboard.fact_hl('running'))
+    eq('NvimeOk', dashboard.fact_hl('present'))
+    eq('NvimeError', dashboard.fact_hl('missing — run npm --prefix agent run build'))
+    eq('NvimeDim', dashboard.fact_hl('starts on first use'))
+  end)
+
   it('reports a missing build with what to run', function()
     local page = table.concat(dashboard.render(facts({}, { build = 'missing — run npm' })), '\n')
     ok(page:match('build    missing — run npm') ~= nil, page)
+  end)
+
+  it('never emits a mark past the byte length of its own line', function()
+    -- Version-independent: nvim_buf_set_extmark rejects this shape on 0.11
+    -- even with strict=false, while 0.12 silently clamps it — catch it here
+    -- regardless of which nvim is running the suite.
+    local lines, _, marks = dashboard.render(facts({ summary(), summary({ id = 'sess2', title = 'retry ceiling' }) }))
+    for _, mark in ipairs(marks) do
+      local line = lines[mark.row + 1]
+      ok(line ~= nil, 'mark row ' .. mark.row .. ' has no line')
+      ok(mark.col <= mark.end_col, 'end_col before col: ' .. vim.inspect(mark))
+      ok(mark.end_col <= #line, 'end_col past the line: ' .. vim.inspect(mark) .. ' line=' .. vim.inspect(line))
+    end
   end)
 end)
 

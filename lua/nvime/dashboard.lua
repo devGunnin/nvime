@@ -9,11 +9,17 @@
 --- The session list is asked for, not cached. A float that showed a stale
 --- "2 open" would be worse than one that says it could not reach the sidecar.
 local agent = require('nvime.agent')
+local text = require('nvime.text')
 
 local M = {}
 
-local WIDTH = 78
-local MAX_HEIGHT = 22
+local WIDTH = 96
+local MAX_HEIGHT = 24
+local NS = vim.api.nvim_create_namespace('nvime.dashboard')
+
+--- Columns the session table is laid out on, so the title's room is known.
+local WHERE_WIDTH, PROGRESS_WIDTH = 11, 24
+local TITLE_COL = 2 + WHERE_WIDTH + 1 + PROGRESS_WIDTH + 1
 
 local view = {
   win = nil,
@@ -30,10 +36,35 @@ local ENTRIES = {
   { key = 'd', label = 'diff', summary = 'the changeset of the last edit run' },
 }
 
+--- The colour a change's state is drawn in, so the list scans by shape.
+local STATE_HL = {
+  merged = 'NvimeOk',
+  reviewing = 'NvimeWarn',
+  mergeable = 'NvimeOk',
+  building = 'NvimeActivity',
+  triaging = 'NvimeActivity',
+  drafting = 'NvimeDim',
+}
+
+--- The states of the preflight facts that are actually good news. Anything
+--- else is neutral or a failure, and neither is painted as "all set".
+local READY = { running = true, present = true }
+
+--- @param value string the fact as it is written on the page
+--- @return string highlight group
+function M.fact_hl(value)
+  assert(type(value) == 'string', 'dashboard.fact_hl needs a fact')
+  if READY[value] then
+    return 'NvimeOk'
+  end
+  return value:find('missing') ~= nil and 'NvimeError' or 'NvimeDim'
+end
+
 --- One line per big change: where it is, and how much of its review is left.
 --- @param session table a list summary from `big.list`
+--- @param title_width integer|nil cells the title may occupy before it is cut
 --- @return string
-function M.session_line(session)
+function M.session_line(session, title_width)
   assert(type(session) == 'table', 'dashboard.session_line needs a session')
   local counts = session.counts or {}
   local substantial = counts.substantial or 0
@@ -53,39 +84,73 @@ function M.session_line(session)
   if session.heldElsewhere then
     where = where .. '*'
   end
-  return string.format('  %-11s %-24s %s', where, progress, session.title or '(untitled)')
+  local title = session.title or '(untitled)'
+  if title_width ~= nil then
+    -- Cut, never wrapped: a wrapped title shifts every row below it out of
+    -- step with the session it opens.
+    title = text.ellipsise(title, math.max(title_width, 8))
+  end
+  return string.format('  %-' .. WHERE_WIDTH .. 's %-' .. PROGRESS_WIDTH .. 's %s', where, progress, title)
 end
 
 --- The whole page. Pure, so the layout is testable without a window.
 --- @param facts table sidecar (string), build (string), sessions (table[]), error (string|nil)
+--- @param width integer|nil columns available inside the border
 --- @return string[] lines
 --- @return table rows row -> session id, for the rows that carry one
-function M.render(facts)
+--- @return table[] marks each { row = 0-based, col, end_col, hl }
+function M.render(facts, width)
   assert(type(facts) == 'table', 'dashboard.render needs a facts table')
-  local lines = { 'nvime — no vibe coding in my editor', '' }
+  local title_width = math.max((width or WIDTH) - TITLE_COL, 12)
+  -- A blank line at each end, so the page breathes inside its border.
+  local lines, marks = { '', ' nvime — no vibe coding in my editor', '' }, {}
+  -- end_col < 0 means "to the end of this row's own line": resolved here to
+  -- the line's real byte length. nvim 0.11 errors on end_row given without an
+  -- end_col, even with strict=false — 0.12 silently tolerates it.
+  local function mark(row, col, end_col, hl)
+    if end_col < 0 then
+      end_col = #(lines[row + 1] or '')
+    end
+    marks[#marks + 1] = { row = row, col = col, end_col = end_col, hl = hl }
+  end
+  mark(1, 0, -1, 'NvimeHeading')
+
   for _, entry in ipairs(ENTRIES) do
     lines[#lines + 1] = string.format('  %s  %-6s %s', entry.key, entry.label, entry.summary)
+    mark(#lines - 1, 2, 3, 'NvimeKey')
+    mark(#lines - 1, 5, 11, 'NvimeFile')
+    mark(#lines - 1, 12, -1, 'NvimeDim')
   end
   lines[#lines + 1] = ''
-  lines[#lines + 1] = '  sidecar  ' .. facts.sidecar
-  lines[#lines + 1] = '  build    ' .. facts.build
+  for _, row in ipairs({ { 'sidecar  ', facts.sidecar }, { 'build    ', facts.build } }) do
+    lines[#lines + 1] = '  ' .. row[1] .. row[2]
+    mark(#lines - 1, 0, 2 + #row[1], 'NvimeLabel')
+    mark(#lines - 1, 2 + #row[1], -1, M.fact_hl(row[2]))
+  end
   lines[#lines + 1] = ''
-  lines[#lines + 1] = 'big changes in this project'
+  lines[#lines + 1] = ' big changes in this project'
+  mark(#lines - 1, 0, -1, 'NvimeHeading')
 
   local rows = {}
   if facts.error ~= nil then
     lines[#lines + 1] = '  ! ' .. facts.error
+    mark(#lines - 1, 0, -1, 'NvimeError')
   elseif #(facts.sessions or {}) == 0 then
     lines[#lines + 1] = '  none yet — press b and describe one'
+    mark(#lines - 1, 0, -1, 'NvimeDim')
   else
     for _, session in ipairs(facts.sessions) do
-      lines[#lines + 1] = M.session_line(session)
+      lines[#lines + 1] = M.session_line(session, title_width)
       rows[#lines] = session.id
+      mark(#lines - 1, 2, 2 + WHERE_WIDTH, STATE_HL[session.display] or 'NvimeDim')
+      mark(#lines - 1, 2 + WHERE_WIDTH, TITLE_COL, 'NvimeDim')
     end
   end
   lines[#lines + 1] = ''
   lines[#lines + 1] = '  <CR> open a change · q close · :checkhealth nvime'
-  return lines, rows
+  mark(#lines - 1, 0, -1, 'NvimeDim')
+  lines[#lines + 1] = ''
+  return lines, rows, marks
 end
 
 local function close()
@@ -114,7 +179,7 @@ local function open_under_cursor()
   big.select(id)
 end
 
-local function draw(lines, rows)
+local function draw(lines, rows, marks)
   if view.buf == nil or not vim.api.nvim_buf_is_valid(view.buf) then
     return
   end
@@ -122,8 +187,27 @@ local function draw(lines, rows)
   vim.bo[view.buf].modifiable = true
   vim.api.nvim_buf_set_lines(view.buf, 0, -1, false, lines)
   vim.bo[view.buf].modifiable = false
+  vim.api.nvim_buf_clear_namespace(view.buf, NS, 0, -1)
+  for _, mark in ipairs(marks or {}) do
+    -- Belt: a future render bug degrades to a short highlight here, never
+    -- a draw() error — clamp against the line actually written to the buffer.
+    local line_bytes = #(lines[mark.row + 1] or '')
+    local end_col = math.min(mark.end_col, line_bytes)
+    vim.api.nvim_buf_set_extmark(view.buf, NS, mark.row, math.min(mark.col, end_col), {
+      end_col = end_col,
+      hl_group = mark.hl,
+      strict = false,
+    })
+  end
   if view.win ~= nil and vim.api.nvim_win_is_valid(view.win) then
-    vim.api.nvim_win_set_height(view.win, math.min(#lines, MAX_HEIGHT))
+    vim.api.nvim_win_set_height(view.win, math.max(math.min(#lines, MAX_HEIGHT), 1))
+    -- On the first change, not on the banner: the cursorline then reads as a
+    -- selection rather than as a stripe across the title.
+    local first = nil
+    for row in pairs(rows) do
+      first = first == nil and row or math.min(first, row)
+    end
+    pcall(vim.api.nvim_win_set_cursor, view.win, { first or 1, 0 })
   end
 end
 
@@ -182,6 +266,7 @@ function M.open()
     title_pos = 'center',
   })
   vim.wo[view.win].cursorline = true
+  vim.wo[view.win].winhighlight = 'CursorLine:NvimeCursorLine'
   bind(view.buf)
 
   local facts = {
@@ -189,7 +274,7 @@ function M.open()
     build = vim.uv.fs_stat(agent.dist_path()) ~= nil and 'present' or ('missing — ' .. agent.build_hint()),
     sessions = {},
   }
-  draw(M.render(facts))
+  draw(M.render(facts, width))
 
   local root = require('nvime.context').project_root()
   agent.request('big.list', { root = root }, function(err, result)
@@ -198,7 +283,7 @@ function M.open()
     else
       facts.sessions = (result or {}).sessions or {}
     end
-    draw(M.render(facts))
+    draw(M.render(facts, width))
   end)
 end
 

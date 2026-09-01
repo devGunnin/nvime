@@ -137,7 +137,7 @@ end)
 
 describe('completion vs git — differential gitignore matching', function()
   it(
-    'agrees with `git ls-files --others --exclude-standard` on character classes, ** across /, and nested .gitignore',
+    'agrees with `git ls-files --others --exclude-standard` on classes, a literal `]`, ** across /, nested .gitignore',
     function()
       local dir = sandbox()
       vim.fn.system({ 'git', 'init', '-q', dir })
@@ -160,7 +160,11 @@ describe('completion vs git — differential gitignore matching', function()
       vim.fn.writefile({ 'x' }, dir .. '/sub/kept.py')
       vim.fn.writefile({ 'nested-ignored.py' }, dir .. '/sub/.gitignore')
 
-      vim.fn.writefile({ '[ab].txt', '**/deep.txt' }, dir .. '/.gitignore')
+      -- A literal `]` as the first member of a class, git's own spelling.
+      vim.fn.writefile({ 'x' }, dir .. '/]bracket.md')
+      vim.fn.writefile({ 'x' }, dir .. '/keep].md')
+
+      vim.fn.writefile({ '[ab].txt', '**/deep.txt', '[]]*.md' }, dir .. '/.gitignore')
 
       local out = vim.fn.systemlist({ 'git', '-C', dir, 'ls-files', '--others', '--exclude-standard' })
       ok(vim.v.shell_error == 0, 'git ls-files failed: ' .. table.concat(out, '\n'))
@@ -192,13 +196,14 @@ describe('completion vs git — differential gitignore matching', function()
   )
 end)
 
-describe('completion — a malformed .gitignore pattern degrades, never crashes', function()
-  it('skips a `[]]` class instead of throwing, and does not filter anything with it', function()
+describe('completion — a `]` inside a character class', function()
+  it("honours `[]]`, git's spelling for a literal `]`, instead of skipping the rule", function()
     local dir = sandbox()
     vim.fn.writefile({ 'x' }, dir .. '/keep.py')
-    -- `[]]` is git's spelling for "a literal `]`" — legitimate syntax that
-    -- used to compile to an invalid Lua pattern and throw at match time.
-    vim.fn.writefile({ 'x' }, dir .. '/oddname]file.txt')
+    -- `[]]*.txt` ignores a name that STARTS with `]`, and nothing else.
+    vim.fn.writefile({ 'x' }, dir .. '/]odd.txt')
+    vim.fn.writefile({ 'x' }, dir .. '/a]b.txt')
+    vim.fn.writefile({ 'x' }, dir .. '/plain.txt')
     vim.fn.writefile({ '[]]*.txt' }, dir .. '/.gitignore')
     completion.invalidate(dir)
     completion.refresh(dir)
@@ -206,17 +211,51 @@ describe('completion — a malformed .gitignore pattern degrades, never crashes'
 
     local candidates = completion.candidates(dir, '')
     ok(vim.tbl_contains(candidates, 'keep.py'), vim.inspect(candidates))
+    ok(vim.tbl_contains(candidates, 'a]b.txt'), 'the class is anchored, not a substring: ' .. vim.inspect(candidates))
+    ok(vim.tbl_contains(candidates, 'plain.txt'), vim.inspect(candidates))
     ok(
-      vim.tbl_contains(candidates, 'oddname]file.txt'),
-      'a skipped rule must filter nothing, not fall back to matching everything: ' .. vim.inspect(candidates)
+      not vim.tbl_contains(candidates, ']odd.txt'),
+      'git ignores a name starting with `]`, and so must this: ' .. vim.inspect(candidates)
     )
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('honours a negated class that opens with a literal `]`', function()
+    local dir = sandbox()
+    vim.fn.writefile({ 'x' }, dir .. '/]keep.txt')
+    vim.fn.writefile({ 'x' }, dir .. '/gone.txt')
+    vim.fn.writefile({ '[!]]*.txt' }, dir .. '/.gitignore')
+    completion.invalidate(dir)
+    completion.refresh(dir)
+    wait_ready(dir)
+
+    local candidates = completion.candidates(dir, '')
+    ok(vim.tbl_contains(candidates, ']keep.txt'), vim.inspect(candidates))
+    ok(not vim.tbl_contains(candidates, 'gone.txt'), vim.inspect(candidates))
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('matches a `]` in the middle of a path segment', function()
+    local dir = sandbox()
+    vim.fn.mkdir(dir .. '/pkg', 'p')
+    vim.fn.writefile({ 'x' }, dir .. '/pkg/foo]bar')
+    vim.fn.writefile({ 'x' }, dir .. '/pkg/foobar')
+    vim.fn.writefile({ 'pkg/foo[]]bar' }, dir .. '/.gitignore')
+    completion.invalidate(dir)
+    completion.refresh(dir)
+    wait_ready(dir)
+
+    local candidates = completion.candidates(dir, '')
+    ok(vim.tbl_contains(candidates, 'pkg/foobar'), vim.inspect(candidates))
+    ok(not vim.tbl_contains(candidates, 'pkg/foo]bar'), vim.inspect(candidates))
     vim.fn.delete(dir, 'rf')
   end)
 
   it('recovers instead of getting stuck at "loading" forever', function()
     local dir = sandbox()
     vim.fn.writefile({ 'x' }, dir .. '/keep.py')
-    vim.fn.writefile({ '[]]*.txt' }, dir .. '/.gitignore')
+    -- Genuinely malformed: an unterminated class git reads as a literal `[`.
+    vim.fn.writefile({ '[unclosed*.txt' }, dir .. '/.gitignore')
 
     completion.invalidate(dir)
     completion.refresh(dir)

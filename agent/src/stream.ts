@@ -1,4 +1,5 @@
-import { relative } from 'node:path';
+import { homedir } from 'node:os';
+import { relative, sep } from 'node:path';
 
 /**
  * Reading the SDK's message stream: the shapes chat and edit both consume.
@@ -131,13 +132,29 @@ function clip(text: string): string {
   return oneLine.length <= MAX_SUMMARY_CHARS ? oneLine : oneLine.slice(0, MAX_SUMMARY_CHARS - 1) + '…';
 }
 
+/**
+ * How one path is written in a status line: relative to the project when it is
+ * inside it, otherwise where it really is, with the home directory as `~`.
+ *
+ * `relative` answers for anything outside the root with a ladder of `..`
+ * segments that says nothing about where the file actually is.
+ */
+export function shortPath(value: string, cwd: string): string {
+  const inside = relative(cwd, value);
+  if (inside !== '' && !inside.startsWith('..')) return inside;
+  const home = homedir();
+  if (home !== '' && (value === home || value.startsWith(home + sep))) {
+    return '~' + value.slice(home.length);
+  }
+  return value;
+}
+
 export function describeTool(name: string, input: Record<string, unknown>, cwd: string): string {
   const text = (key: string): string | null =>
     typeof input[key] === 'string' && input[key] !== '' ? (input[key] as string) : null;
-  const shortPath = (value: string): string => relative(cwd, value) || value;
   const forPath = (key: string, verb: string, fallback: string): string => {
     const path = text(key);
-    return path === null ? fallback : `${verb} ${shortPath(path)}`;
+    return path === null ? fallback : `${verb} ${shortPath(path, cwd)}`;
   };
   switch (name) {
     case 'Read':

@@ -4,12 +4,20 @@ local M = {}
 --- this list is only what a user may write in `setup`.
 M.DIFFICULTIES = { 'vibe', 'easy', 'medium', 'extreme' }
 
+--- The glyph sets `nvime.icons` can draw from.
+M.ICON_SETS = { 'unicode', 'ascii' }
+
 --- Defaults. `setup()` deep-merges the user table over this and validates the result.
 local defaults = {
   panel = {
     width = 80,
     prompt_height = 3,
     position = 'right',
+  },
+  ui = {
+    -- Plain Unicode glyphs (no private-use Nerd Font codepoints), or ASCII for
+    -- a terminal font that has neither.
+    icons = 'unicode',
   },
   keymaps = {
     -- Opt-in: nvime claims no global keys until you ask it to.
@@ -80,6 +88,10 @@ local function validate(opts)
   end
   if opts.panel.position ~= 'right' and opts.panel.position ~= 'left' then
     fail("panel.position must be 'right' or 'left'")
+  end
+  check_type(opts.ui.icons, 'string', 'ui.icons')
+  if not vim.tbl_contains(M.ICON_SETS, opts.ui.icons) then
+    fail('ui.icons must be one of: ' .. table.concat(M.ICON_SETS, ', '))
   end
   check_type(opts.keymaps.enabled, 'boolean', 'keymaps.enabled')
   check_type(opts.keymaps.chat, 'string', 'keymaps.chat')

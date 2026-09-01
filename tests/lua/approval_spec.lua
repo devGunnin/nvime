@@ -288,3 +288,87 @@ describe('approval.dismiss_all', function()
     eq(0, approval.queued())
   end)
 end)
+
+describe('the approval float is tall enough for what it shows', function()
+  it('wraps the summary and the reason to the border, so no line needs a second row', function()
+    local lines = approval.render({
+      approvalId = 'a1',
+      tool = 'Bash',
+      summary = 'running ' .. string.rep('find . -name "pool.py" -print ', 4),
+      reason = string.rep('shell commands are never auto-allowed here ', 4),
+      detail = { kind = 'command', text = 'echo hi', bytes = 7 },
+    }, 60)
+    for _, line in ipairs(lines) do
+      ok(vim.fn.strdisplaywidth(line) <= 60, vim.fn.strdisplaywidth(line) .. ': ' .. line)
+    end
+  end)
+
+  --- Proves the fix in a real window, not just in `render`'s output: the
+  --- reviewer's probe — a CJK summary plus a tab-laden command, at a
+  --- 20-column float (a 24-column terminal) — used to leave the command
+  --- scrolled off before the user could ever read it, with no scrollbar or
+  --- other cue that anything was cut.
+  it('never hides the command being consented to behind the bottom of the float', function()
+    fresh()
+    local before_columns, before_lines = vim.o.columns, vim.o.lines
+    vim.o.columns, vim.o.lines = 24, 50
+    local command = 'rm\t-rf\t/'
+    approval.ask({
+      approvalId = 'a1',
+      tool = 'Bash',
+      summary = string.rep('这是一个很长的说明', 20),
+      reason = 'outside the agreed scope',
+      detail = { kind = 'command', text = command, bytes = #command },
+    }, function() end)
+    local win, buf = approval.current().win, approval.current().buf
+    local total = vim.api.nvim_buf_line_count(buf)
+    local last_visible = vim.api.nvim_win_call(win, function()
+      vim.cmd('redraw')
+      return vim.fn.line('w$')
+    end)
+    eq(total, last_visible, 'every line of the float, including the command, must be on screen')
+    approval.dismiss_all()
+    vim.o.columns, vim.o.lines = before_columns, before_lines
+  end)
+
+  it('still shows the payload when the summary needed several lines', function()
+    local lines = approval.render({
+      approvalId = 'a1',
+      tool = 'Bash',
+      summary = string.rep('a wordy summary that will not fit on one line ', 5),
+      reason = 'shell is never auto-allowed',
+      detail = { kind = 'command', text = 'rm -rf /tmp/x', bytes = 13 },
+    }, 60)
+    local page = table.concat(lines, '\n')
+    ok(page:find('rm -rf /tmp/x', 1, true) ~= nil, page)
+    for _, line in ipairs(lines) do
+      ok(vim.fn.strdisplaywidth(line) <= 60, line)
+    end
+  end)
+
+  --- Cells, not characters: the bug this pins is a chunker that measured
+  --- `vim.fn.strcharpart(line, at, width)` as if `width` characters could
+  --- never cost more than `width` cells. CJK text is up to two cells a
+  --- character, so a passing "<= 60 characters" assertion agreed with it.
+  --- The binding assertion is the second one: the float's height is
+  --- `#lines`, so every rendered line must be its own single screen row —
+  --- not merely under the width, which a two-row line would also satisfy.
+  it('never wraps a CJK payload or summary past the width it was given', function()
+    local cjk = string.rep('删除', 60)
+    local width = 60
+    local lines = approval.render({
+      approvalId = 'a1',
+      tool = 'Bash',
+      summary = cjk,
+      reason = 'runs a shell command',
+      detail = { kind = 'command', text = cjk, bytes = #cjk },
+    }, width)
+    local rows = 0
+    for _, line in ipairs(lines) do
+      local cells = vim.fn.strdisplaywidth(line)
+      ok(cells <= width, cells .. ': ' .. line)
+      rows = rows + math.max(1, math.ceil(cells / width))
+    end
+    eq(rows, #lines, 'each rendered line must be exactly one screen row, or the height is undercounted')
+  end)
+end)

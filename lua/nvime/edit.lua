@@ -40,9 +40,11 @@ local state = {
   tally = nil,
 }
 
+-- Foreground groups, not the hunk bands: a background here paints a ragged
+-- box around one line of the panel instead of marking a change in a buffer.
 local STATUS_LINE = {
-  applied = { '  updated %s (%s)', 'NvimeEditChange' },
-  unchanged = { '  updated %s (%s)', 'NvimeEditChange' },
+  applied = { '  updated %s (%s)', 'NvimeAdded' },
+  unchanged = { '  updated %s (%s)', 'NvimeAdded' },
   ['not-open'] = { '  changed on disk: %s (%s)', 'NvimeDim' },
   opaque = { '  changed on disk, not diffable: %s (%s)', 'NvimeDim' },
   conflict = { '  ! %s (%s) has unsaved edits — left alone, revert it from <leader>nd', 'NvimeError' },

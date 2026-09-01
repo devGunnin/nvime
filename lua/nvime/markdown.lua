@@ -16,6 +16,9 @@ local M = {}
 --- @field kind 'fence_open'|'fence_close'|'code'|'heading'|'text'
 --- @field lang string|nil language of the fence this line opens
 --- @field spans nvime.Span[]
+--- @field line_hl string|nil group painted across the whole rendered line —
+---   what gives a code block one continuous background rather than a ragged
+---   one that stops at the last character of each line
 
 function M.new_state()
   return { in_fence = false, fence_lang = nil }
@@ -101,20 +104,26 @@ function M.scan(line, state)
     if state.in_fence then
       state.in_fence = false
       state.fence_lang = nil
-      return { kind = 'fence_close', lang = nil, spans = { { 0, width, 'NvimeFence' } } }
+      return { kind = 'fence_close', lang = nil, spans = {}, line_hl = 'NvimeFence' }
     end
     state.in_fence = true
     state.fence_lang = fence.rest ~= '' and fence.rest:match('^(%S+)') or nil
-    return { kind = 'fence_open', lang = state.fence_lang, spans = { { 0, width, 'NvimeFence' } } }
+    return { kind = 'fence_open', lang = state.fence_lang, spans = {}, line_hl = 'NvimeFence' }
   end
 
   if state.in_fence then
-    return { kind = 'code', lang = state.fence_lang, spans = { { 0, width, 'NvimeCode' } } }
+    -- No span: the line highlight carries the block's colour, and whatever the
+    -- fence's own grammar paints on top of it keeps its foreground.
+    return { kind = 'code', lang = state.fence_lang, spans = {}, line_hl = 'NvimeCode' }
   end
 
   local hashes = line:match('^(#+)%s')
   if hashes ~= nil and #hashes <= 6 then
-    return { kind = 'heading', lang = nil, spans = { { 0, width, 'NvimeHeading' } } }
+    return {
+      kind = 'heading',
+      lang = nil,
+      spans = { { 0, #hashes, 'NvimeDim' }, { #hashes, width, 'NvimeHeading' } },
+    }
   end
 
   return { kind = 'text', lang = nil, spans = inline_spans(line) }

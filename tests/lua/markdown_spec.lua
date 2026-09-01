@@ -7,7 +7,7 @@ describe('markdown.scan', function()
   it('marks a heading line whole', function()
     local info = markdown.scan('## Findings', markdown.new_state())
     eq('heading', info.kind)
-    eq({ { 0, 11, 'NvimeHeading' } }, info.spans)
+    eq({ { 0, 2, 'NvimeDim' }, { 2, 11, 'NvimeHeading' } }, info.spans)
   end)
 
   it('ignores a run of hashes that is not a heading', function()
@@ -44,7 +44,10 @@ describe('markdown.scan', function()
 
     local body = markdown.scan('local x = 1 -- **not bold**', state)
     eq('code', body.kind)
-    eq({ { 0, 27, 'NvimeCode' } }, body.spans)
+    -- The block's colour is a line highlight, so the fence grammar keeps
+    -- its own foregrounds on top of it.
+    eq({}, body.spans)
+    eq('NvimeCode', body.line_hl)
 
     local close = markdown.scan('```', state)
     eq('fence_close', close.kind)
