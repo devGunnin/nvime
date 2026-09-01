@@ -96,6 +96,38 @@ describe('text.wrap_exact', function()
   end)
 end)
 
+describe('text.wrap_exact performance', function()
+  --- A tab-indented heredoc as one long line — no embedded newline, so
+  --- `wrap_exact` cannot split the work into small per-line pieces and the
+  --- full 8KiB hits `cell_chunks`/`expand_tabs` in one call, ~10% tabs.
+  --- Matches the shape the merge-gate review measured at 251ms against the
+  --- quadratic `strcharpart`-per-char wrap (and 8138ms at 64KiB) — the
+  --- sidecar's own `MAX_DETAIL_BYTES` cap (agent/src/stream.ts) is what an
+  --- approval payload is bounded to.
+  local function heredoc_fixture(bytes)
+    local parts, size, i = {}, 0, 0
+    while size < bytes do
+      local chunk = (i % 10 == 0) and '\t\t\t' or ('var_' .. i .. '=value ')
+      parts[#parts + 1] = chunk
+      size = size + #chunk
+      i = i + 1
+    end
+    return table.concat(parts):sub(1, bytes)
+  end
+
+  it('wraps an 8KiB tab-indented payload well under the approval float stall bound', function()
+    local payload = heredoc_fixture(8192)
+    ok(#payload == 8192, 'fixture must actually hit the sidecar cap')
+    local start = vim.uv.hrtime()
+    local lines = shape.wrap_exact(payload, 88)
+    local elapsed_ms = (vim.uv.hrtime() - start) / 1e6
+    -- Generous and CI-safe: the fix measures under 20ms locally, the old
+    -- quadratic scan measured 251ms on this exact shape.
+    ok(elapsed_ms < 200, string.format('wrap_exact took %.1fms, want < 200ms', elapsed_ms))
+    ok(#lines > 0, 'must still produce output')
+  end)
+end)
+
 describe('text.tilde', function()
   it('shortens the home directory wherever it appears in a message', function()
     local home = vim.uv.os_homedir()
