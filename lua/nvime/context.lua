@@ -176,7 +176,7 @@ function M.project_instructions(root)
         if raw:find('\0', 1, true) == nil and #raw > 0 then
           local truncated = #raw > PROJECT_INSTRUCTIONS_MAX_BYTES
           local text = truncated and raw:sub(1, PROJECT_INSTRUCTIONS_MAX_BYTES) or (raw:gsub('\n$', ''))
-          if #text > 0 then
+          if vim.trim(text) ~= '' then
             return { text = text, truncated = truncated }
           end
         end
