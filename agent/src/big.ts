@@ -1181,6 +1181,9 @@ export class BigService {
     // clone and discard the session out from under this run. A runner hands
     // its own claim in — it took one before it opened the log — and keeps it.
     const held = this.#heldLock;
+    if (held !== undefined && held.sessionKey !== key) {
+      throw new Error(`this service's held claim is for a different session than ${key}`);
+    }
     const lock = held ?? this.#store.acquireLock(session, what);
     const run: Run = { requestId, key, abort: new AbortController() };
     this.#running.set(requestId, run);

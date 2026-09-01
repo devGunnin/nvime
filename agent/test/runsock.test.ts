@@ -307,6 +307,17 @@ describe('serveControl', () => {
     assert.equal(steers, 0, 'the steer never reached the build');
   });
 
+  it('drops the connection on a frame that carries no token at all, matching serveControl’s own contract', async () => {
+    const path = join(runtime, 'notoken.sock');
+    server = await serveControl(path, handlers(), TOKEN);
+    const outsider = rawClient(path);
+    outsider.write({ op: 'ping', rid: 1 });
+    const reply = await outsider.next();
+    assert.equal(reply.op, 'error');
+    assert.match(String(reply.message), /session token/);
+    await outsider.closed();
+  });
+
   it('answers a malformed frame with an error and keeps serving the connection', async () => {
     const path = join(runtime, 'g.sock');
     server = await serveControl(path, handlers(), TOKEN);

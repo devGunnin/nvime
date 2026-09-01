@@ -202,7 +202,12 @@ event and releases its claim). Only if the socket will not answer is the
 recorded pid signalled, and only once the session's claim has proved that pid is
 still this build's runner — a killed runner leaves its pid on the record on
 purpose, and pids get reused. Where that proof fails, nvime says the build had
-already died rather than signalling something else.
+already died rather than signalling something else. That proof still has one
+narrow window: a runner's claim is trusted live for 15s past its last
+heartbeat, so a pid recycled by the OS *inside* that 15s would still read as
+"this build's runner" and get signalled — recycling a pid that fast means
+wrapping the OS's pid space, not a realistic risk on a default Linux
+`pid_max`.
 
 A runner claims the session **before** it opens the log or binds the socket, so
 one session's `events.ndjson` has exactly one writer: a second runner exits

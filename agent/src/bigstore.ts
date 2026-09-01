@@ -453,6 +453,7 @@ export class BigStore {
    */
   acquireLock(session: BigSession, what: string): SessionLock {
     const path = this.lockPathFor(session.repoRoot, session.id);
+    const sessionKey = `${session.repoRoot}\0${session.id}`;
     mkdirSync(this.dirFor(session.repoRoot, session.id), { recursive: true });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const claim: BigLock = {
@@ -463,7 +464,7 @@ export class BigStore {
         startedAt: Date.now(),
         heartbeatAt: Date.now(),
       };
-      if (tryClaim(path, claim)) return confirmClaim(path, claim);
+      if (tryClaim(path, claim)) return confirmClaim(path, claim, sessionKey);
       const observed = statLockAt(path);
       if (observed !== null && observed.lock !== null && isLockLive(observed.lock)) {
         throw new ProtocolError('busy', `this big change is running in another editor (${observed.lock.what})`);
@@ -491,6 +492,9 @@ export interface BigLock {
 }
 
 export interface SessionLock {
+  /** `${repoRoot}\0${sessionId}`, matching `BigService`'s own key — the claim
+   *  is only ever valid for the one session it was taken on. */
+  sessionKey: string;
   release(): void;
 }
 
@@ -587,12 +591,12 @@ function removeIfUnchanged(path: string, expectedIno: number): void {
  * must be re-read before it is trusted, so a takeover this process lost by a
  * hair is discovered here rather than by a build running unlocked.
  */
-function confirmClaim(path: string, claim: BigLock): SessionLock {
+function confirmClaim(path: string, claim: BigLock, sessionKey: string): SessionLock {
   const held = readLockAt(path);
   if (held === null || held.owner !== claim.owner) {
     throw new ProtocolError('busy', 'this big change is being claimed by another editor');
   }
-  return heartbeat(path, claim);
+  return heartbeat(path, claim, sessionKey);
 }
 
 /**
@@ -608,7 +612,7 @@ function confirmClaim(path: string, claim: BigLock): SessionLock {
  * no expected-inode. The residual window is a takeover landing between them,
  * which needs this beat to be 15s stale (why it was reclaimed) and running now.
  */
-function heartbeat(path: string, claim: BigLock): SessionLock {
+function heartbeat(path: string, claim: BigLock, sessionKey: string): SessionLock {
   const timer = setInterval(() => {
     const held = readLockAt(path);
     if (held === null || held.owner !== claim.owner) {
@@ -630,6 +634,7 @@ function heartbeat(path: string, claim: BigLock): SessionLock {
   // The sidecar must still be able to exit while a lock is held.
   timer.unref();
   return {
+    sessionKey,
     release: () => {
       clearInterval(timer);
       // Only ours: a claim reclaimed as stale while this run was wedged now

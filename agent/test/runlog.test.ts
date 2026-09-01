@@ -93,7 +93,7 @@ describe('RunLog', () => {
     assert.equal(lastSeqOf(path), done.seq);
   });
 
-  it('truncates one enormous delta instead of writing a line every replay pays for', () => {
+  it('truncates one enormous delta but keeps a real prefix of it, not just the marker', () => {
     const log = new RunLog(path);
     log.append('big.delta', { text: 'x'.repeat(MAX_EVENT_BYTES * 2) });
     log.close();
@@ -102,14 +102,21 @@ describe('RunLog', () => {
     assert.ok(Buffer.byteLength(line, 'utf8') <= MAX_EVENT_BYTES, 'the line is bounded');
     const event = eventsIn()[0];
     assert.equal(event?.params.truncated, true, 'and says it was cut');
+    const text = event?.params.text as string;
+    assert.ok(text.length > MAX_EVENT_BYTES / 2, `kept only ${text.length} chars of the delta, not a real prefix`);
+    assert.ok(text.startsWith('x'.repeat(100)), 'the kept prefix is the real payload, not a placeholder');
   });
 
-  it('bounds whichever field is enormous, not only the delta', () => {
+  it('bounds whichever field is enormous, not only the delta, and keeps code + message on a clipped failure', () => {
     const log = new RunLog(path);
     // Neither of these is `text`: a Grep pattern and an SDK error detail are
     // just as unbounded, and the invariant is the line's size, not one field's.
     const tool = log.append('big.tool', { tool: 'Grep', summary: 'y'.repeat(MAX_EVENT_BYTES * 4) });
-    log.append('big.failed', { code: 'agent_error', message: 'nope', detail: 'z'.repeat(MAX_EVENT_BYTES * 4) });
+    const failed = log.append('big.failed', {
+      code: 'agent_error',
+      message: 'the sdk exited nonzero',
+      detail: 'z'.repeat(MAX_EVENT_BYTES * 4),
+    });
     log.close();
 
     for (const line of readFileSync(path, 'utf8').trim().split('\n')) {
@@ -117,6 +124,32 @@ describe('RunLog', () => {
     }
     assert.equal(tool.params.truncated, true, 'and what it returns is what it wrote');
     assert.equal(eventsIn().length, 2, 'both lines still parse');
+    assert.equal(failed.event, 'big.failed');
+    assert.equal(failed.params.truncated, true);
+    assert.equal(failed.params.code, 'agent_error', 'a clipped failure must keep its code');
+    assert.equal(failed.params.message, 'the sdk exited nonzero', 'a clipped failure must keep its message');
+  });
+
+  it('converges for every overage from 1 byte to 2MB, never dropping the whole payload', () => {
+    // The reviewer's sweep: the trim loop must make real progress at every
+    // boundary, not just for comfortably-oversized inputs.
+    for (const overBy of [1, 2, 10, 100, 1000, 50_000, 2_000_000]) {
+      const log = new RunLog(path);
+      const value = 'p'.repeat(MAX_EVENT_BYTES + overBy);
+      const event = log.append('big.failed', { code: 'agent_error', message: 'boom', detail: value });
+      log.close();
+
+      assert.equal(event.params.code, 'agent_error', `over-by-${overBy}: code dropped`);
+      assert.equal(event.params.message, 'boom', `over-by-${overBy}: message dropped`);
+      assert.equal(
+        event.params.elided,
+        undefined,
+        `over-by-${overBy}: fell back to the nuclear path instead of trimming`,
+      );
+      assert.equal(typeof event.params.detail, 'string', `over-by-${overBy}: detail dropped entirely`);
+
+      rmSync(path, { force: true });
+    }
   });
 
   it('replays a bounded tail of a long log and says how much it left behind', () => {
@@ -139,6 +172,23 @@ describe('RunLog', () => {
     assert.throws(() => readLogAfter(path, 0), /build log/);
     assert.throws(() => lastSeqOf(path), /build log/);
     assert.throws(() => new RunLog(path));
+  });
+
+  it('widens past a tail window that holds no complete line, rather than reading as empty', () => {
+    // A hand-edited or foreign log whose one huge line is wider than the
+    // lastSeqOf window: the window alone finds no newline at all.
+    writeFileSync(path, '{"seq":1,"at":1,"event":"big.delta","params":{}}\n');
+    appendFileSync(path, '{"seq":2,"at":2,"event":"big.delta","params":{}}\n');
+    appendFileSync(path, `{"seq":3,"at":3,"event":"big.done","params":{"text":"${'x'.repeat(2_000_000)}"}}\n`);
+
+    assert.equal(lastSeqOf(path), 3, '0 would restart numbering over a log that already holds 1..3');
+    const slice = readLogAfter(path, 0, 1024);
+    assert.equal(slice.events.length, 3, 'widening all the way to start-of-file finds every event');
+    assert.deepEqual(
+      slice.events.map((event) => event.seq),
+      [1, 2, 3],
+    );
+    assert.equal(slice.elided, 0, 'a full read leaves nothing unaccounted for');
   });
 
   it('refuses to append after it is closed rather than dropping the event', () => {

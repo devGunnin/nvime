@@ -299,6 +299,10 @@ function serveLine(
     request = parseControlRequest(line);
   } catch (cause) {
     socket.write(`${JSON.stringify({ op: 'error', rid: 0, message: messageOf(cause) })}\n`);
+    // Same rule as a wrong token below: a frame with no token at all cannot
+    // name who it is, so it is dropped rather than left open. Any other
+    // malformed frame just gets the error — the peer may still recover.
+    if (cause instanceof ProtocolError && cause.message.includes('session token')) socket.destroy();
     return;
   }
   const reply = (payload: Record<string, unknown>): void => {

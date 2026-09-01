@@ -45,6 +45,13 @@ export const TERMINAL_EVENTS: ReadonlySet<string> = new Set(['big.done', 'big.fa
 export const MAX_EVENT_BYTES = 16 * 1024;
 
 /**
+ * Chars of extra slack `bound()` cuts beyond the measured deficit, so a trim
+ * pass frees more bytes than the '…' it adds back can ever cost (up to 3 UTF-8
+ * bytes) — otherwise a 1-byte-over line stalls forever trimming zero net bytes.
+ */
+const ELLIPSIS_MARGIN = 4;
+
+/**
  * How much of the log one read carries. The log spans a session's whole life —
  * build, revise, rebase, revise — so an unbounded read would grow without limit
  * and be paid again on every attach, every settle and every handshake poll.
@@ -177,6 +184,10 @@ export function lastSeqOf(path: string): number {
 /**
  * The last `maxBytes` of the file as whole lines. A window that starts
  * mid-line drops that first partial line — it belongs to the part not read.
+ *
+ * A window that contains no newline at all (one line wider than `maxBytes`)
+ * cannot be trusted to mean "nothing here" — widening all the way to the
+ * start of the file is the only way to tell "empty" from "one huge line".
  */
 function readTail(path: string, maxBytes: number): { text: string; windowed: boolean } | null {
   let fd: number;
@@ -189,19 +200,28 @@ function readTail(path: string, maxBytes: number): { text: string; windowed: boo
   }
   try {
     const size = fstatSync(fd).size;
-    const from = Math.max(0, size - maxBytes);
-    const buffer = Buffer.allocUnsafe(size - from);
-    const got = readInto(fd, buffer, from);
-    const text = buffer.subarray(0, got).toString('utf8');
-    if (from === 0) return { text, windowed: false };
-    const newline = text.indexOf('\n');
-    return { text: newline === -1 ? '' : text.slice(newline + 1), windowed: true };
+    return readWindow(fd, size, maxBytes);
   } catch (cause) {
     if (cause instanceof ProtocolError) throw cause;
     throw new ProtocolError('agent_error', `cannot read the build log ${path}`, String(cause));
   } finally {
     closeSync(fd);
   }
+}
+
+function readWindow(fd: number, size: number, maxBytes: number): { text: string; windowed: boolean } {
+  const from = Math.max(0, size - maxBytes);
+  const buffer = Buffer.allocUnsafe(size - from);
+  const got = readInto(fd, buffer, from);
+  const text = buffer.subarray(0, got).toString('utf8');
+  if (from === 0) return { text, windowed: false };
+  const newline = text.indexOf('\n');
+  const rest = newline === -1 ? '' : text.slice(newline + 1);
+  // `rest` is empty both when the window holds no newline at all, and when
+  // its only newline terminates the one partial line the window started
+  // mid-way through — either way, zero complete lines were captured.
+  if (rest === '') return readWindow(fd, size, size);
+  return { text: rest, windowed: true };
 }
 
 /** Fills `buffer` from `position`, and answers how much the file actually had. */
@@ -263,9 +283,12 @@ function bound(record: RunEvent): RunEvent {
     const key = longestStringKey(params);
     if (key === null) break;
     const value = params[key] as string;
-    // Each round drops at least as many characters as the line has bytes to
-    // spare, so this converges in a handful of passes on any input.
-    const keep = Math.max(value.length - Math.max(size - MAX_EVENT_BYTES, 1), 0);
+    // The ellipsis itself costs up to 3 UTF-8 bytes, and a cut character can
+    // free as little as 1 — so cutting exactly the deficit can leave the line
+    // the same size or bigger and never converge. ELLIPSIS_MARGIN chars of
+    // slack guarantees every pass frees more bytes than the ellipsis costs.
+    const overBy = Math.max(size - MAX_EVENT_BYTES, 1);
+    const keep = Math.max(value.length - overBy - ELLIPSIS_MARGIN, 0);
     params[key] = keep === 0 ? '…' : `${value.slice(0, keep)}…`;
   }
   // Nothing string-shaped left to cut. Keep the event's identity — a terminal
