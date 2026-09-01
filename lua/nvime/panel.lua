@@ -204,9 +204,14 @@ local function make_buffer(name, filetype)
   -- `drop_stale` now leaves a real file's buffer alone, so the plain name can
   -- still be taken — nvim then refuses the duplicate (E95). Falling back to
   -- the `nvime://` scheme, which can never collide with a real path, keeps
-  -- the panel opening instead of raising mid-open.
+  -- the panel opening instead of raising mid-open — but a leftover fallback
+  -- buffer from an earlier collision needs the same reclaim, and the
+  -- fallback set itself needs the same pcall guard, or a second collision
+  -- raises unguarded.
   if not pcall(vim.api.nvim_buf_set_name, buf, name) then
-    vim.api.nvim_buf_set_name(buf, 'nvime://' .. name)
+    local fallback = 'nvime://' .. name
+    drop_stale(fallback)
+    pcall(vim.api.nvim_buf_set_name, buf, fallback)
   end
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'hide'

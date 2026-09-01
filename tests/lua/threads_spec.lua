@@ -147,6 +147,21 @@ local function pane_text()
   return vim.api.nvim_buf_get_lines(threads.view().pane_buf, 0, -1, false)
 end
 
+local THREADS_NS = vim.api.nvim_create_namespace('nvime.threads')
+
+--- 0-based rows carrying a whole-line highlight (a `hunk_band` tint).
+local function tinted_rows()
+  local buf = threads.view().pane_buf
+  local marks = vim.api.nvim_buf_get_extmarks(buf, THREADS_NS, 0, -1, { details = true })
+  local rows = {}
+  for _, mark in ipairs(marks) do
+    if mark[4].line_hl_group ~= nil then
+      rows[mark[2]] = mark[4].line_hl_group
+    end
+  end
+  return rows
+end
+
 describe('review thread list', function()
   it('gives each thread the chip its state earns', function()
     local lines = threads.tree_lines({
@@ -203,6 +218,22 @@ describe('review thread list', function()
     eq('@@ -1,2 +1,3 @@', pane[5])
     eq('+new', pane[8])
     eq('--- notes.md', pane[10])
+    threads.close()
+  end)
+
+  --- The `'--- ' .. file` line `pane_lines` synthesizes for a new file never
+  --- goes through `hunk_band` at all (it is appended straight to `lines`,
+  --- not read from `view.diff_lines`), so it can never pick up a tint —
+  --- moved here from a `hunk_band('--- a/pool.py')` unit pin, since
+  --- `hunk_band` itself no longer special-cases the header shape.
+  it('never tints its own synthesized file-separator line', function()
+    open_review({ block({ hunkIds = { 'h1.1', 'h2.1' }, files = { 'pool.py', 'notes.md' } }) })
+    local pane = pane_text()
+    local tinted = tinted_rows()
+    eq('--- pool.py', pane[4])
+    eq(nil, tinted[3], 'the pool.py separator (row 3, 0-based) must not be tinted')
+    eq('--- notes.md', pane[10])
+    eq(nil, tinted[9], 'the notes.md separator (row 9, 0-based) must not be tinted')
     threads.close()
   end)
 
@@ -630,22 +661,25 @@ describe('the review’s own typography', function()
     eq({ 'NvimeWarn' }, grade_groups(still_open))
   end)
 
-  it('bands a changed diff line and leaves the file headers alone', function()
+  it('bands a changed diff line, ignores context and the hunk marker', function()
     eq('NvimeEditAdd', threads.hunk_band('+    added'))
     eq('NvimeEditDelete', threads.hunk_band('-    removed'))
-    eq(nil, threads.hunk_band('+++ b/pool.py'))
-    eq(nil, threads.hunk_band('--- a/pool.py'))
     eq(nil, threads.hunk_band(' context'))
     eq(nil, threads.hunk_band('@@ -1,2 +1,3 @@'))
   end)
 
-  --- The header check used to be "two equal characters at the start", which
-  --- also matched a removed line that itself starts with a repeated marker —
-  --- a comment or a bulleted list item, both common in this very repo.
-  it('still bands a removed comment or bullet, which also starts with a repeated marker', function()
+  --- `hunk_band` used to guess at the `+++`/`---` file-header shape and skip
+  --- it, but `pane_lines` never hands it a real header — only diff-body
+  --- lines bounded by `readHunk`'s own counters — so the guess only produced
+  --- false negatives. A removed Lua comment or bulleted item is exactly the
+  --- shape it wrongly matched, and still must be tinted.
+  it('bands a removed comment or bullet, even one that starts with a repeated marker', function()
     eq('NvimeEditDelete', threads.hunk_band('-- a Lua comment being removed'))
     eq('NvimeEditAdd', threads.hunk_band('++nested added'))
     eq('NvimeEditDelete', threads.hunk_band('-  -- indented Lua comment removed'))
+    -- Removing a `-- comment` line prepends the diff's own `-`, producing
+    -- `--- comment` — the file-header shape exactly. The bug this regresses.
+    eq('NvimeEditDelete', threads.hunk_band('--- a plain Lua comment that is about to go'))
   end)
 
   it('cuts a long thread title to the list width instead of wrapping it', function()

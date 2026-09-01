@@ -83,6 +83,43 @@ describe('panel', function()
     vim.cmd.cd(before_cwd)
   end)
 
+  --- With the real file still open, the panel's buffer falls back to the
+  --- `nvime://` scheme (above). That fallback buffer is `bufhidden = 'hide'`,
+  --- so it survives when the registry is dropped without a proper close (a
+  --- `:bd` on the prompt buffer does this — `M.get` sees the invalid prompt
+  --- and drops the whole entry). The next open collides on the plain name
+  --- again, falls back again, and used to raise E95 unguarded because the
+  --- surviving fallback buffer still held that name.
+  it('does not raise when a second collision hits the nvime:// fallback name too', function()
+    panel.close(NAME)
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local before_cwd = vim.fn.getcwd()
+    vim.fn.writefile({ 'the user is editing this real file' }, dir .. '/nvime-' .. NAME)
+    vim.cmd.cd(dir)
+    vim.cmd.edit('nvime-' .. NAME)
+    local user_buf = vim.api.nvim_get_current_buf()
+
+    config.setup({})
+    palette.apply()
+    local first = panel.open(panel_opts())
+    ok(vim.api.nvim_buf_is_valid(first.buf), 'the fallback-named buffer opened')
+
+    -- Drops the registry entry without deleting `first.buf`, which survives
+    -- (bufhidden = 'hide') and still holds the fallback name.
+    vim.api.nvim_buf_delete(first.prompt_buf, { force = true })
+    ok(not panel.is_open(NAME), 'a half-wiped panel is treated as closed')
+    ok(vim.api.nvim_buf_is_valid(first.buf), 'the survivor buffer is still there to collide with')
+
+    local second = panel.open(panel_opts())
+    ok(panel.is_open(NAME), 'the panel must still open on a second collision')
+    ok(vim.api.nvim_buf_is_valid(second.buf))
+    ok(vim.api.nvim_buf_is_valid(user_buf), "the user's real buffer is still untouched")
+
+    panel.close(NAME)
+    vim.cmd.cd(before_cwd)
+  end)
+
   it('reuses the panel instead of stacking splits', function()
     local first = open()
     local windows = #vim.api.nvim_list_wins()

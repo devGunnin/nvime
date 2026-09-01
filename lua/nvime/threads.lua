@@ -156,18 +156,18 @@ function M.gate_lines(block)
   return lines, marks
 end
 
---- The tinted band one raw diff line earns, or nil for context and headers.
---- A `+++`/`---` header is not a changed line, and colouring it as one is how
---- a diff view ends up with a red banner over every file it shows.
+--- The tinted band one raw diff line earns, or nil for context.
+---
+--- No header check: `pane_lines` slices `view.diff_lines[offset+1 ..
+--- offset+lineCount]` against `readHunk`'s own counters
+--- (`agent/src/unidiff.ts`), which never include the `+++`/`---` file
+--- header lines — so this can never be handed one. It used to guess at the
+--- header shape anyway, which only produced false negatives: a removed Lua
+--- comment (`-- foo`) becomes the diff line `--- foo`, the header shape
+--- exactly, and lost its tint.
 --- @param line string
 --- @return string|nil highlight group
 function M.hunk_band(line)
-  -- The full header shape, marker repeated three times and a space — not
-  -- "the first two characters match", which also skips a real removed line
-  -- that happens to start `--` (a comment) or `-- item` (a bullet).
-  if line:match('^%-%-%- ') or line:match('^%+%+%+ ') then
-    return nil
-  end
   local head = line:sub(1, 1)
   if head == '+' then
     return 'NvimeEditAdd'
@@ -739,18 +739,27 @@ local KEYS = {
 --- so it resolves as a real relative path — `buftype == 'nofile'` is what
 --- tells nvime's own scratch buffer apart from a real file a user happens to
 --- have open under the same name.
-local function make_buffer(name, filetype)
+local function drop_stale(name)
   local existing = vim.fn.bufnr('^' .. name .. '$')
   if existing ~= -1 and vim.api.nvim_buf_is_valid(existing) and vim.bo[existing].buftype == 'nofile' then
     pcall(vim.api.nvim_buf_delete, existing, { force = true })
   end
+end
+
+local function make_buffer(name, filetype)
+  drop_stale(name)
   local buf = vim.api.nvim_create_buf(false, true)
   -- The reclaim above now leaves a real file's buffer alone, so the plain
   -- name can still be taken — nvim then refuses the duplicate (E95). Falling
   -- back to the `nvime://` scheme, which can never collide with a real path,
-  -- keeps the review opening instead of raising mid-open.
+  -- keeps the review opening instead of raising mid-open — but a leftover
+  -- fallback buffer from an earlier collision needs the same reclaim, and
+  -- the fallback set itself needs the same pcall guard, or a second
+  -- collision raises unguarded.
   if not pcall(vim.api.nvim_buf_set_name, buf, name) then
-    vim.api.nvim_buf_set_name(buf, 'nvime://' .. name)
+    local fallback = 'nvime://' .. name
+    drop_stale(fallback)
+    pcall(vim.api.nvim_buf_set_name, buf, fallback)
   end
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'wipe'
