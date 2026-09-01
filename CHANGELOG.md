@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **Big-change builds outlive the editor.** `big.build`, `big.revise` and
+  `big.rebase` now run in a detached runner process instead of Neovim's
+  sidecar. It holds the session's claim, owns the build's agent session, and
+  appends every event to an append-only `events.ndjson` beside the session
+  record. Capture and triage run there too, so a build you close the laptop on
+  ends with its review threads ready rather than with a diff nobody sorted.
+  Opening the session again — the same Neovim, a new one, several at once —
+  replays that log from where the panel left off and then follows the runner
+  live over a unix socket under `$XDG_RUNTIME_DIR/nvime`. If the runner cannot
+  be started, the build falls back into the sidecar with a visible notice
+  (`NVIME_DETACHED=0` forces that older behaviour); Windows is a documented
+  non-goal.
+- **Steering a running build.** `s` in the build panel sends one message into a
+  build in flight — "use the existing retry helper", "also add a `--help` flag"
+  — and the agent reads it at its next turn boundary, with nothing interrupted
+  and nothing re-run. Steers render in the stream as `you → build`, queued then
+  delivered, and are part of the session's recorded history. A steer is context
+  only: it travels inside the same agent session whose write boundary,
+  permission callback and gate were fixed when the build started.
+- **Honest death.** A runner that is killed leaves its claim stale and its
+  identity on the record, and the session reads `build died — resumable` with
+  `resume` and `discard` as its exits — never `building`, and never `built`. A
+  live runner reads `building (detached — keeps running)` rather than being
+  mistaken for a second editor. `<C-c>` stops a detached build through its own
+  socket, so it writes its terminal event and releases the claim; the recorded
+  pid is signalled only when the socket will not answer.
+
 - **Per-mode model + reasoning-effort dial.** A new `models` config table
   (`chat`, `edit`, `big_build`, `big_intake`, `big_triage`, `big_grade`,
   `explain`) sets the model and effort each lane's agent turns run at; nil

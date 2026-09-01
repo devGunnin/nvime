@@ -103,6 +103,12 @@ import { parseUnifiedDiff, renderForTriage, type DiffHunk, type ParsedDiff, type
  * live to see the end of comes back as "building, nobody driving", never as
  * "built". A lock file beside the record says whether that "nobody" is real,
  * because another Neovim on the same store may be the one driving it.
+ *
+ * This service does not decide WHERE it runs. In the sidecar it is one editor's
+ * build; in the detached runner (`runner.ts`) it is the same code with a steer
+ * queue and a runner identity handed in, driving a build that outlives the
+ * editor. Both go through the same turns, the same write boundary and the same
+ * gate floors — the only difference is who is watching.
  */
 
 /** Read-only, exactly as chat: intake and triage may look and nothing else. */

@@ -186,6 +186,45 @@ checkout and almost no disk, and its `origin` remote is removed. The build agent
 works there with full mutation rights, runs whatever tests the project has, and
 is told not to commit. Progress streams into the panel; `<C-c>` stops it.
 
+The build does not run inside Neovim's sidecar. It runs in a **detached runner
+process** of its own, which holds the session's claim, owns the build's agent
+session, and appends every event — deltas, tool lines, phase changes, steers,
+the result — to an append-only `events.ndjson` beside the session record.
+**Close the laptop and the build carries on.** Capture and triage run in the
+runner too, so a build you walked away from ends with its threads ready rather
+than with a diff nobody sorted.
+
+Open the session again — the same Neovim, a new one, two at once — and the panel
+**attaches**: it replays the log from where it left off, then follows the runner
+live over a unix socket in `$XDG_RUNTIME_DIR/nvime`. Several viewers are fine.
+`<C-c>` stops the build through that socket (the runner writes its terminal
+event and releases its claim); the recorded pid is signalled only if the socket
+will not answer.
+
+If the runner cannot be started at all, the build falls back into the sidecar
+**with a notice saying so** — never silently, because then it really would stop
+with your editor. `NVIME_DETACHED=0` forces that older behaviour. Windows is a
+documented non-goal: the control channel is a unix domain socket.
+
+### Steering
+
+`s` in the build panel opens a compose box. What you type is handed to the
+running build as an ordinary user turn — "use the existing retry helper", "also
+add a `--help` flag" — and the agent reads it at its next turn boundary. Nothing
+is interrupted and nothing is re-run.
+
+Mechanism, measured rather than assumed: the SDK's **streaming input mode**. The
+runner drives the build turn from an async iterable of user messages instead of
+one prompt string, so a message handed over mid-turn either gets folded into the
+turn already running or runs as its own turn straight after it. Both are
+normal, and both are visible: the stream shows `you → build` when a steer is
+accepted and again when the agent takes it.
+
+A steer is **context, and only context**. It goes through the same `query()`
+whose options were fixed when the build started, so it cannot widen the write
+boundary, reach the permission callback, or touch the review gate. What it
+changes still arrives as hunks you have to read.
+
 ### Triage
 
 On completion nvime runs `git add -A -N` (so files the build created are
@@ -288,9 +327,12 @@ signature; anything the move changed comes back open.
 ### State honesty
 
 Every transition is recorded with its timestamp, and the record is reconciled
-against the disk on every read. A build that outlived Neovim comes back as
-`building (detached — sidecar gone)` with `resume` and `discard` as its two
-exits — never as "built". If the clone is gone the session drops back to
+against the disk on every read. A build whose runner is still going comes back
+as `building (detached — keeps running)`, and attaches. A runner that was
+**killed** leaves its claim stale and its identity on the record, and that
+combination — a runner named, nothing behind it — is what reads as `build died
+— resumable`, with `resume` and `discard` as its exits. Neither is ever
+reported as "built". If the clone is gone the session drops back to
 `drafting` with the spec intact; if the captured diff is gone it drops back to
 `triaging`, whose exit is `retriage`. Nothing claims a review is ready without a
 diff to review.
@@ -303,7 +345,9 @@ another build's hunks.
 The store is shared by every Neovim you have open, so a run claims its session
 with a heartbeating lock file. A second editor shows `building (in another
 editor)`; if the sidecar holding it dies, the claim goes stale and the session
-becomes a normal detached one again.
+becomes a normal detached one again. A detached runner holds that same claim,
+and the pid on the record is what tells the two apart — one is a build to
+attach to, the other is somebody else's session to leave alone.
 
 ---
 
@@ -600,7 +644,13 @@ Methods: `chat.send`, `chat.list`, `chat.history`, `chat.cancel`,
 `big.list`, `big.open`, `big.diff`, `big.intake`, `big.approve`, `big.build`,
 `big.capture`, `big.revise`, `big.toggle`, `big.answer`, `big.difficulty`,
 `big.mergecheck`, `big.merge`, `big.rebase`, `big.discard`, `big.cancel`,
-`big.explain`, `ping`, `shutdown`.
+`big.explain`, `big.attach`, `big.steer`, `big.stop`, `big.detach`, `ping`,
+`shutdown`.
+
+`big.build`, `big.revise` and `big.rebase` spawn the detached runner and then
+follow it; `big.attach` follows one nothing here started, replaying the log
+from `params.after` (a seq) before it live-tails. `big.detach` lets go without
+stopping anything; `big.stop` and `big.cancel` stop the runner itself.
 
 `big.merge` answers rather than throws when it will not run: `{merged: false,
 refusals: [{code, message}]}` is the editor's cue to render every reason at once
@@ -612,9 +662,12 @@ recorded mutation, with before/after snapshots), `edit.approval` and
 re-reads it rather than keeping a second copy that could drift.
 
 Big-change events: `big.started`, `big.delta`, `big.tool`, `big.state`,
-`big.denied` (a tool the clone boundary refused) and `big.notice` (triage fell
-back). The session record on disk is the source of truth for where a big change
-is; the plugin caches none of it.
+`big.denied` (a tool the clone boundary refused), `big.notice` (triage fell
+back), `big.steer` (a steer, queued then delivered) and the terminal `big.done`
+/ `big.failed`. A detached run's events are recorded first and pushed second,
+so every one of them carries the `seq` it was written at and an editor can
+resume from any point. The session record on disk is the source of truth for
+where a big change is; the plugin caches none of it.
 
 Nothing on the Lua side blocks: no `vim.wait` on agent work, no `vim.fn.input`
 or `confirm`, no synchronous process calls. `:checkhealth` is the sole

@@ -140,6 +140,7 @@ Changeset ~
 Big-change panel ~
     <C-r>                       pick a big change
     <C-t>                       open the review threads
+    s                           steer the running build
     <C-c>                       stop the run
     q                           close
 
@@ -242,7 +243,30 @@ Build ~
     the repository at that commit under `stdpath('data')/nvime/big/`, with
     `origin` removed. The build agent works there with full mutation rights
     and is told not to commit. Progress streams into the panel; <C-c> stops
-    it. A build is meant to outlive the editor.
+    it.
+
+    The build runs in a DETACHED process of its own, not inside Neovim's
+    sidecar: it holds the session's claim, appends every event to an
+    append-only `events.ndjson` beside the record, and keeps going when you
+    close Neovim. Capture and triage run there too, so a build you walked
+    away from ends with its threads ready. Opening the session again — the
+    same Neovim, a new one, or two at once — replays that log and then follows
+    the runner live over a unix socket in `$XDG_RUNTIME_DIR/nvime`.
+
+    If the runner cannot start, the build falls back into the sidecar with a
+    notice saying so, and then really does stop with the editor.
+    `NVIME_DETACHED=0` forces that older behaviour. Windows is a non-goal: the
+    control channel is a unix domain socket.
+
+Steering ~
+    `s` in the build panel opens a compose box; what you type is handed to the
+    running build as an ordinary user turn and read at its next turn boundary.
+    Nothing is interrupted and nothing is re-run. The stream shows `you →
+    build` when the steer is accepted, and again when the agent takes it.
+
+    A steer is context only. It travels inside the same agent session whose
+    powers were fixed when the build started, so it cannot widen the write
+    boundary, reach the permission callback, or move the review gate.
 
 Triage ~
     On completion the diff against the base is captured and a read-only triage
@@ -519,6 +543,13 @@ A big-change build is only mostly confined ~
     is hardlinked to yours, so a raw write under `.git/objects` can corrupt
     your repository. Nothing asks during a build: a build outlives the editor,
     so the fail-safe answer with nobody watching is no.
+
+The build's control socket ~
+    A detached build serves a unix socket under `$XDG_RUNTIME_DIR/nvime` (or
+    a per-uid directory in the system temp dir), created 0700 and refused if
+    it is not a real directory this user owns. Anyone who can open it can
+    steer or stop that build — the same reach a local user with your uid
+    already has over your editor.
 
 The paste block is a block, not a sandbox ~
     The answer box refuses the put mappings, refuses |vim.paste()|, and undoes
