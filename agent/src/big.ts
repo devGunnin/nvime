@@ -221,6 +221,7 @@ export interface SessionSummary {
   title: string;
   display: DisplayState;
   difficulty: Difficulty;
+  threshold: number | null;
   detached: boolean;
   heldElsewhere: boolean;
   updatedAt: number;
@@ -321,8 +322,8 @@ export class BigService {
     return this.#running.size;
   }
 
-  create(root: string, title: string, difficulty: Difficulty): SessionView {
-    return this.#view(this.#store.create(root, title, difficulty));
+  create(root: string, title: string, difficulty: Difficulty, threshold?: number): SessionView {
+    return this.#view(this.#store.create(root, title, difficulty, threshold ?? thresholdFor(difficulty)));
   }
 
   /**
@@ -336,6 +337,7 @@ export class BigService {
       throw new ProtocolError('bad_request', 'the difficulty is fixed once the spec is approved');
     }
     session.difficulty = difficulty;
+    session.threshold = thresholdFor(difficulty);
     this.#store.save(session);
     return this.#view(session);
   }
@@ -348,6 +350,7 @@ export class BigService {
         title: view.title,
         display: view.display,
         difficulty: view.difficulty,
+        threshold: view.threshold,
         detached: view.detached,
         heldElsewhere: view.heldElsewhere,
         updatedAt: view.updatedAt,
@@ -556,7 +559,7 @@ export class BigService {
     const session = this.#store.require(params.root, params.id);
     this.#reconcileOrThrow(session);
     this.#refuseIfHeldElsewhere(session);
-    const threshold = thresholdFor(session.difficulty);
+    const threshold = session.threshold;
     if (threshold === null) {
       throw new ProtocolError('bad_request', 'this change runs no gate — its difficulty is `vibe`');
     }

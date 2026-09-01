@@ -1103,6 +1103,24 @@ describe('the comprehension gate', () => {
     assert.match(calls[calls.length - 1]?.prompt ?? '', /pass mark for this session is 90/);
   });
 
+  it('grades against the exact managed threshold', async () => {
+    const created = service.create(repo, 'managed review', 'medium', 82);
+    assert.equal(created.threshold, 82);
+    turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ready', spec: SPEC })] });
+    await service.intake(1, { root: repo, id: created.id, message: 'add the change' });
+    await service.approve(repo, created.id);
+    scriptBuild([{ title: 'version flag', substantial: true }], 'def main():\n    print("v1")\n');
+    const view = await service.build(2, { root: repo, id: created.id });
+    scriptGrades([{ threadId: view.blocks[0]?.id ?? '', grade: 81 }]);
+    const graded = await service.answer(3, {
+      root: repo,
+      id: view.id,
+      answers: [{ blockId: view.blocks[0]?.id ?? '', text: 'the flag exits before parsing' }],
+    });
+    assert.equal(graded.blocks[0]?.state, 'open');
+    assert.match(calls[calls.length - 1]?.prompt ?? '', /pass mark for this session is 82/);
+  });
+
   it('refuses to grade what there is nothing to defend about', async () => {
     const view = await reviewing();
     const thread = view.blocks[0]?.id ?? '';

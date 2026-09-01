@@ -74,6 +74,16 @@ describe('BigStore', () => {
     assert.throws(() => store.create(repo, '   '), ProtocolError);
   });
 
+  it('records custom managed thresholds without weakening validation', () => {
+    const session = store.create(repo, 'managed review', 'medium', 82);
+    assert.equal(session.difficulty, 'medium');
+    assert.equal(session.threshold, 82);
+    assert.throws(() => store.create(repo, 'too low', 'medium', 0), ProtocolError);
+    assert.throws(() => store.create(repo, 'too high', 'medium', 101), ProtocolError);
+    assert.throws(() => store.create(repo, 'not whole', 'medium', 70.5), ProtocolError);
+    assert.throws(() => store.create(repo, 'vibe threshold', 'vibe', 40), ProtocolError);
+  });
+
   it('reads back what it saved, and lists most recently touched first', async () => {
     const first = store.create(repo, 'one');
     const second = store.create(repo, 'two');

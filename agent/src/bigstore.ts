@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, join } from 'node:path';
-import { DEFAULT_DIFFICULTY, isDifficulty, type Difficulty } from './gate.js';
+import { DEFAULT_DIFFICULTY, isDifficulty, thresholdFor, type Difficulty } from './gate.js';
 import { ProtocolError } from './protocol.js';
 import type { TriageBlock } from './triage.js';
 
@@ -142,6 +142,8 @@ export interface BigSession {
   state: BigState;
   /** How hard the comprehension gate is. Chosen at intake, fixed after. */
   difficulty: Difficulty;
+  /** Exact score required for this session. Null only for the ungated mode. */
+  threshold: number | null;
   createdAt: number;
   updatedAt: number;
   transitions: BigTransition[];
@@ -238,8 +240,9 @@ export class BigStore {
     return join(this.dirFor(repoRoot, id), 'events.ndjson');
   }
 
-  create(repoRoot: string, title: string, difficulty: Difficulty = DEFAULT_DIFFICULTY): BigSession {
+  create(repoRoot: string, title: string, difficulty: Difficulty = DEFAULT_DIFFICULTY, threshold: number | null = thresholdFor(difficulty)): BigSession {
     if (title.trim() === '') throw new ProtocolError('bad_request', 'a big change needs a title');
+    validateThreshold(difficulty, threshold);
     const now = Date.now();
     const session: BigSession = {
       version: 1,
@@ -248,6 +251,7 @@ export class BigStore {
       title: title.trim().slice(0, 120),
       state: 'drafting',
       difficulty,
+      threshold,
       createdAt: now,
       updatedAt: now,
       transitions: [{ state: 'drafting', at: now, note: 'created' }],
@@ -678,14 +682,11 @@ function newId(): string {
   return Date.now().toString(36) + randomBytes(3).toString('hex');
 }
 
-/**
- * Fills in the fields a record written by an earlier sidecar does not carry.
- * The gate's difficulty is the reason this exists: an absent value would read
- * as "no threshold", which is `vibe` — a silently disarmed gate on a session
- * the reader believes is gated.
- */
+/** Fills in fields absent from records written by earlier sidecars. */
 function withDefaults(session: BigSession): BigSession {
   if (!isDifficulty(session.difficulty)) session.difficulty = DEFAULT_DIFFICULTY;
+  if (session.threshold === undefined) session.threshold = thresholdFor(session.difficulty);
+  validateThreshold(session.difficulty, session.threshold);
   if (session.gradeSessionId === undefined) session.gradeSessionId = null;
   if (session.merge === undefined) session.merge = null;
   if (session.landAttempt === undefined) session.landAttempt = null;
@@ -702,6 +703,13 @@ function withDefaults(session: BigSession): BigSession {
     if (!Array.isArray(block.rounds)) block.rounds = [];
   }
   return session;
+}
+
+function validateThreshold(difficulty: Difficulty, threshold: number | null): void {
+  if (difficulty === 'vibe' && threshold !== null) throw new ProtocolError('bad_request', 'vibe sessions cannot set a gate threshold');
+  if (difficulty !== 'vibe' && (!Number.isInteger(threshold) || Number(threshold) < 1 || Number(threshold) > 100)) {
+    throw new ProtocolError('bad_request', 'gate threshold must be an integer from 1 to 100');
+  }
 }
 
 /** Identity of a captured diff: the same bytes, the same id, always. */

@@ -257,6 +257,7 @@ function registerBigHandlers(
       requireAbsolutePath(params, 'root'),
       requireString(params, 'title'),
       requireDifficulty(params),
+      optionalPositiveInt(params, 'threshold', 100),
     ),
   }));
 

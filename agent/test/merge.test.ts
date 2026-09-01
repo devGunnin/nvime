@@ -100,6 +100,7 @@ function session(overrides: Partial<BigSession> = {}): BigSession {
     title: 'add a version flag',
     state: 'reviewing',
     difficulty: DEFAULT_DIFFICULTY,
+    threshold: 70,
     createdAt: now,
     updatedAt: now,
     transitions: [],
