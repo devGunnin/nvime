@@ -238,6 +238,20 @@ export function composeRebasePrompt(conflicted: boolean, baseBranch: string): st
   ].join('\n');
 }
 
+const EXPLAIN_INSTRUCTION = [
+  'Explain the change below in plain language, for a reader who has already cleared it and wants the plain',
+  'reading spelled out. What it does, why, and what a reader should notice — two or three short paragraphs,',
+  'no headers, and do not restate the diff line by line.',
+].join(' ');
+
+/** The post-clear `e`: one thread's hunks, explained. Read-only, and never
+ *  offered while a substantial thread's own defense is still open — see
+ *  `requireExplainable` in `big.ts`, which is what actually enforces that. */
+export function composeExplainPrompt(block: TriageBlock, diff: string): string {
+  const why = block.rationale === '' ? '' : `\nWhy it was grouped this way: ${block.rationale}\n`;
+  return `${EXPLAIN_INSTRUCTION}\n\n=== ${block.title} ===${why}\n${diff}`;
+}
+
 function renderSpec(spec: BigSpec): string {
   const list = (label: string, items: readonly string[]): string =>
     items.length === 0 ? '' : `${label}:\n${items.map((item) => `  - ${item}`).join('\n')}\n`;

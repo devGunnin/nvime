@@ -434,6 +434,67 @@ describe('the comprehension gate in the review', function()
   end)
 end)
 
+describe('the explain key', function()
+  local explain = require('nvime.explain')
+
+  it('asks the sidecar to explain a resolved thread and shows what came back', function()
+    open_review({ block({ state = 'resolved' }) })
+    fake.replies['big.explain'] = { result = { text = 'it adds a --version flag that prints and exits early.' } }
+    press(threads.view().tree_buf, 'e')
+    local request = vim.iter(fake.requests):find(function(entry)
+      return entry.method == 'big.explain'
+    end)
+    ok(request ~= nil, 'e reaches the sidecar')
+    eq('abc123', request.params.sessionId)
+    eq('b1', request.params.blockId)
+    local shown = table.concat(vim.api.nvim_buf_get_lines(explain.current().buf, 0, -1, false), '\n')
+    ok(shown:find('%-%-version'), shown)
+    threads.close()
+    explain.close()
+  end)
+
+  it('explains trivia even while it is reopened', function()
+    open_review({ block({ substantial = false, state = 'open', reopened = true }) })
+    fake.replies['big.explain'] = { result = { text = 'this reformats a comment; nothing behavioral changed.' } }
+    press(threads.view().tree_buf, 'e')
+    ok(
+      vim.iter(fake.requests):any(function(entry)
+        return entry.method == 'big.explain'
+      end),
+      'trivia needs no defense, so it is never refused'
+    )
+    threads.close()
+    explain.close()
+  end)
+
+  it('refuses locally to explain an open, substantial thread — never reaching the sidecar', function()
+    open_review({ block({ state = 'open' }) })
+    local seen = with_notices(function()
+      press(threads.view().tree_buf, 'e')
+    end)
+    ok(said(seen, 'hand over the answer'), vim.inspect(seen))
+    eq(nil, explain.current(), 'no float opens on a refusal')
+    eq(
+      nil,
+      vim.iter(fake.requests):find(function(entry)
+        return entry.method == 'big.explain'
+      end),
+      'the sidecar is never asked'
+    )
+    threads.close()
+  end)
+
+  it('shows a sidecar refusal in the float rather than failing silently', function()
+    open_review({ block({ state = 'resolved' }) })
+    fake.replies['big.explain'] = { err = { message = 'the build clone is gone' } }
+    press(threads.view().tree_buf, 'e')
+    local shown = table.concat(vim.api.nvim_buf_get_lines(explain.current().buf, 0, -1, false), '\n')
+    ok(shown:find('build clone is gone', 1, true) ~= nil, shown)
+    threads.close()
+    explain.close()
+  end)
+end)
+
 describe('the merge key', function()
   it('asks the sidecar rather than deciding for itself', function()
     open_review({ block({ state = 'resolved' }) })

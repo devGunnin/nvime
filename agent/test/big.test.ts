@@ -1269,6 +1269,93 @@ describe('the comprehension gate', () => {
   });
 });
 
+describe('explaining a thread', () => {
+  /** A build with one substantial thread (tool.py) and one trivial thread
+   *  (other.py), so both the gated and the ungated case are reachable. */
+  async function mixed(): Promise<{ view: SessionView; substantial: string; trivial: string }> {
+    const created = service.create(repo, 'mixed', 'medium');
+    turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ok', spec: SPEC })] });
+    await service.intake(1, { root: repo, id: created.id, message: 'go' });
+    await service.approve(repo, created.id);
+    turns.push({
+      act: async (options) => {
+        writeFileSync(join(String(options.cwd), 'tool.py'), 'def main():\n    print("v1")\n');
+        writeFileSync(join(String(options.cwd), 'other.py'), 'x = 1\n');
+      },
+      frames: [frames.init(), frames.result('built')],
+    });
+    turns.push({
+      frames: triageByFile([
+        { title: 'version flag', files: ['tool.py'], substantial: true },
+        { title: 'formatting', files: ['other.py'], substantial: false },
+      ]),
+    });
+    const view = await service.build(2, { root: repo, id: created.id });
+    return {
+      view,
+      substantial: view.blocks.find((block) => block.substantial)?.id ?? '',
+      trivial: view.blocks.find((block) => !block.substantial)?.id ?? '',
+    };
+  }
+
+  it('refuses to explain a substantial thread while its defense is still open', async () => {
+    const { view, substantial } = await mixed();
+    await assert.rejects(
+      () => service.explain(3, { root: repo, id: view.id, blockId: substantial }),
+      (error: unknown) => error instanceof ProtocolError && /hand over the answer/.test(error.message),
+    );
+    assert.equal(calls.length, 3, 'the refusal never reached an agent turn (intake + build + triage only)');
+  });
+
+  it('explains a substantial thread once it clears, read-only in the build clone', async () => {
+    const { view, substantial } = await mixed();
+    scriptGrades([{ threadId: substantial, grade: 90 }]);
+    const graded = await service.answer(3, {
+      root: repo,
+      id: view.id,
+      answers: [{ blockId: substantial, text: 'it adds a --version flag' }],
+    });
+    assert.equal(graded.blocks.find((block) => block.id === substantial)?.state, 'resolved');
+
+    turns.push({
+      frames: [frames.init(), frames.result('this adds a --version flag that prints and exits before parsing args.')],
+    });
+    const explained = await service.explain(4, { root: repo, id: view.id, blockId: substantial });
+    assert.match(explained.text, /--version/);
+    const last = calls[calls.length - 1];
+    assert.equal(last?.options.cwd, view.worktree?.path, 'explained from the build clone, like grading');
+    assert.ok(Array.isArray(last?.options.tools) && !last.options.tools.includes('Write'), 'explain may not write');
+    assert.match(last?.prompt ?? '', /version flag/);
+  });
+
+  it('explains trivia even while it is reopened, since it has no defense to protect', async () => {
+    const { view, trivial } = await mixed();
+    const reopened = service.toggleBlock(repo, view.id, trivial, false);
+    assert.equal(reopened.blocks.find((block) => block.id === trivial)?.state, 'open');
+
+    turns.push({ frames: [frames.init(), frames.result('this reformats other.py; nothing behavioral changed.')] });
+    const explained = await service.explain(3, { root: repo, id: view.id, blockId: trivial });
+    assert.match(explained.text, /other\.py/);
+  });
+
+  it('refuses an unknown thread id', async () => {
+    const { view } = await mixed();
+    await assert.rejects(
+      () => service.explain(3, { root: repo, id: view.id, blockId: 'nope' }),
+      (error: unknown) => error instanceof ProtocolError && /no thread 'nope'/.test(error.message),
+    );
+  });
+
+  it('refuses once the build clone is gone, rather than explaining from nothing', async () => {
+    const { view, trivial } = await mixed();
+    rmSync(view.worktree?.path ?? '', { recursive: true, force: true });
+    await assert.rejects(
+      () => service.explain(3, { root: repo, id: view.id, blockId: trivial }),
+      (error: unknown) => error instanceof ProtocolError && /build clone is gone/.test(error.message),
+    );
+  });
+});
+
 describe('the local merge', () => {
   /** Clears every open thread so the merge has nothing left to refuse on. */
   async function cleared(write?: string): Promise<SessionView> {

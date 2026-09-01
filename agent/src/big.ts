@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import type { HookInput, HookJSONOutput, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import {
   composeBuildPrompt,
+  composeExplainPrompt,
   composeGradePrompt,
   composeIntakeOpening,
   composeRebasePrompt,
@@ -111,7 +112,7 @@ export const BIG_READ_DENIED = [...BIG_DENIED_TOOLS, 'Bash', 'BashOutput', 'Kill
 /** How much of a diff the triage turn is shown. Past it, triage sees a prefix. */
 export const MAX_TRIAGE_BYTES = 128 * 1024;
 
-type Phase = 'intake' | 'build' | 'triage' | 'grade';
+type Phase = 'intake' | 'build' | 'triage' | 'grade' | 'explain';
 
 /** How much typed defense one thread accepts in one round. */
 export const MAX_ANSWER_CHARS = 8000;
@@ -536,6 +537,44 @@ export class BigService {
     block.reopened = !resolved;
     this.#store.save(session);
     return this.#view(session);
+  }
+
+  /**
+   * `e`: the agent explains one thread's hunks in plain language, for a
+   * reader who has cleared it (or never had to defend it) but wants the plain
+   * reading spelled out.
+   *
+   * Refused while a substantial thread's defense is still open — explaining
+   * it would hand over the answer the gate exists to test. Enforced twice:
+   * before the run claims the session (a fast no), and again once it holds
+   * the record (another editor could have answered the thread in between).
+   */
+  async explain(requestId: number, params: { root: string; id: string; blockId: string }): Promise<{ text: string }> {
+    const session = this.#store.require(params.root, params.id);
+    this.#reconcileOrThrow(session);
+    this.#refuseIfHeldElsewhere(session);
+    requireExplainable(session, params.blockId);
+
+    return this.#run(requestId, session, 'explaining', async () => {
+      const held = this.#store.require(params.root, params.id);
+      const block = requireExplainable(held, params.blockId);
+      const diffText = this.#store.readVerifiedDiff(held);
+      if (diffText === null) {
+        throw new ProtocolError('bad_request', 'the captured diff is not the one this thread describes');
+      }
+      const worktree = held.worktree;
+      if (worktree === null || !worktree.ready) {
+        throw new ProtocolError('bad_request', 'the build clone is gone — nothing left to explain from');
+      }
+      const hunks = new Map(parseUnifiedDiff(diffText).hunks.map((hunk) => [hunk.id, hunk]));
+      const result = await this.#turn(requestId, {
+        prompt: composeExplainPrompt(block, renderBlockDiff(block, hunks)),
+        cwd: worktree.path,
+        phase: 'explain',
+        resume: null,
+      });
+      return { text: result.text };
+    });
   }
 
   /**
@@ -1249,6 +1288,23 @@ function buildGradeItems(
       answer: entry.text,
     };
   });
+}
+
+/**
+ * The explain gate: never while a substantial thread's own defense is still
+ * open — a plain-language explanation IS the answer the gate is testing for.
+ * Trivia and anything already resolved are always explainable.
+ */
+function requireExplainable(session: BigSession, blockId: string): TriageBlock {
+  const block = session.blocks.find((candidate) => candidate.id === blockId);
+  if (block === undefined) throw new ProtocolError('bad_request', `no thread '${blockId}'`);
+  if (block.substantial && block.state === 'open') {
+    throw new ProtocolError(
+      'bad_request',
+      'this thread is still open — clear it first; explaining it now would hand over the answer',
+    );
+  }
+  return block;
 }
 
 /** A thread's hunks, exactly as the reviewer read them in the pane. */

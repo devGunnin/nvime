@@ -332,6 +332,14 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
     }),
   );
 
+  dispatcher.register('big.explain', async (id, params) =>
+    present(big).explain(id, {
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+      blockId: requireString(params, 'blockId'),
+    }),
+  );
+
   dispatcher.register('big.rebase', async (id, params) => ({
     session: await present(big).rebase(id, {
       root: requireAbsolutePath(params, 'root'),
