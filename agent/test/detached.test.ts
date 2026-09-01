@@ -564,6 +564,9 @@ describe('following a runner that goes quiet', () => {
     assert.ok(full.length > 0);
 
     const path = socketOf(session.id);
+    // The runner's own async close() unlinks this path well after `start()`
+    // resolved above; binding here first races that unlink into deleting ours.
+    await until('the finished build to release its control socket', () => !existsSync(path));
     mkdirSync(dirname(path), { recursive: true });
     rmSync(path, { force: true });
     // A runner that accepts the connection and says nothing: the attach RPC is
