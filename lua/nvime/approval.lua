@@ -38,6 +38,99 @@ local function close_window()
   end
 end
 
+--- The float's page under construction: its lines, the marks that colour them,
+--- and the rows to paint as alerts.
+---
+--- Every append wraps to the border, which is what lets the finished line
+--- count be the float's height on screen. Without that a two-line summary
+--- silently pushes the payload — the thing being consented to — off the bottom
+--- of a float sized for one.
+local Sheet = {}
+Sheet.__index = Sheet
+
+--- @param width integer columns available inside the border
+--- @return table
+local function sheet(width)
+  return setmetatable({
+    lines = {},
+    marks = {},
+    alerts = {},
+    width = width,
+    -- One column of slack past the indent: a line that ends exactly on the
+    -- border can measure as needing a second row, and the float then opens
+    -- with an empty band under its content.
+    body_width = math.max(width - #INDENT - 1, 8),
+  }, Sheet)
+end
+
+--- One label, wrapped and kept a column in. `text.wrap` collapses runs of
+--- whitespace, so that column is re-applied rather than passed through it.
+--- @return integer the 0-based row it started on
+function Sheet:label(caption, hl)
+  local wrapped = text.wrap(caption:gsub('^ ', ''), self.width - 2)
+  for _, line in ipairs(wrapped) do
+    self.lines[#self.lines + 1] = ' ' .. line
+  end
+  local row = #self.lines - #wrapped
+  self.marks[#self.marks + 1] = { row = row, col = 0, end_col = 1 + #wrapped[1], hl = hl or 'NvimeLabel' }
+  return row
+end
+
+--- A label the reader must not miss, and the row it will be painted on.
+function Sheet:alert(caption)
+  self.alerts[#self.alerts + 1] = self:label(caption, 'NvimeError') + 1
+end
+
+--- A label, its prose wrapped under it, then a blank line.
+function Sheet:section(caption, body)
+  self:label(caption)
+  for _, line in ipairs(text.wrap(body, self.body_width)) do
+    self.lines[#self.lines + 1] = INDENT .. line
+  end
+  self.lines[#self.lines + 1] = ''
+end
+
+--- Indented lines, verbatim. `band` gives them a whole-line highlight so they
+--- read as one block to the border rather than as a ragged column.
+function Sheet:indented(body, band)
+  local first = #self.lines
+  for _, line in ipairs(body) do
+    self.lines[#self.lines + 1] = INDENT .. line
+  end
+  if band == nil then
+    return
+  end
+  for row = first, #self.lines - 1 do
+    self.marks[#self.marks + 1] = { row = row, hl = band }
+  end
+end
+
+--- The block the user is actually consenting to: what it is, how much of it
+--- there is, and every byte of it.
+---
+--- Wrapped by CHARACTERS, not words: a word wrap drops the space it broke at,
+--- and a command is not something to show approximately.
+--- @param page table
+--- @param detail table kind, text, bytes, truncated
+--- @param shown string the payload as far as the sidecar could send it
+local function append_payload(page, detail, shown)
+  local body = text.wrap_exact(shown, page.body_width)
+  page:label(
+    string.format(
+      ' the exact %s — %d line%s, %d byte%s:',
+      detail.kind or 'value',
+      #body,
+      #body == 1 and '' or 's',
+      detail.bytes or #shown,
+      (detail.bytes or #shown) == 1 and '' or 's'
+    )
+  )
+  if detail.truncated then
+    page:alert(string.format(' !! TRUNCATED — nvime can only show you %d of %d bytes', #shown, detail.bytes))
+  end
+  page:indented(body, 'NvimeCode')
+end
+
 --- The float's contents.
 ---
 --- The decision and its keys sit at the top, where they stay visible however
@@ -50,85 +143,30 @@ end
 function M.render(request, width)
   assert(type(request) == 'table', 'approval.render needs a request')
   assert(type(width) == 'number' and width > 0, 'approval.render needs a positive width')
-  -- One column of slack past the indent: a line that ends exactly on the
-  -- border can measure as needing a second row, and the float then opens with
-  -- an empty band under its content.
-  local body_width = math.max(width - #INDENT - 1, 8)
-  -- Every line is pre-wrapped to the border, so the float's height in buffer
-  -- lines is also its height on screen. Without this a two-line summary
-  -- silently pushes the payload — the thing being consented to — off the
-  -- bottom of a float sized for one.
-  local lines, marks = {}, {}
-  --- Appends one label, wrapped and kept one column in, and marks its first
-  --- row. Returns that row. `text.wrap` collapses runs of whitespace, so the
-  --- leading column is re-applied rather than passed through it.
-  local function label(caption, hl)
-    local wrapped = text.wrap(caption:gsub('^ ', ''), width - 2)
-    for _, line in ipairs(wrapped) do
-      lines[#lines + 1] = ' ' .. line
-    end
-    marks[#marks + 1] = { row = #lines - #wrapped, col = 0, end_col = 1 + #wrapped[1], hl = hl or 'NvimeLabel' }
-    return #lines - #wrapped
-  end
-  local function section(caption, body)
-    label(caption)
-    for _, line in ipairs(text.wrap(body, body_width)) do
-      lines[#lines + 1] = INDENT .. line
-    end
-    lines[#lines + 1] = ''
-  end
-  section(' claude wants to:', request.summary or request.tool or 'run a tool')
-  section(' nvime will not allow that on its own:', request.reason or 'outside the agreed scope')
-  local alerts = {}
+  local page = sheet(width)
+  page:section(' claude wants to:', request.summary or request.tool or 'run a tool')
+  page:section(' nvime will not allow that on its own:', request.reason or 'outside the agreed scope')
+
   local detail = request.detail
   local shown = type(detail) == 'table' and type(detail.text) == 'string' and detail.text or nil
 
   -- The sidecar already resolved where the write really lands. Without this
   -- the user authorizes a path they would have to walk a symlink to decode.
   if type(request.path) == 'string' and request.path ~= '' and request.path ~= shown then
-    alerts[#alerts + 1] = label(' !! it really lands on:', 'NvimeError') + 1
-    for _, line in ipairs(text.wrap_exact(request.path, body_width)) do
-      lines[#lines + 1] = INDENT .. line
-    end
-    lines[#lines + 1] = ''
+    page:alert(' !! it really lands on:')
+    page:indented(text.wrap_exact(request.path, page.body_width))
+    page.lines[#page.lines + 1] = ''
   end
 
-  lines[#lines + 1] = ' y  allow once      n  deny'
+  page.lines[#page.lines + 1] = ' y  allow once      n  deny'
   -- The two keys are the only thing on this surface the reader must find fast.
-  marks[#marks + 1] = { row = #lines - 1, col = 1, end_col = 2, hl = 'NvimeKey' }
-  marks[#marks + 1] = { row = #lines - 1, col = 19, end_col = 20, hl = 'NvimeKey' }
-  if shown == nil or shown == '' then
-    return lines, alerts, marks
+  page.marks[#page.marks + 1] = { row = #page.lines - 1, col = 1, end_col = 2, hl = 'NvimeKey' }
+  page.marks[#page.marks + 1] = { row = #page.lines - 1, col = 19, end_col = 20, hl = 'NvimeKey' }
+
+  if shown ~= nil and shown ~= '' then
+    append_payload(page, detail, shown)
   end
-  -- Every byte, wrapped by characters: a word wrap drops the space it broke
-  -- at, and a command is not something to show approximately.
-  local body = text.wrap_exact(shown, body_width)
-  label(
-    string.format(
-      ' the exact %s — %d line%s, %d byte%s:',
-      detail.kind or 'value',
-      #body,
-      #body == 1 and '' or 's',
-      detail.bytes or #shown,
-      (detail.bytes or #shown) == 1 and '' or 's'
-    )
-  )
-  if detail.truncated then
-    alerts[#alerts + 1] = label(
-      string.format(' !! TRUNCATED — nvime can only show you %d of %d bytes', #shown, detail.bytes),
-      'NvimeError'
-    ) + 1
-  end
-  local first_body = #lines
-  for _, line in ipairs(body) do
-    lines[#lines + 1] = INDENT .. line
-  end
-  -- A line highlight, so the payload reads as one block to the border rather
-  -- than as a ragged column that stops at each line's last character.
-  for row = first_body, #lines - 1 do
-    marks[#marks + 1] = { row = row, hl = 'NvimeCode' }
-  end
-  return lines, alerts, marks
+  return page.lines, page.alerts, page.marks
 end
 
 --- Opens the float for `ask` and wires the approval keys to `answer`.
