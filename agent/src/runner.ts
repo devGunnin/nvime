@@ -81,7 +81,13 @@ export async function runJob(job: RunnerJob, deps: RunnerDeps): Promise<number> 
   // Graceful stop, whichever way it is asked for: the SDK turn is aborted, the
   // failure path below writes the terminal event, and the claim is released on
   // the way out. Nothing kills this process to stop a build.
+  //
+  // The flag covers the one moment `cancel` cannot: a stop that lands before
+  // the run has registered itself has nothing to abort, and without it the
+  // signal would be swallowed and the build would carry on regardless.
+  let stopRequested = false;
   const stop = (): void => {
+    stopRequested = true;
     steering.close('the build was stopped');
     service.cancel(RUNNER_REQUEST_ID);
   };
@@ -99,6 +105,7 @@ export async function runJob(job: RunnerJob, deps: RunnerDeps): Promise<number> 
     for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, stop);
 
     publish('big.state', { session: job.sessionId, state: 'building', note: `detached build (pid ${process.pid})` });
+    if (stopRequested) throw new ProtocolError('cancelled', 'the big change was stopped before it started');
     const view = await dispatch(service, job);
     publish('big.done', {
       session: job.sessionId,

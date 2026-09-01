@@ -345,8 +345,22 @@ function wireClient(socket: Socket): ControlClient {
   };
 
   socket.on('data', (chunk: string) => {
-    for (const line of splitter.push(chunk)) {
-      const frame = JSON.parse(line) as Record<string, unknown>;
+    let lines: string[];
+    try {
+      lines = splitter.push(chunk);
+    } catch (cause) {
+      // The channel is desynchronized; nothing further on it can be trusted.
+      socket.destroy(cause instanceof Error ? cause : new Error(String(cause)));
+      return;
+    }
+    for (const line of lines) {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(line) as Record<string, unknown>;
+      } catch (cause) {
+        socket.destroy(new ProtocolError('agent_error', `the build runner sent an unreadable frame: ${String(cause)}`));
+        return;
+      }
       if (frame.op === 'event') {
         if (onEvent !== null) onEvent(frame.event as RunEvent);
         continue;
