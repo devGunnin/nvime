@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { ProtocolError } from './protocol.js';
 import { GIT_TIMEOUT_MS } from './timeouts.js';
@@ -25,7 +27,16 @@ export interface GitResult {
   stderr: string;
 }
 
-export async function git(cwd: string, args: readonly string[]): Promise<GitResult> {
+export interface GitOptions {
+  /**
+   * Extra environment for this call. Merged over `process.env`; the merge path
+   * uses it to point `GIT_INDEX_FILE` at a private index, so building the
+   * commit never touches the index the operator is working in.
+   */
+  env?: Record<string, string>;
+}
+
+export async function git(cwd: string, args: readonly string[], options: GitOptions = {}): Promise<GitResult> {
   if (cwd === '' || args.length === 0) throw new TypeError('git needs a cwd and at least one argument');
   try {
     const { stdout, stderr } = await run('git', [...BASE_ARGS, ...args], {
@@ -33,6 +44,7 @@ export async function git(cwd: string, args: readonly string[]): Promise<GitResu
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: MAX_OUTPUT_BYTES,
       encoding: 'utf8',
+      ...(options.env === undefined ? {} : { env: { ...process.env, ...options.env } }),
     });
     return { stdout, stderr };
   } catch (cause) {
@@ -43,6 +55,33 @@ export async function git(cwd: string, args: readonly string[]): Promise<GitResu
     );
   }
 }
+
+/**
+ * `rev-parse <ref>`, or null when the ref does not exist. A missing ref is an
+ * ordinary answer here — the base branch may have been deleted since the build
+ * — so it must not arrive as an exception the caller has to pattern-match.
+ */
+export async function resolveRef(repoRoot: string, ref: string): Promise<string | null> {
+  try {
+    const { stdout } = await git(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+    const commit = stdout.trim();
+    return commit === '' ? null : commit;
+  } catch {
+    // `--verify --quiet` exits 1 for an unknown ref, which `git()` raises.
+    return null;
+  }
+}
+
+/**
+ * Paths with changes git is tracking. Untracked files are deliberately NOT
+ * included: a repo full of build output would never be mergeable, and git's own
+ * `merge --ff-only` still refuses when an untracked file is in the way.
+ */
+export async function trackedChanges(repoRoot: string): Promise<string[]> {
+  const { stdout } = await git(repoRoot, ['status', '--porcelain', '--untracked-files=no']);
+  return stdout.split('\n').filter((line) => line.trim() !== '');
+}
+
 
 function detailOf(cause: unknown, args: readonly string[]): string {
   const error = cause as { stderr?: string; message?: string; code?: unknown };
@@ -105,6 +144,89 @@ export async function cloneAt(repoRoot: string, dir: string, commit: string): Pr
 export async function removeClone(dir: string): Promise<void> {
   if (dir === '') throw new TypeError('removeClone needs a directory');
   await rm(dir, { recursive: true, force: true });
+}
+
+/**
+ * Brings the source repository's `branch` into the build's clone as
+ * `FETCH_HEAD`, and answers where it now points.
+ *
+ * The clone was made with `--local`, so it hardlinks the objects that existed
+ * when it was cut and knows nothing of commits made since — a rebase onto a
+ * moved base has to fetch them. A fetch only READS the source repository; the
+ * clone still has no remote pointing back at it.
+ */
+export async function fetchBase(cloneDir: string, sourceRepo: string, branch: string): Promise<string> {
+  if (branch === '') throw new TypeError('fetchBase needs a branch name');
+  await git(cloneDir, ['fetch', '--no-tags', sourceRepo, branch]);
+  const { stdout } = await git(cloneDir, ['rev-parse', 'FETCH_HEAD']);
+  const commit = stdout.trim();
+  if (!isCommitId(commit)) {
+    throw new ProtocolError('agent_error', 'the fetched base did not resolve to a commit', commit);
+  }
+  return commit;
+}
+
+/**
+ * The clone's own identity for the throwaway commit a rebase needs. It never
+ * reaches the operator's history: the commit is rebased and then read back as a
+ * diff, and the commit that DOES land is written with their own git identity.
+ */
+const CLONE_IDENTITY = {
+  GIT_AUTHOR_NAME: 'nvime',
+  GIT_AUTHOR_EMAIL: 'nvime@localhost',
+  GIT_COMMITTER_NAME: 'nvime',
+  GIT_COMMITTER_EMAIL: 'nvime@localhost',
+};
+
+/** True while a rebase is stopped part-way through, waiting to be resolved. */
+export async function rebaseInProgress(cloneDir: string): Promise<boolean> {
+  for (const name of ['rebase-merge', 'rebase-apply']) {
+    const { stdout } = await git(cloneDir, ['rev-parse', '--git-path', name]);
+    const path = stdout.trim();
+    if (path !== '' && existsSync(resolve(cloneDir, path))) return true;
+  }
+  return false;
+}
+
+/**
+ * Moves the build's work onto `newBase`, in the clone and nowhere else.
+ *
+ * The build is told not to commit, so its work is an uncommitted tree; git can
+ * only rebase commits, so it is committed here first. That commit is disposable
+ * — the capture that follows diffs the clone against the base regardless of
+ * whether the work is committed.
+ *
+ * Returns whether git stopped on conflicts. A conflicted rebase is LEFT in
+ * progress on purpose: resolving it is the agent turn's job, and aborting here
+ * would throw away the half of it git already did.
+ */
+export async function rebaseCloneOnto(cloneDir: string, newBase: string): Promise<{ conflicted: boolean }> {
+  if (!isCommitId(newBase)) throw new ProtocolError('bad_request', `'${newBase}' is not a commit id`);
+  await git(cloneDir, ['add', '-A']);
+  const dirty = await hasStagedChanges(cloneDir);
+  if (dirty) {
+    await git(cloneDir, ['commit', '-m', 'nvime: work in progress'], { env: CLONE_IDENTITY });
+  }
+  try {
+    // Replaying commits writes new commit objects even when nothing conflicts,
+    // so the clone's own identity has to travel with this call too — not just
+    // the WIP commit above — or a runner with no global git config fails here.
+    await git(cloneDir, ['rebase', newBase], { env: CLONE_IDENTITY });
+    return { conflicted: false };
+  } catch (cause) {
+    if (await rebaseInProgress(cloneDir)) return { conflicted: true };
+    throw cause;
+  }
+}
+
+/** Puts the clone back on `commit`, discarding a rebase git could not finish. */
+export async function abortRebase(cloneDir: string): Promise<void> {
+  await git(cloneDir, ['rebase', '--abort']);
+}
+
+async function hasStagedChanges(cloneDir: string): Promise<boolean> {
+  const { stdout } = await git(cloneDir, ['diff', '--cached', '--name-only']);
+  return stdout.trim() !== '';
 }
 
 /**

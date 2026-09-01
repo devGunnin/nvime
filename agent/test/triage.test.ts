@@ -6,6 +6,8 @@ import {
   fallbackBlocks,
   normalizeBlocks,
   parseTriageOutput,
+  TRIVIA_ACK_TITLE,
+  withTrivialAck,
   type RawBlock,
   type TriageBlock,
 } from '../src/triage.js';
@@ -210,6 +212,44 @@ describe('carryForward', () => {
   });
 
   it('counts what is left to review', () => {
-    assert.deepEqual(countBlocks(first), { total: 2, open: 1, substantial: 1 });
+    assert.deepEqual(countBlocks(first), { total: 2, open: 1, substantial: 1, defended: 0 });
+  });
+});
+
+describe('withTrivialAck', () => {
+  const diff = diffOf([{ path: 'a.txt', hunks: 2 }]);
+  const [a1 = '', a2 = ''] = hunkIds(diff);
+  const trivia = normalizeBlocks(
+    [{ title: 'churn', hunkIds: [a1, a2], substantial: false, rationale: '' }],
+    diff,
+  );
+
+  it('leaves a change nobody has to defend one thread that is still open', () => {
+    const blocks = withTrivialAck(trivia, diff.hunks.length, true);
+    assert.equal(blocks.length, 2);
+    const ack = blocks[1];
+    assert.equal(ack?.title, TRIVIA_ACK_TITLE);
+    assert.equal(ack?.state, 'open');
+    assert.equal(ack?.substantial, false, 'there is no hunk here to grade an answer about');
+    assert.deepEqual(ack?.hunkIds, [], 'and it hides none of the diff behind itself');
+    assert.deepEqual(countBlocks(blocks), { total: 2, open: 1, substantial: 0, defended: 0 });
+  });
+
+  it('adds nothing when a thread already has to be defended, or when nothing changed', () => {
+    const substantial = normalizeBlocks([{ title: 'core', hunkIds: [a1, a2], substantial: true, rationale: '' }], diff);
+    assert.deepEqual(withTrivialAck(substantial, diff.hunks.length, true), substantial);
+    assert.deepEqual(withTrivialAck([], 0, true), []);
+  });
+
+  it('adds nothing on `vibe`, the one difficulty that runs no gate at all', () => {
+    assert.deepEqual(withTrivialAck(trivia, diff.hunks.length, false), trivia);
+  });
+
+  it('asks again after a re-capture: it carries no signature, so it cannot be carried', () => {
+    const acknowledged = withTrivialAck(trivia, diff.hunks.length, true).map((block) =>
+      block.hunkIds.length === 0 ? { ...block, state: 'resolved' as const } : block,
+    );
+    const recaptured = withTrivialAck(carryForward(acknowledged, trivia), diff.hunks.length, true);
+    assert.equal(recaptured[1]?.state, 'open', 'new bytes need the acknowledgment again');
   });
 });

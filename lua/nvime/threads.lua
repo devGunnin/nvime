@@ -3,8 +3,11 @@
 ---
 --- Trivia is auto-resolved but never hidden — it sits in the list with an
 --- `auto` chip and `X` re-opens it, so the reader always knows everything that
---- changed. The comprehension gate that clears a substantial thread is P4;
---- `a` says so rather than pretending to grade.
+--- changed. A substantial thread is cleared only by the comprehension gate:
+--- `a` opens a typed, paste-blocked answer box, the sidecar grades it, and a
+--- grade under the session's threshold comes back as a hint and a follow-up
+--- the next answer has to address. There is no override, and `M` will not
+--- merge while anything is open.
 local agent = require('nvime.agent')
 
 local M = {}
@@ -65,7 +68,53 @@ function M.tree_lines(blocks)
   return lines, highlights
 end
 
---- The hunks of one thread, sliced out of the captured diff.
+--- The question this thread's next answer has to address, or nil.
+--- @param block table
+--- @return string|nil
+function M.followup(block)
+  local rounds = (block or {}).rounds or {}
+  local last = rounds[#rounds]
+  if last == nil or last.result == nil then
+    return nil
+  end
+  local question = last.result.followup
+  if question == nil or question == '' then
+    return nil
+  end
+  return question
+end
+
+--- The gate's record for one thread: every answer and what came back.
+--- @param block table
+--- @return string[]
+function M.gate_lines(block)
+  local rounds = (block or {}).rounds or {}
+  if #rounds == 0 then
+    return {}
+  end
+  local lines = { '', '── the gate ──' }
+  for _, round in ipairs(rounds) do
+    for _, line in ipairs(vim.split(round.answer or '', '\n', { plain = true })) do
+      lines[#lines + 1] = 'you · ' .. line
+    end
+    if round.result == nil then
+      lines[#lines + 1] = '  ! ' .. (round.ungraded or 'this answer was not graded')
+      lines[#lines + 1] = '  the thread stays open — answer again'
+    else
+      lines[#lines + 1] = string.format('  %d · %s', round.result.grade or 0, round.result.verdict or '')
+      if round.result.hint ~= nil and round.result.hint ~= '' then
+        lines[#lines + 1] = '  hint: ' .. round.result.hint
+      end
+      if round.result.followup ~= nil and round.result.followup ~= '' then
+        lines[#lines + 1] = '  next: ' .. round.result.followup
+      end
+    end
+    lines[#lines + 1] = ''
+  end
+  return lines
+end
+
+--- The hunks of one thread, sliced out of the captured diff, then its gate.
 --- @param block table
 --- @return string[]
 function M.pane_lines(block)
@@ -96,6 +145,7 @@ function M.pane_lines(block)
       lines[#lines + 1] = ''
     end
   end
+  vim.list_extend(lines, M.gate_lines(block))
   return lines
 end
 
@@ -128,15 +178,32 @@ function M.escape_winbar(text)
   return (tostring(text):gsub('%%', '%%%%'))
 end
 
+--- The gate line: what is left before `M` will do anything.
+--- @param session table
+--- @return string
+function M.gate_status(session)
+  local counts = (session or {}).counts or { open = 0, total = 0, substantial = 0, defended = 0 }
+  if (session or {}).display == 'merged' then
+    local merge = (session or {}).merge or {}
+    return string.format('merged into %s as %s', merge.baseBranch or '?', (merge.commit or '?'):sub(1, 8))
+  end
+  local defended = string.format('%d/%d defended', counts.defended or 0, counts.substantial or 0)
+  if (counts.open or 0) > 0 then
+    return string.format('%s · %d open · merge locked', defended, counts.open)
+  end
+  return string.format('%s · M merges into your branch', defended)
+end
+
 local function status()
   if not win_valid(view.tree_win) then
     return
   end
-  local counts = (view.session or {}).counts or { open = 0, total = 0 }
   local title = M.escape_winbar((view.session or {}).title or 'big change')
-  vim.wo[view.tree_win].winbar = string.format('%%#NvimeSession#%s · %d of %d open', title, counts.open, counts.total)
+  vim.wo[view.tree_win].winbar =
+    string.format('%%#NvimeSession#%s · %s', title, M.escape_winbar(M.gate_status(view.session)))
   if win_valid(view.pane_win) then
-    vim.wo[view.pane_win].winbar = '%#NvimeDim#a answer · r request changes · X re-open · ]t/[t · M merge'
+    vim.wo[view.pane_win].winbar =
+      '%#NvimeDim#a answer · r request changes · X re-open · R rebase · ]t/[t · M merge'
   end
 end
 
@@ -266,6 +333,178 @@ local function request_changes()
   })
 end
 
+--- `a`: defend this thread. The box takes typed text only — the whole feature
+--- is that you had to think it through, and pasting the diff back is not that.
+local function answer()
+  local block = current_block()
+  if block == nil then
+    return
+  end
+  if not block.substantial then
+    notify('trivia needs no defense — X re-opens it if you disagree with the triage')
+    return
+  end
+  if block.state ~= 'open' then
+    notify('this thread is already cleared')
+    return
+  end
+  local followup = M.followup(block)
+  require('nvime.compose').open({
+    title = ' defend · ' .. block.title .. ' ',
+    hint = followup ~= nil and ('follow-up: ' .. followup) or 'what does this change do, and why? · paste is blocked',
+    no_paste = true,
+    height = 10,
+    on_submit = function(text)
+      notify('grading your answer')
+      agent.request('big.answer', {
+        root = view.root,
+        sessionId = view.session.id,
+        answers = { { blockId = block.id, text = text } },
+      }, function(err, result)
+        if err ~= nil then
+          notify(err.message or 'the grading turn failed', vim.log.levels.ERROR)
+          return
+        end
+        adopt(result.session)
+        M.report_grade(result.session, block.id)
+      end, {
+        -- A grading round is an agent turn; <C-c> bounds it, not a timer.
+        no_deadline = true,
+      })
+    end,
+  })
+end
+
+--- Says what the newest round on `block_id` earned. Read off the session the
+--- sidecar returned, never off what this side hoped would happen.
+--- @param session table
+--- @param block_id string
+function M.report_grade(session, block_id)
+  local block = nil
+  for _, candidate in ipairs((session or {}).blocks or {}) do
+    if candidate.id == block_id then
+      block = candidate
+    end
+  end
+  if block == nil then
+    return
+  end
+  local rounds = block.rounds or {}
+  local last = rounds[#rounds]
+  if last == nil then
+    notify('nothing came back for that thread — it stays open', vim.log.levels.WARN)
+    return
+  end
+  if last.result == nil then
+    notify(last.ungraded or 'that answer was not graded — the thread stays open', vim.log.levels.WARN)
+    return
+  end
+  if block.state == 'resolved' then
+    notify(string.format('cleared (%d) — %s', last.result.grade or 0, last.result.verdict or ''))
+    return
+  end
+  notify(string.format('%d, not enough — %s', last.result.grade or 0, last.result.hint or ''), vim.log.levels.WARN)
+end
+
+--- Brings buffers under the project root up to date with what just landed.
+--- Uses P2's conflict-aware path: a buffer with unsaved edits is named, never
+--- overwritten.
+local function refresh_after_merge(session)
+  local ok, apply = pcall(require, 'nvime.apply')
+  if not ok then
+    return
+  end
+  local reloaded, left = apply.recheck(view.root, { run_id = 'big-merge-' .. session.id })
+  if #left == 0 then
+    notify(string.format('merged · %d buffer(s) refreshed', #reloaded))
+    return
+  end
+  notify(
+    string.format('merged · %d buffer(s) refreshed, %d left alone: %s', #reloaded, #left, left[1].reason),
+    vim.log.levels.WARN
+  )
+end
+
+--- `M`: land the reviewed change on the branch it was built from.
+---
+--- The sidecar decides. This side never predicts the answer — it asks, and
+--- renders whatever comes back, refusals included.
+local function merge()
+  if view.session == nil then
+    return
+  end
+  local config = require('nvime.config')
+  notify('checking the merge preconditions')
+  agent.request('big.merge', {
+    root = view.root,
+    sessionId = view.session.id,
+    cleanup = config.get().big.cleanup_on_merge,
+  }, function(err, result)
+    if err ~= nil then
+      notify(err.message or 'the merge failed', vim.log.levels.ERROR)
+      if err.detail ~= nil and err.detail ~= '' then
+        notify(err.detail, vim.log.levels.ERROR)
+      end
+      M.reload_current()
+      return
+    end
+    adopt(result.session)
+    if not result.merged then
+      M.report_refusals(result.refusals or {})
+      return
+    end
+    refresh_after_merge(result.session)
+  end, { no_deadline = true })
+end
+
+--- Renders why the merge would not run, and what to do about it.
+--- @param refusals table[] each { code, message }
+function M.report_refusals(refusals)
+  if #refusals == 0 then
+    notify('the merge was refused without a reason — this is a bug', vim.log.levels.ERROR)
+    return
+  end
+  local moved = false
+  local parts = {}
+  for _, refusal in ipairs(refusals) do
+    parts[#parts + 1] = refusal.message
+    if refusal.code == 'base-moved' then
+      moved = true
+    end
+  end
+  if moved then
+    parts[#parts + 1] = 'press R to rebase the build onto it and review what changed'
+  end
+  notify('not merging — ' .. table.concat(parts, '; '), vim.log.levels.WARN)
+end
+
+--- `R`: move the build onto a base branch that has advanced, then re-review.
+local function rebase()
+  if view.session == nil then
+    return
+  end
+  notify('rebasing the build onto the updated base — this runs for as long as it takes')
+  agent.request('big.rebase', { root = view.root, sessionId = view.session.id }, function(err, result)
+    if err ~= nil then
+      notify(err.message or 'the rebase failed', vim.log.levels.ERROR)
+      return
+    end
+    M.reload(result.session)
+  end, { no_deadline = true })
+end
+
+--- Re-reads the session the sidecar holds, without assuming what changed.
+function M.reload_current()
+  if view.session == nil then
+    return
+  end
+  agent.request('big.open', { root = view.root, sessionId = view.session.id }, function(err, result)
+    if err == nil then
+      adopt(result.session)
+    end
+  end)
+end
+
 --- `<CR>`: open the build clone's copy of this thread's first file.
 local function open_file()
   local block = current_block()
@@ -320,20 +559,9 @@ local KEYS = {
   { lhs = 'X', fn = toggle, desc = 'nvime: re-open or clear a trivial thread' },
   { lhs = 'r', fn = request_changes, desc = 'nvime: request changes' },
   { lhs = '<CR>', fn = open_file, desc = 'nvime: open this file in the build clone' },
-  {
-    lhs = 'a',
-    fn = function()
-      notify('the review gate lands in the next release')
-    end,
-    desc = 'nvime: answer this thread',
-  },
-  {
-    lhs = 'M',
-    fn = function()
-      notify('merge is not armed until the review gate ships')
-    end,
-    desc = 'nvime: merge',
-  },
+  { lhs = 'a', fn = answer, desc = 'nvime: answer this thread' },
+  { lhs = 'R', fn = rebase, desc = 'nvime: rebase onto the moved base' },
+  { lhs = 'M', fn = merge, desc = 'nvime: merge' },
   {
     lhs = 'q',
     fn = function()

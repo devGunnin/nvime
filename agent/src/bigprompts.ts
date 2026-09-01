@@ -1,4 +1,5 @@
 import type { BigSpec } from './bigstore.js';
+import type { GateRound } from './gate.js';
 import type { TriageBlock } from './triage.js';
 
 /**
@@ -106,6 +107,135 @@ export function composeTriagePrompt(
       'shown at all. Group only what is here.\n'
     : '';
   return `${TRIAGE_INSTRUCTION}\n${intent}${note}\n${rendered}`;
+}
+
+/**
+ * The rubric. It is long because every line of it closes a way of passing
+ * without understanding — the failure mode this whole feature exists to stop.
+ *
+ * It steers and does not enforce: the SCORE is enforced by the threshold in
+ * `gate.ts`, and an unusable answer leaves the thread open no matter what this
+ * text asked for.
+ */
+const GRADE_INSTRUCTION = [
+  'You are grading how well a reader understands a change they did not write. They are about to merge it',
+  'into their own repository, and your grade is the only thing standing between them and code they cannot',
+  'maintain. Be exacting and be fair.',
+  '',
+  'Grade UNDERSTANDING, not eloquence. A blunt, plain, ungrammatical answer that names what the change does',
+  'and why beats a polished one that does not. Never reward length, vocabulary, confidence, hedging, or',
+  'politeness toward you.',
+  '',
+  'What scores low:',
+  '  - restating the diff line by line ("it adds a lock and sets a flag") without saying what that ACHIEVES;',
+  '  - an answer generic enough to fit any change of this shape ("it refactors for clarity", "it fixes a bug",',
+  '    "it improves error handling") — if it would still be true of a different diff, it is not understanding;',
+  '  - naming the mechanism but not the failure it prevents or the behavior it changes;',
+  '  - any claim about this change that is factually wrong. Cap such an answer below the pass mark.',
+  'What scores high:',
+  '  - specifics that could only come from reading THIS change: the actual condition, the actual case it',
+  '    handles, the actual tradeoff taken, what would break without it;',
+  '  - correctly naming a consequence the diff implies but does not state.',
+  '',
+  'If a follow-up question was asked, an answer that does not address it cannot pass, however good otherwise.',
+  'For an answer that falls short, write a hint that points at what they have not accounted for — Socratic,',
+  'never the answer itself — and one follow-up question that would settle whether they understand. For an',
+  'answer that passes, leave hint and followup empty.',
+  'You may read the repository to check a claim. Return exactly one entry per thread id below, copied exactly.',
+].join('\n');
+
+export interface GradeItem {
+  threadId: string;
+  title: string;
+  rationale: string;
+  /** The thread's hunks, exactly as the reader saw them. */
+  diff: string;
+  /** Earlier rounds on this thread, oldest first. */
+  history: readonly GateRound[];
+  /** The question this answer had to address, or '' for a first answer. */
+  followup: string;
+  answer: string;
+}
+
+/**
+ * One grading turn for a whole round: every thread answered, graded together.
+ *
+ * `resumed` says the grader's own SDK session is being continued. The rubric
+ * and the pass mark are sent on EVERY round regardless — they are ~1.5KB, and a
+ * resume that silently comes back with a pruned context (an expired SDK
+ * session resuming into a fresh one, say) must never grade without them: a
+ * grade given blind can still clear a thread. Only the per-thread diff and
+ * verdict history are trimmed on a thread the grader has already seen, which
+ * is what makes resuming worth doing — that is the bulk of what a round would
+ * otherwise re-send. A thread being graded for the FIRST time still gets the
+ * full rendering, resumed or not — that context is new whatever round it
+ * arrives in.
+ */
+export function composeGradePrompt(
+  spec: BigSpec | null,
+  threshold: number,
+  items: readonly GradeItem[],
+  resumed = false,
+): string {
+  if (items.length === 0) throw new Error('a grading turn needs at least one answered thread');
+  const intent = resumed || spec === null ? '' : `\nWhat the change as a whole was meant to do:\n${spec.goal}\n`;
+  const bar =
+    `\nThe pass mark for this session is ${threshold} out of 100. Grade against it honestly: do not` +
+    ' round an answer up to spare them another round, and do not hold back a passing answer.\n';
+  const resumeNote = resumed ? `\n${RESUME_NOTE}\n` : '';
+  return `${GRADE_INSTRUCTION}\n${intent}${bar}${resumeNote}\n${items.map((item) => renderGradeItem(item, resumed)).join('\n')}`;
+}
+
+/** Explains the abbreviated rendering below — never a replacement for the
+ *  rubric or the pass mark, which stay in every round. */
+const RESUME_NOTE =
+  'This is a later round on some of the same threads. For a thread you have already graded, the change and ' +
+  'your earlier verdict are already in this conversation and are not repeated below — only what is new is.';
+
+/**
+ * A thread as the grader is shown it. On a resumed session a thread it has
+ * already graded is named rather than re-rendered: it has the hunks and its own
+ * verdicts in context, and repeating them is what makes the round grow.
+ */
+function renderGradeItem(item: GradeItem, resumed: boolean): string {
+  const known = resumed && item.history.length > 0;
+  const parts = [`=== thread ${item.threadId}: ${item.title} ===`];
+  if (!known) {
+    if (item.rationale !== '') parts.push(`why it was grouped this way: ${item.rationale}`);
+    parts.push('the change under review:', item.diff);
+    for (const round of item.history) {
+      if (round.result === null) continue;
+      parts.push(`earlier answer: ${round.answer}`);
+      parts.push(`you scored it ${round.result.grade} and said: ${round.result.verdict}`);
+    }
+  }
+  if (item.followup !== '') parts.push(`the follow-up they had to address: ${item.followup}`);
+  parts.push(`their answer now:\n${item.answer}`);
+  return parts.join('\n') + '\n';
+}
+
+/**
+ * The build agent's rebase turn. The sidecar already moved what it could
+ * deterministically; this is for the part only a reader of the code can do.
+ */
+export function composeRebasePrompt(conflicted: boolean, baseBranch: string): string {
+  const head = conflicted
+    ? [
+        `A rebase of this working directory onto the updated ${baseBranch} is IN PROGRESS and has stopped on`,
+        'conflicts. Resolve every conflict in a way that keeps both the change you built and whatever the base',
+        'branch introduced, then finish the rebase (`git rebase --continue`, staging as needed).',
+      ]
+    : [
+        `This working directory has been rebased onto the updated ${baseBranch}. Nothing conflicted, but the`,
+        'code around your change has moved.',
+      ];
+  return [
+    ...head,
+    '',
+    'Then re-run whatever tests the project has and fix anything the new base broke.',
+    'Do not push, and do not add anything the change did not already need.',
+    'When you are done, say in a few sentences what conflicted and what you had to change.',
+  ].join('\n');
 }
 
 function renderSpec(spec: BigSpec): string {

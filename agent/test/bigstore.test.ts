@@ -10,6 +10,7 @@ import { setTimeout } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
   BigStore,
+  LOCK_HEARTBEAT_MS,
   LOCK_STALE_MS,
   MAX_CONVERSATION_TURNS,
   reconcile,
@@ -40,7 +41,8 @@ function built(): BigSession {
   const session = store.create(repo, 'connection-pool backoff');
   const path = store.worktreePathFor(repo, session.id);
   mkdirSync(join(path, '.git'), { recursive: true });
-  session.worktree = { path, baseCommit: 'a'.repeat(40), baseBranch: 'main', createdAt: Date.now(), ready: true };
+  session.base = { commit: 'a'.repeat(40), branch: 'main' };
+  session.worktree = { path, createdAt: Date.now(), ready: true };
   transition(session, 'building', 'test');
   store.save(session);
   return session;
@@ -163,7 +165,7 @@ describe('reconcile', () => {
   it('sends a session whose build clone vanished back to drafting', () => {
     const session = built();
     session.blocks = [
-      { id: 'b1', title: 't', files: [], hunkIds: ['h1.1'], substantial: true, rationale: '', state: 'open', reopened: false, signatures: ['s'] },
+      { id: 'b1', title: 't', files: [], hunkIds: ['h1.1'], substantial: true, rationale: '', state: 'open', reopened: false, signatures: ['s'], rounds: [] },
     ];
     transition(session, 'reviewing', 'test');
     const result = reconcile(session, reality({ worktreeExists: false, diffExists: true }));
@@ -177,7 +179,7 @@ describe('reconcile', () => {
   it('keeps a finished review when the clone is gone but the captured diff still verifies', () => {
     const session = built();
     session.blocks = [
-      { id: 'b1', title: 't', files: [], hunkIds: ['h1.1'], substantial: true, rationale: '', state: 'open', reopened: false, signatures: ['s'] },
+      { id: 'b1', title: 't', files: [], hunkIds: ['h1.1'], substantial: true, rationale: '', state: 'open', reopened: false, signatures: ['s'], rounds: [] },
     ];
     session.diffId = 'abc';
     session.diffCapturedAt = Date.now();
@@ -213,12 +215,63 @@ describe('reconcile', () => {
     assert.deepEqual(session.blocks, []);
   });
 
+  it('lands a detached build in reviewing when its clone is gone but the diff verifies', () => {
+    // The stuck case: a revision transitions to `building` while the previous
+    // capture is still on the record. If the clone then vanishes, `building`
+    // offers only resume (which needs the clone) and discard — with a complete,
+    // verifying review sitting right there.
+    const session = built();
+    session.blocks = [
+      {
+        id: 'b1',
+        title: 't',
+        files: [],
+        hunkIds: ['h1.1'],
+        substantial: true,
+        rationale: '',
+        state: 'open',
+        reopened: false,
+        signatures: ['s'],
+        rounds: [],
+      },
+    ];
+    session.diffId = 'abc';
+    session.diffCapturedAt = Date.now();
+    transition(session, 'building', 'requested changes');
+
+    const result = reconcile(session, reality({ worktreeExists: false, diffExists: true, diffVerified: true }));
+    assert.equal(result.changed, true);
+    assert.equal(session.state, 'reviewing');
+    assert.equal(result.detached, false, 'there is nothing left running to be detached from');
+    assert.equal(session.blocks.length, 1, 'the threads and the diff they describe survive');
+    assert.match(session.transitions[session.transitions.length - 1]?.note ?? '', /reviewed diff is intact/);
+  });
+
+  it('keeps a merged session merged whatever the disk says', () => {
+    const session = built();
+    session.merge = { branch: 'nvime/big/x', commit: 'c'.repeat(40), baseBranch: 'main', at: Date.now() };
+    transition(session, 'merged', 'landed');
+    const result = reconcile(session, reality({ worktreeExists: false, diffExists: false }));
+    assert.equal(result.changed, false);
+    assert.equal(session.state, 'merged', 'a landed change cannot be un-landed by a missing clone');
+    assert.notEqual(session.merge, null);
+  });
+
+  it('keeps the base commit when the clone goes but the review survives', () => {
+    const session = built();
+    session.diffId = 'abc';
+    session.diffCapturedAt = Date.now();
+    transition(session, 'reviewing', 'test');
+    reconcile(session, reality({ worktreeExists: false, diffExists: true, diffVerified: true }));
+    assert.equal(session.worktree, null);
+    assert.deepEqual(session.base, { commit: 'a'.repeat(40), branch: 'main' }, 'a diff with no base cannot be landed');
+  });
+
   it('does not call an approved-but-unbuilt clone "gone"', () => {
     const session = store.create(repo, 'approved');
+    session.base = { commit: 'b'.repeat(40), branch: 'main' };
     session.worktree = {
       path: store.worktreePathFor(repo, session.id),
-      baseCommit: 'b'.repeat(40),
-      baseBranch: 'main',
       createdAt: Date.now(),
       ready: false,
     };
@@ -307,6 +360,34 @@ describe('the cross-process run claim', () => {
     writeFileSync(store.lockPathFor(repo, session.id), '{not json');
     assert.equal(store.readLock(session), null);
     store.acquireLock(session, 'build').release();
+  });
+
+  it('does not resurrect a claim that was reclaimed while its holder was wedged', async () => {
+    // The exact sequence the compare-and-swap exists for: this handle claims
+    // the session and then stops beating (a wedged sidecar); another editor
+    // reclaims it as stale and starts building; this handle's timer comes back.
+    const session = built();
+    const lock = store.acquireLock(session, 'build');
+    const path = store.lockPathFor(repo, session.id);
+
+    const takeover = {
+      owner: 'the-other-editor',
+      pid: process.pid,
+      host: hostname(),
+      what: 'build',
+      startedAt: Date.now(),
+      heartbeatAt: Date.now(),
+    };
+    writeFileSync(path, JSON.stringify(takeover));
+
+    // Long enough for at least one beat from the handle that lost the claim.
+    await setTimeout(LOCK_HEARTBEAT_MS + 500);
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).owner, 'the-other-editor', 'a lost claim is not rewritten');
+    assert.notEqual(store.foreignLock(session), null, 'and the old holder sees the session as somebody else\'s');
+
+    // Releasing a claim it no longer owns must not unlock their build either.
+    lock.release();
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).owner, 'the-other-editor');
   });
 });
 

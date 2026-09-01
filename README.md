@@ -29,7 +29,7 @@ accepted tradeoff, not an oversight.
 Three capabilities: **Chat** (read-only conversation), **Edit** (you point, it
 changes, and you watch it happen) and **Big Change** (claude interrogates the
 request into a spec, builds it alone in a disposable clone, and hands you back a
-triaged review). The comprehension gate that clears a review thread is P4.
+triaged review, then makes you defend it before it merges).
 
 ## Requirements
 
@@ -58,7 +58,7 @@ sidecar to `agent/dist/index.js`; the plugin runs that file with `node`.
 
 | | |
 |---|---|
-| `:Nvime` | capabilities and wiring status |
+| `:Nvime` | the dashboard: wiring status and every big change in this project |
 | `:Nvime chat` | open the chat panel |
 | `:Nvime edit` | instruct claude about the current file |
 | `:Nvime big` | start or resume a big change |
@@ -85,8 +85,9 @@ Keymaps (off until `keymaps.enabled = true`):
 | `<CR>` / `r` / `d` | changeset | open the file · revert the hunk · unified diff |
 | `<C-t>` | big panel | open the review threads |
 | `]t` / `[t` | review | next · previous thread |
-| `a` / `r` / `X` | review | answer (P4) · request changes · re-open a trivial thread |
-| `M` | review | merge (P4) |
+| `a` / `r` / `X` | review | defend this thread · request changes · re-open a trivial thread |
+| `R` / `M` | review | rebase onto a moved base · merge into your branch |
+| `c` `e` `b` `d` / `<CR>` | dashboard | chat · edit · big · changeset / open the change under the cursor |
 
 Every mapping is a leaf: none is a prefix of another, so nothing ever stalls for
 `timeoutlen`. `tests/lua/keymaps_spec.lua` enforces it and `:checkhealth` reports it.
@@ -254,8 +255,114 @@ session; the diff is re-captured and re-triaged, and threads whose content is
 byte-identical AND rated the same way keep the verdict they had — anything new,
 or newly called substantial, comes back open.
 
-`a` (answer) and `M` (merge) are the comprehension gate, and they land in P4.
-They say so rather than pretending to grade.
+**The gate.** `a` on an open substantial thread opens an answer box and asks what
+the change does and why. **Paste is blocked**: the put mappings refuse with a
+reason, `vim.paste` — what bracketed paste from the terminal calls — is refused
+while the box is open, and anything that gets past both, `:put` and a register
+put included, is undone by a watcher on the buffer itself, which sees every
+change whatever made it. The watcher counts *characters*, not bytes, so a CJK or
+IME typist can type an answer at all. Typing is allowed; so is undo and redo of
+what you already typed.
+
+It is a paste block, not a sandbox, and this README will not pretend otherwise.
+The watcher catches a *burst*, so text fed in slowly enough — `:r`, an external
+tool driving the buffer, a paste chopped small — gets through. There is nothing
+worth having on the other side of that: the grader grades the answer you submit,
+so defeating the block buys a low score and another round.
+
+Submitting runs one read-only grading turn for the round, in the build clone so
+the grader can check a claim against the code, resumed across rounds so a
+follow-up remembers what it already asked. It grades understanding, not
+eloquence: an answer that restates the diff, or that would fit any change of that
+shape, scores low; specifics that could only come from reading *this* change
+score high. The pass mark is the session's difficulty:
+
+| | |
+|---|---|
+| `vibe` | no gate — substantial threads arrive cleared |
+| `easy` | 40 |
+| `medium` | 70 (default) |
+| `extreme` | 90 |
+
+Set it in `setup()`, or type `vibe`/`easy`/`medium`/`extreme` in the panel while
+the spec is still being drafted. It is fixed at approval: moving the bar
+afterwards would re-rate a review that has already happened.
+
+Under the mark the thread stays open and the grader's hint and follow-up render
+in it; the next answer has to address the follow-up. There is no round cap and
+no override — `X` refuses to clear a substantial thread by hand. If the grading
+turn fails or answers unusably, the round is recorded **ungraded**: your answer
+is kept, the thread stays open, and the pane says why. A grade nobody gave is
+never inferred. Rounds after the first ride the grader's resumed session and
+carry only the new answer and its follow-up — the change and the verdicts it
+already gave are in that context, and re-sending them every round is what walks
+a long review into the context ceiling.
+
+If the triage turn rates **every** thread trivial, nothing is graded, and
+`0/0 defended` would be mergeable the moment it was triaged. The diff that turn
+read was written by the build agent, so a comment aimed at triage would disarm
+the whole gate that way. An all-trivia change therefore gets one more thread,
+open: *everything was rated trivial — open the diff and confirm*. Read it
+yourself and clear it with `X`. It holds no hunks, so it hides nothing, and it
+carries no signature, so every re-capture asks again. No setting removes it —
+`vibe` is the one difficulty that runs no gate at all, and that is a choice you
+make per change.
+
+**The merge.** `M` lands the reviewed change on the branch the build started
+from — the only thing nvime ever writes to your repository. It asserts every
+precondition itself rather than trusting the screen, and reports *all* of them at
+once: threads still open, a diff that no longer verifies, a binary change (whose
+bytes the reviewed diff does not carry), a base branch that moved or went away,
+a checkout on some other branch, tracked changes in your tree.
+
+The mechanics are one-way. The commit is built entirely in a private index file
+outside the repository — `read-tree` the base, `git apply --cached` (with a
+`--3way` fallback), `write-tree`, `commit-tree` — so an interruption at any point
+before the end leaves your index, tree and branches byte for byte as they were.
+Then the branch `nvime/big/<slug>` is created at that commit with an atomic
+create-only `update-ref`, and exactly one command touches your checkout:
+`git merge --ff-only`.
+
+`git merge` moves whatever HEAD points at, not the branch you name it, so HEAD
+itself is re-read immediately before that command — the ref it is **on** and the
+commit it is **at**, both — and again after. A `git checkout -b side` onto a
+second branch at the same tip, or a `git checkout --detach`, made between the
+precondition check and the merge stops it, rather than fast-forwarding the
+reviewed change onto some other ref of yours.
+
+If anything fails, the branch is deleted again and the rollback is *verified*
+against the repository **as this attempt found it**: the base is back where it
+was, HEAD is on the same ref at the same commit, and the tracked changes are the
+ones that were already there. You are told if it could not be. So a tree you had
+already edited is not reported as a failed rollback, and a HEAD that moved can
+never be certified "exactly as it was". The commit message is the session title,
+authored with your own git identity and nothing else.
+
+Once the commit is on your branch nothing can un-land it, so nothing after that
+point is reported as a failed merge. If the record write then fails — a full
+disk, the store removed under a live run — you are told the change **landed** and
+could not be recorded, and the next attempt finds its own commit already on the
+branch and says so. Never "your base moved", which would offer to rebase the
+build onto your own just-landed change.
+
+The commit is built in a private index in nvime's own store, never inside your
+repository, and the lock git writes beside that index is cleared before and
+after every merge: a killed `git apply` used to leave one there and wedge every
+later merge with git's "another git process seems to be running in this
+repository" — about a file in nvime's store, which you have no reason to know
+exists.
+
+Afterwards open buffers are refreshed through the same conflict-aware path edit
+mode uses: a clean buffer is brought up to date live, one with unsaved edits is
+named and left alone. The session is `merged`, which is terminal. The build clone
+is kept until you discard it (`big.cleanup_on_merge = true` drops it instead).
+
+If the base branch has moved, `R` rebases the build onto it: the clone fetches
+the new base, git moves the work, and a build turn resolves whatever conflicted
+and re-runs the tests. A rebase that could not be finished is aborted rather than
+left half-applied. The diff is then re-captured and re-triaged — content you
+already defended carries forward by signature, and anything the move changed
+comes back open.
 
 **State honesty.** Every transition is recorded with its timestamp, and the
 record is reconciled against the disk on every read. A build that outlived
@@ -335,6 +442,10 @@ require('nvime').setup({
     nofade = false,              -- keep the highlight until the next change
     approval_timeout_ms = 60000, -- unanswered asks are denied after this
   },
+  big = {
+    difficulty = 'medium',       -- vibe (no gate) / easy 40 / medium 70 / extreme 90
+    cleanup_on_merge = false,    -- drop the build clone once the change lands
+  },
   agent = {
     node = 'node',              -- node binary
     claude = nil,               -- absolute path; nil resolves from PATH
@@ -374,8 +485,13 @@ own — they carry the originating request's id in `params.id`.
 Methods: `chat.send`, `chat.list`, `chat.history`, `chat.cancel`,
 `edit.start`, `edit.cancel`, `edit.answer`, `edit.list_changes`, `big.create`,
 `big.list`, `big.open`, `big.diff`, `big.intake`, `big.approve`, `big.build`,
-`big.capture`, `big.revise`, `big.toggle`, `big.discard`, `big.cancel`, `ping`,
-`shutdown`.
+`big.capture`, `big.revise`, `big.toggle`, `big.answer`, `big.difficulty`,
+`big.mergecheck`, `big.merge`, `big.rebase`, `big.discard`, `big.cancel`,
+`ping`, `shutdown`.
+
+`big.merge` answers rather than throws when it will not run: `{merged: false,
+refusals: [{code, message}]}` is the editor's cue to render every reason at once
+and to offer the rebase when `base-moved` is among them.
 
 Edit events: `edit.started`, `edit.delta`, `edit.tool`, `edit.applied` (the
 recorded mutation, with before/after snapshots), `edit.approval` and
@@ -419,7 +535,18 @@ preservation, undo grouping and hunk highlights, changeset revert round-trips
 and their conflict refusals, the approval float, health reporting, keymap
 leaf-only-ness, panel streaming and lifecycle, the picker, config validation,
 context expansion, the big-change intake flow and session states, and the review
-thread list, chips, hunk slicing and request-changes plumbing).
+thread list, chips, hunk slicing and request-changes plumbing, the gate overlay
+and its answer box, and the dashboard page).
+
+The paste block is tested by mechanism, not by keystroke: the put mappings, a
+register put in insert mode, `vim.paste` (what bracketed paste calls, refused
+before the text reaches the buffer at all) and `:put` (undone by the watcher) all
+have to be refused, while character-by-character typing, a redo of it, and a CJK
+or IME phrase commit get through. The merge tests run against a real scratch repo
+and assert the byte-identical rollback — including the case where HEAD moved to a
+second branch at the same commit, which is how a merge lands on the wrong ref
+while every ref it reads still says what it said at the check. The lock's
+compare-and-swap test fails without its fix.
 
 The big-change sidecar tests run against a real scratch git repo: the clone is
 really made, the build agent is mocked at the SDK boundary but its writes
@@ -439,8 +566,9 @@ lua/nvime/
   diffs.lua           pure line diffs and the buffer edits they imply
   changeset.lua       the review view and per-hunk revert
   big.lua             big change: intake, approval, build, session states
-  threads.lua         the review thread list and its hunk pane
-  compose.lua         a float for one piece of free text (a review comment)
+  threads.lua         the review threads, the gate overlay, merge and rebase
+  dashboard.lua       :Nvime — the front door and this project's big changes
+  compose.lua         a float for one piece of free text; paste-blocked for a defense
   approval.lua        the y/n float for a gated tool
   panel.lua           named panels: scrollback + optional prompt
   markdown.lua        pure markdown classifier
@@ -458,9 +586,11 @@ agent/src/
   chat.ts             the SDK boundary for chat
   edit.ts             the SDK boundary for edit, and the change record
   policy.ts           what edit and big-change builds allow, ask about, deny
-  big.ts              the SDK boundary for big change: intake, build, triage
+  big.ts              the SDK boundary for big change: intake, build, triage, grading
   bigstore.ts         big-change sessions on disk, their lock, and reconciliation
-  bigprompts.ts       the three big-change prompts and their output schemas
+  bigprompts.ts       the big-change prompts and their output schemas
+  gate.ts             difficulty thresholds, grade parsing, the defense record
+  merge.ts            the local merge: preconditions, landing, verified rollback
   unidiff.ts          unified diff -> files and hunks, with content signatures
   triage.ts           hunks -> review threads, and carrying verdicts forward
   git.ts              every git call big change makes
