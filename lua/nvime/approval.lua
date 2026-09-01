@@ -138,12 +138,14 @@ end
 --- @param page table
 local function append_keys(page)
   local first = #page.lines
-  for _, line in ipairs(text.wrap('y allow once n deny', page.width - 2)) do
+  -- `text.wrap_exact`, not `text.wrap`: the two keys are the only thing on
+  -- this surface the reader must find fast, so the deliberate spacing
+  -- between them survives instead of being collapsed to one space each.
+  for _, line in ipairs(text.wrap_exact('y  allow once      n  deny', page.width - 2)) do
     page.lines[#page.lines + 1] = ' ' .. line
   end
-  -- `text.wrap` collapses whitespace runs to one space, so the keys are
-  -- found by a whole-word match rather than by a fixed column: either key
-  -- can land as the last word on its wrapped line, with nothing after it.
+  -- Still a whole-word match rather than a fixed column: wrapping can still
+  -- land either key at a different column depending on the float's width.
   for row = first, #page.lines - 1 do
     local line = page.lines[row + 1]
     for _, key in ipairs({ 'y', 'n' }) do

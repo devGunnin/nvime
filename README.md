@@ -637,11 +637,12 @@ real, and the diff capture and triage fallback run over what it actually wrote.
 ### The screenshots
 
 Every image in this README is a real terminal, running the shipped plugin
-against a real repository, driven by the real `claude` CLI — the review, the
-grades and the merge commit in them come from one actual big change that was
-built, defended and landed. They are captured from `tmux capture-pane` and
-rendered to PNG; nothing is mocked up or drawn. The full set, dark and light,
-is under [`assets/`](assets/).
+against a real repository — captured from `tmux capture-pane` and rendered to
+PNG; nothing is mocked up or drawn. Most are the full loop, driven by the real
+`claude` CLI: the review, the grades and the merge commit in them come from
+one actual big change that was built, defended and landed. The edit shots are
+the real plugin's real rendering fed a scripted instruction rather than a live
+CLI turn. The full set, dark and light, is under [`assets/`](assets/).
 
 ## Layout
 
