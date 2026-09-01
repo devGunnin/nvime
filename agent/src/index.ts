@@ -5,6 +5,7 @@ import { BigService } from './big.js';
 import { BigStore, defaultBigRoot } from './bigstore.js';
 import { ChatService } from './chat.js';
 import { parseContextBlocks, parseProjectInstructions } from './context.js';
+import { parseDial } from './dial.js';
 import { EditService, parseScope } from './edit.js';
 import { resolveClaudeExecutable, strippedNames } from './env.js';
 import { DEFAULT_DIFFICULTY, DIFFICULTIES, isDifficulty, type Difficulty } from './gate.js';
@@ -54,7 +55,6 @@ function main(): void {
           claudePath,
           env: process.env,
           emit: (event, params) => write({ event, params }),
-          model: process.env.NVIME_MODEL,
         });
 
   const edit =
@@ -65,7 +65,6 @@ function main(): void {
           claudePath,
           env: process.env,
           emit: (event, params) => write({ event, params }),
-          model: process.env.NVIME_MODEL,
           approvalTimeoutMs: readApprovalTimeout(process.env.NVIME_APPROVAL_TIMEOUT_MS),
         });
 
@@ -79,7 +78,6 @@ function main(): void {
           claudePath,
           env: process.env,
           emit: (event, params) => write({ event, params }),
-          model: process.env.NVIME_MODEL,
         });
 
   const dispatcher = new Dispatcher(write);
@@ -179,6 +177,7 @@ function registerHandlers(
       context: parseContextBlocks(requireArray(params, 'context')),
       sessionId: optionalString(params, 'sessionId'),
       projectInstructions: parseProjectInstructions(params.projectInstructions),
+      ...parseDial(params),
     }),
   );
 
@@ -208,6 +207,7 @@ function registerHandlers(
       scope: parseScope(params.scope),
       sessionId: optionalString(params, 'sessionId'),
       projectInstructions: parseProjectInstructions(params.projectInstructions),
+      ...parseDial(params),
     }),
   );
 
@@ -269,6 +269,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
       message: requireString(params, 'message'),
+      ...parseDial(params),
     }),
   }));
 
@@ -280,6 +281,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
     session: await present(big).build(id, {
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
+      ...parseDial(params),
     }),
   }));
 
@@ -287,6 +289,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
     session: await present(big).capture(id, {
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
+      ...parseDial(params),
     }),
   }));
 
@@ -296,6 +299,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
       id: requireString(params, 'sessionId'),
       blockId: requireString(params, 'blockId'),
       comment: requireString(params, 'comment'),
+      ...parseDial(params),
     }),
   }));
 
@@ -317,6 +321,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
       answers: parseAnswers(params.answers),
+      ...parseDial(params),
     }),
   }));
 
@@ -337,6 +342,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
       blockId: requireString(params, 'blockId'),
+      ...parseDial(params),
     }),
   );
 
@@ -344,6 +350,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
     session: await present(big).rebase(id, {
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
+      ...parseDial(params),
     }),
   }));
 

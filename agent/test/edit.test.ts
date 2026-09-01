@@ -194,6 +194,26 @@ describe('EditService: the SDK options contract', () => {
     assert.ok(options?.canUseTool !== undefined);
   });
 
+  it('threads the requested model and effort into SDK options', async () => {
+    const h = harness([{ yield: frames.init() }, { yield: frames.success('done') }]);
+    await h.service.start(1, {
+      root: '/work/proj',
+      prompt: 'go',
+      scope: { kind: 'project' },
+      model: 'claude-sonnet-5',
+      effort: 'low',
+    });
+    assert.equal(h.calls[0]?.options.model, 'claude-sonnet-5');
+    assert.equal(h.calls[0]?.options.effort, 'low');
+  });
+
+  it('omits model and effort from SDK options when neither was requested', async () => {
+    const h = harness([{ yield: frames.init() }, { yield: frames.success('done') }]);
+    await h.service.start(1, { root: '/work/proj', prompt: 'go', scope: { kind: 'project' } });
+    assert.equal(h.calls[0]?.options.model, undefined);
+    assert.equal(h.calls[0]?.options.effort, undefined);
+  });
+
   it('prepends the project instructions to the user prompt as an explicit, marked block — never systemPrompt', async () => {
     const h = harness([{ yield: frames.init() }, { yield: frames.success('done') }]);
     await h.service.start(1, {

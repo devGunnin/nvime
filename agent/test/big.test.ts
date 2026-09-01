@@ -1605,3 +1605,88 @@ describe('rebasing onto a base that moved', () => {
     );
   });
 });
+
+describe('the model dial', () => {
+  it('threads the intake lane\'s model and effort into the intake turn', async () => {
+    const created = service.create(repo, 'version flag', 'medium');
+    turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ok', spec: SPEC })] });
+    await service.intake(1, {
+      root: repo,
+      id: created.id,
+      message: 'add a --version flag',
+      model: 'claude-opus-5',
+      effort: 'high',
+    });
+    assert.equal(calls[0]?.options.model, 'claude-opus-5');
+    assert.equal(calls[0]?.options.effort, 'high');
+  });
+
+  it('threads the build lane\'s model and effort into both the build and the triage turn', async () => {
+    const approvedView = await approved();
+    calls.length = 0; // drop the intake call `approved()` already made
+    scriptBuild([{ title: 'behavior', substantial: true }]);
+    await service.build(2, { root: repo, id: approvedView.id, model: 'claude-sonnet-5', effort: 'medium' });
+    assert.equal(calls[0]?.options.model, 'claude-sonnet-5', 'the build turn');
+    assert.equal(calls[0]?.options.effort, 'medium', 'the build turn');
+    assert.equal(calls[1]?.options.model, 'claude-sonnet-5', 'triage shares the build lane');
+    assert.equal(calls[1]?.options.effort, 'medium', 'triage shares the build lane');
+  });
+
+  it('omits model and effort from SDK options when neither lane value is set', async () => {
+    const created = service.create(repo, 'version flag', 'medium');
+    turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ok', spec: SPEC })] });
+    await service.intake(1, { root: repo, id: created.id, message: 'add a --version flag' });
+    assert.equal(calls[0]?.options.model, undefined);
+    assert.equal(calls[0]?.options.effort, undefined);
+  });
+
+  it('threads the grade lane\'s model and effort into the grading turn', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 70 }]);
+    await service.answer(3, {
+      root: repo,
+      id: view.id,
+      answers: [{ blockId: thread, text: 'an answer' }],
+      model: 'claude-opus-5',
+      effort: 'high',
+    });
+    const gradeCall = calls[calls.length - 1];
+    assert.equal(gradeCall?.options.model, 'claude-opus-5');
+    assert.equal(gradeCall?.options.effort, 'high');
+  });
+
+  it('refuses to grade at effort low — grading is the gate, not something to rush', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    const callsBefore = calls.length;
+    await assert.rejects(
+      service.answer(3, {
+        root: repo,
+        id: view.id,
+        answers: [{ blockId: thread, text: 'an answer' }],
+        effort: 'low',
+      }),
+      (error: unknown) => error instanceof ProtocolError && error.code === 'bad_request' && /effort low/.test(error.message),
+    );
+    assert.equal(calls.length, callsBefore, 'the refusal never reaches the SDK');
+  });
+
+  it('threads the explain lane\'s model and effort into the explain turn', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 70 }]);
+    await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'an answer' }] });
+    turns.push({ frames: [frames.init(), frames.result('it prints the version and exits')] });
+    await service.explain(4, {
+      root: repo,
+      id: view.id,
+      blockId: thread,
+      model: 'claude-haiku-5',
+      effort: 'low',
+    });
+    const explainCall = calls[calls.length - 1];
+    assert.equal(explainCall?.options.model, 'claude-haiku-5');
+    assert.equal(explainCall?.options.effort, 'low');
+  });
+});

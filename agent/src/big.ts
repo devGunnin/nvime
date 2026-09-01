@@ -25,6 +25,7 @@ import {
   type Reality,
 } from './bigstore.js';
 import type { EmitEvent, SdkBindings } from './chat.js';
+import { dialOptions, type Dial } from './dial.js';
 import { subscriptionEnv, type Env } from './env.js';
 import {
   clears,
@@ -126,7 +127,6 @@ export interface BigServiceOptions {
   claudePath: string;
   env: Env;
   emit: EmitEvent;
-  model?: string | undefined;
 }
 
 /** What the picker lists: enough to choose, without the diff or the blocks. */
@@ -183,13 +183,22 @@ interface TurnResult {
   costUsd: number;
 }
 
+/** What one `#turn` call needs — `model`/`effort` come from `Dial`, the lane's dial. */
+interface TurnSpec extends Dial {
+  prompt: string;
+  cwd: string;
+  phase: Phase;
+  resume: string | null;
+  schema?: Record<string, unknown>;
+  worktreeRoot?: string;
+}
+
 export class BigService {
   readonly #sdk: Pick<SdkBindings, 'query'>;
   readonly #store: BigStore;
   readonly #claudePath: string;
   readonly #env: Env;
   readonly #emit: EmitEvent;
-  readonly #model: string | undefined;
   readonly #running = new Map<number, Run>();
   readonly #runningByKey = new Map<string, number>();
 
@@ -199,7 +208,6 @@ export class BigService {
     this.#claudePath = options.claudePath;
     this.#env = subscriptionEnv(options.env);
     this.#emit = options.emit;
-    this.#model = options.model;
   }
 
   get activeRuns(): number {
@@ -265,7 +273,10 @@ export class BigService {
   }
 
   /** One intake exchange. The user's message, then the agent's next question. */
-  async intake(requestId: number, params: { root: string; id: string; message: string }): Promise<SessionView> {
+  async intake(
+    requestId: number,
+    params: { root: string; id: string; message: string } & Dial,
+  ): Promise<SessionView> {
     const session = this.#store.require(params.root, params.id);
     if (session.state !== 'drafting') {
       throw new ProtocolError('bad_request', 'the spec for this big change is already approved');
@@ -282,6 +293,8 @@ export class BigService {
         phase: 'intake',
         resume: session.intakeSessionId,
         schema: INTAKE_SCHEMA,
+        model: params.model,
+        effort: params.effort,
       }),
     );
 
@@ -331,7 +344,7 @@ export class BigService {
    * on a session whose build was cut short, it resumes the same SDK session in
    * the same clone rather than starting over on top of half a change.
    */
-  async build(requestId: number, params: { root: string; id: string }): Promise<SessionView> {
+  async build(requestId: number, params: { root: string; id: string } & Dial): Promise<SessionView> {
     const session = this.#requireBuildable(params.root, params.id);
     const spec = session.spec;
     if (spec === null) throw new ProtocolError('bad_request', 'this big change has no approved spec');
@@ -355,24 +368,26 @@ export class BigService {
         phase: 'build',
         resume,
         worktreeRoot: worktree.path,
+        model: params.model,
+        effort: params.effort,
       });
       session.buildSessionId = result.sessionId;
       session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
       this.#store.save(session);
-      return this.#captureAndTriage(requestId, session);
+      return this.#captureAndTriage(requestId, session, params);
     });
   }
 
   /** Capture and triage on their own: the recovery path for a detached build. */
-  async capture(requestId: number, params: { root: string; id: string }): Promise<SessionView> {
+  async capture(requestId: number, params: { root: string; id: string } & Dial): Promise<SessionView> {
     const session = this.#requireBuildable(params.root, params.id);
-    return this.#run(requestId, session, 'capture', () => this.#captureAndTriage(requestId, session));
+    return this.#run(requestId, session, 'capture', () => this.#captureAndTriage(requestId, session, params));
   }
 
   /** The reviewer's `r`: send one block's comment back to the build agent. */
   async revise(
     requestId: number,
-    params: { root: string; id: string; blockId: string; comment: string },
+    params: { root: string; id: string; blockId: string; comment: string } & Dial,
   ): Promise<SessionView> {
     const session = this.#store.require(params.root, params.id);
     this.#reconcileOrThrow(session);
@@ -398,11 +413,13 @@ export class BigService {
         phase: 'build',
         resume: session.buildSessionId,
         worktreeRoot: worktree.path,
+        model: params.model,
+        effort: params.effort,
       });
       session.buildSessionId = result.sessionId;
       session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
       this.#store.save(session);
-      return this.#captureAndTriage(requestId, session);
+      return this.#captureAndTriage(requestId, session, params);
     });
   }
 
@@ -416,8 +433,17 @@ export class BigService {
    */
   async answer(
     requestId: number,
-    params: { root: string; id: string; answers: ReadonlyArray<{ blockId: string; text: string }> },
+    params: {
+      root: string;
+      id: string;
+      answers: ReadonlyArray<{ blockId: string; text: string }>;
+    } & Dial,
   ): Promise<SessionView> {
+    // Grading is the gate a substantial thread must clear — running it at the
+    // shallowest effort would let the gate itself miss what it exists to catch.
+    if (params.effort === 'low') {
+      throw new ProtocolError('bad_request', 'grading never runs at effort low — it is the gate');
+    }
     const session = this.#store.require(params.root, params.id);
     this.#reconcileOrThrow(session);
     this.#refuseIfHeldElsewhere(session);
@@ -442,7 +468,7 @@ export class BigService {
         );
       }
       const items = buildGradeItems(held, answers, parseUnifiedDiff(diffText));
-      const round = await this.#gradeRound(requestId, held, items, threshold);
+      const round = await this.#gradeRound(requestId, held, items, threshold, params);
       return this.#recordRound(requestId, params, items, round, threshold);
     });
   }
@@ -494,6 +520,7 @@ export class BigService {
     session: BigSession,
     items: readonly GradeItem[],
     threshold: number,
+    dial: Dial,
   ): Promise<RoundResult> {
     const resumed = session.gradeSessionId !== null;
     try {
@@ -503,6 +530,8 @@ export class BigService {
         phase: 'grade',
         resume: session.gradeSessionId,
         schema: GRADE_SCHEMA,
+        model: dial.model,
+        effort: dial.effort,
       });
       const byThread = parseGradeOutput(result.structured);
       const grades: RoundGrades =
@@ -549,7 +578,10 @@ export class BigService {
    * before the run claims the session (a fast no), and again once it holds
    * the record (another editor could have answered the thread in between).
    */
-  async explain(requestId: number, params: { root: string; id: string; blockId: string }): Promise<{ text: string }> {
+  async explain(
+    requestId: number,
+    params: { root: string; id: string; blockId: string } & Dial,
+  ): Promise<{ text: string }> {
     const session = this.#store.require(params.root, params.id);
     this.#reconcileOrThrow(session);
     this.#refuseIfHeldElsewhere(session);
@@ -572,6 +604,8 @@ export class BigService {
         cwd: worktree.path,
         phase: 'explain',
         resume: null,
+        model: params.model,
+        effort: params.effort,
       });
       return { text: result.text };
     });
@@ -715,7 +749,7 @@ export class BigService {
    * re-captures and re-triages. Content the reader already cleared carries
    * forward by signature; anything the move changed comes back open.
    */
-  async rebase(requestId: number, params: { root: string; id: string }): Promise<SessionView> {
+  async rebase(requestId: number, params: { root: string; id: string } & Dial): Promise<SessionView> {
     const session = this.#requireBuildable(params.root, params.id);
     const base = requireBase(session);
     const branch = base.branch;
@@ -738,13 +772,13 @@ export class BigService {
         state: 'building',
         note: conflicted ? 'the rebase hit conflicts — resolving them' : 're-verifying on the new base',
       });
-      await this.#finishRebase(requestId, session, worktree.path, conflicted, branch);
+      await this.#finishRebase(requestId, session, worktree.path, conflicted, branch, params);
       session.base = { commit: fetched, branch };
       // Whatever was pinned was pinned against the old base; a stale pin here
       // could only ever fail its own parent check, but null says so plainly.
       session.landAttempt = null;
       this.#store.save(session);
-      return this.#captureAndTriage(requestId, session);
+      return this.#captureAndTriage(requestId, session, params);
     });
   }
 
@@ -760,6 +794,7 @@ export class BigService {
     clonePath: string,
     conflicted: boolean,
     baseBranch: string,
+    dial: Dial,
   ): Promise<void> {
     const result = await this.#turn(requestId, {
       prompt: composeRebasePrompt(conflicted, baseBranch),
@@ -767,6 +802,8 @@ export class BigService {
       phase: 'build',
       resume: session.buildSessionId,
       worktreeRoot: clonePath,
+      model: dial.model,
+      effort: dial.effort,
     });
     session.buildSessionId = result.sessionId;
     session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
@@ -937,7 +974,7 @@ export class BigService {
    * build's hunks, which would show a reviewer content nobody sorted and hide
    * content that was.
    */
-  async #captureAndTriage(requestId: number, session: BigSession): Promise<SessionView> {
+  async #captureAndTriage(requestId: number, session: BigSession, dial: Dial): Promise<SessionView> {
     const worktree = session.worktree;
     if (worktree === null || !worktree.ready) {
       throw new ProtocolError('bad_request', 'this big change has nothing built to capture');
@@ -972,7 +1009,7 @@ export class BigService {
       });
     }
     const unshownIds = new Set(parsed.hunks.filter((hunk) => !rendered.shownIds.has(hunk.id)).map((hunk) => hunk.id));
-    const raw = await this.#triageBlocks(requestId, session, parsed, rendered);
+    const raw = await this.#triageBlocks(requestId, session, parsed, rendered, dial);
     const armed = gateArmed(session.difficulty);
     const sorted = carryForward(previous, normalizeBlocks(raw, parsed, unshownIds, armed));
     const blocks = withTrivialAck(sorted, parsed.hunks.length, armed);
@@ -986,6 +1023,7 @@ export class BigService {
     session: BigSession,
     parsed: ParsedDiff,
     rendered: RenderedTriage,
+    dial: Dial,
   ): Promise<RawBlock[]> {
     const worktree = session.worktree;
     let reason: string;
@@ -1002,6 +1040,8 @@ export class BigService {
         phase: 'triage',
         resume: null,
         schema: TRIAGE_SCHEMA,
+        model: dial.model,
+        effort: dial.effort,
       });
       const blocks = parseTriageOutput(result.structured);
       if (blocks !== null) return blocks;
@@ -1043,17 +1083,7 @@ export class BigService {
   }
 
   /** One agent turn, streamed into the panel and reduced to its result. */
-  async #turn(
-    requestId: number,
-    spec: {
-      prompt: string;
-      cwd: string;
-      phase: Phase;
-      resume: string | null;
-      schema?: Record<string, unknown>;
-      worktreeRoot?: string;
-    },
-  ): Promise<TurnResult> {
+  async #turn(requestId: number, spec: TurnSpec): Promise<TurnResult> {
     const abort = this.#abortFor(requestId);
     const options = this.#buildOptions(requestId, spec, abort);
     let sessionId = spec.resume ?? '';
@@ -1098,11 +1128,7 @@ export class BigService {
     return run.abort;
   }
 
-  #buildOptions(
-    requestId: number,
-    spec: { cwd: string; phase: Phase; resume: string | null; schema?: Record<string, unknown>; worktreeRoot?: string },
-    abort: AbortController,
-  ): Options {
+  #buildOptions(requestId: number, spec: TurnSpec, abort: AbortController): Options {
     const build = spec.phase === 'build';
     const realWorktree = buildWriteBoundary(build, spec.worktreeRoot);
     return {
@@ -1133,7 +1159,7 @@ export class BigService {
           }),
       ...(spec.schema === undefined ? {} : { outputFormat: { type: 'json_schema', schema: spec.schema } }),
       ...(spec.resume === null ? {} : { resume: spec.resume }),
-      ...(this.#model === undefined ? {} : { model: this.#model }),
+      ...dialOptions(spec),
     };
   }
 

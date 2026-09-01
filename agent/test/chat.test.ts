@@ -255,6 +255,20 @@ describe('ChatService.send', () => {
     assert.equal(h.store.get(ROOT).current, picked);
   });
 
+  it('threads the requested model and effort into SDK options', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath);
+    await h.service.send(1, { root: ROOT, prompt: 'hi', context: [], model: 'claude-opus-5', effort: 'high' });
+    assert.equal(h.calls[0]?.options?.model, 'claude-opus-5');
+    assert.equal(h.calls[0]?.options?.effort, 'high');
+  });
+
+  it('omits model and effort from SDK options when neither was requested', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath);
+    await h.service.send(1, { root: ROOT, prompt: 'hi', context: [] });
+    assert.equal(h.calls[0]?.options?.model, undefined);
+    assert.equal(h.calls[0]?.options?.effort, undefined);
+  });
+
   it('reports a failed run instead of returning an empty reply', async () => {
     const h = harness([frames.init(), frames.failure(['upstream exploded'])], storePath);
     await assert.rejects(

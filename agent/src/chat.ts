@@ -12,6 +12,7 @@ import {
   type ContextBlock,
   type ProjectInstructions,
 } from './context.js';
+import { dialOptions, type Dial } from './dial.js';
 import { subscriptionEnv, type Env } from './env.js';
 import { ProtocolError } from './protocol.js';
 import { SessionStore } from './sessions.js';
@@ -48,7 +49,7 @@ export interface SdkBindings {
 
 export type EmitEvent = (event: string, params: Record<string, unknown>) => void;
 
-export interface SendParams {
+export interface SendParams extends Dial {
   root: string;
   prompt: string;
   context: ContextBlock[];
@@ -78,7 +79,6 @@ export interface ChatServiceOptions {
   claudePath: string;
   env: Env;
   emit: EmitEvent;
-  model?: string | undefined;
 }
 
 export class ChatService {
@@ -87,7 +87,6 @@ export class ChatService {
   readonly #claudePath: string;
   readonly #env: Env;
   readonly #emit: EmitEvent;
-  readonly #model: string | undefined;
   /** Request id -> abort handle, and project root -> request id, for cancel and busy checks. */
   readonly #running = new Map<number, AbortController>();
   readonly #runningByRoot = new Map<string, number>();
@@ -99,7 +98,6 @@ export class ChatService {
     this.#claudePath = options.claudePath;
     this.#env = subscriptionEnv(options.env);
     this.#emit = options.emit;
-    this.#model = options.model;
   }
 
   /** null until a turn has actually proved (or disproved) the local login. */
@@ -175,7 +173,7 @@ export class ChatService {
     resume: string | undefined,
     abort: AbortController,
   ): Promise<ChatDone> {
-    const options = this.#buildOptions(params.root, resume, abort);
+    const options = this.#buildOptions(params, resume, abort);
     const prompt = composePrompt(params.prompt, params.context, params.root, params.projectInstructions ?? null);
     let sessionId = resume ?? '';
 
@@ -231,9 +229,9 @@ export class ChatService {
     throw new ProtocolError('agent_error', 'the agent stream ended without a result');
   }
 
-  #buildOptions(root: string, resume: string | undefined, abort: AbortController): Options {
+  #buildOptions(params: SendParams, resume: string | undefined, abort: AbortController): Options {
     return {
-      cwd: root,
+      cwd: params.root,
       // A copy per run: the SDK mutates the env object it is handed.
       env: { ...this.#env },
       pathToClaudeCodeExecutable: this.#claudePath,
@@ -252,7 +250,7 @@ export class ChatService {
       // which repo text must never reach.
       settingSources: [],
       ...(resume === undefined ? {} : { resume }),
-      ...(this.#model === undefined ? {} : { model: this.#model }),
+      ...dialOptions(params),
     };
   }
 
