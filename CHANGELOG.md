@@ -39,11 +39,14 @@
   chat — it offers the alternatives and the panel renders them numbered, inline
   in the conversation. `1`-`9` answers, a multiple-choice question toggles and
   sends on `<CR>`, `o` (or just typing) answers in your own words, and typing
-  the number works too. Your pick reads back into the transcript as
-  `→ 2: Environment variable`, so the history still reads as dialogue. The keys
-  are buffer-local to the panel and released the moment the question is
-  answered. Intake carries the block in its structured output; chat's model opts
-  in with a fenced `nvime-options` block the panel never shows.
+  the number works too — but only while the cursor sits on the block's own
+  rows, so a digit anywhere else in the scrollback stays the ordinary vim count
+  it always is; `]o` jumps to the pending choice from wherever you are. Your
+  pick reads back into the transcript as `→ 2: Environment variable`, so the
+  history still reads as dialogue. The keys are buffer-local to the panel and
+  released the moment the question is answered. Intake carries the block in
+  its structured output; chat's model opts in with a fenced `nvime-options`
+  block the panel never shows.
 - **One text colour system, and no lines through anything.** The conversation
   surface used to let vim's own markdown syntax paint under nvime's highlights:
   `~~struck~~` came out with a literal rule through it, `---` drew a separator

@@ -182,6 +182,7 @@ function M.open()
       { mode = 'n', lhs = '<C-n>', fn = M.new_session, desc = 'nvime: start a new conversation', where = 'both' },
       { mode = 'n', lhs = '<C-r>', fn = M.pick_session, desc = 'nvime: pick a session', where = 'both' },
       { mode = 'n', lhs = '<C-c>', fn = M.cancel, desc = 'nvime: stop the running turn', where = 'both' },
+      { mode = 'n', lhs = ']o', fn = M.jump_to_offer, desc = 'nvime: jump to the pending choice', where = 'both' },
     },
   })
   if not existed then
@@ -283,6 +284,16 @@ function M.offer(raw)
     live:focus()
   end)
   state.offer = { block = block, handle = handle }
+end
+
+--- `]o`: jumps to the pending choice from anywhere in the panel — the one way
+--- back to it when the cursor is not already on the block (a reader scrolled
+--- away, or a digit that would reach it fell through as a motion instead).
+function M.jump_to_offer()
+  local offer = state.offer
+  if offer == nil or not offer.handle.jump() then
+    vim.notify('nvime: no pending choice', vim.log.levels.INFO)
+  end
 end
 
 --- Sends the visual selection with its file and line range attached.

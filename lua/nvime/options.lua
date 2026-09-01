@@ -13,6 +13,11 @@ local icons = require('nvime.icons')
 
 local M = {}
 
+--- Anchors a block's top row against edits elsewhere in the scrollback (a
+--- stream's tail line clearing above it, say), the same way `apply.lua`
+--- anchors the saved cursor and topline across a live-applied hunk.
+local NS = vim.api.nvim_create_namespace('nvime.options')
+
 --- Past this a list stops being something you can read at a glance. A block
 --- offering more is refused outright rather than trimmed: the prose question it
 --- came with is shown in full either way, and a silently shortened list would
@@ -85,6 +90,9 @@ function M.hint(block)
   if block.multi then
     parts[#parts + 1] = '<CR> sends'
   end
+  -- Honest about the one thing that is easy to miss: these keys answer only
+  -- from the block's own rows, and ]o is how a scrolled-away reader gets back.
+  parts[#parts + 1] = ']o returns here'
   -- Always offered: a list of alternatives never stops the reader saying
   -- something the agent did not think of.
   parts[#parts + 1] = 'o for something else'
@@ -193,14 +201,30 @@ local function bind(handle, lhs, fn, desc)
   handle.bound[#handle.bound + 1] = lhs
 end
 
+--- The block's current top row, tracked through any scrollback edits above
+--- it since it was written — a plain integer would go stale the moment a
+--- stream elsewhere clears or commits a tail line and shifts every row below.
+--- @param handle table an attached handle whose block has been rendered
+--- @return integer 0-based row
+local function current_row(handle)
+  local pos = vim.api.nvim_buf_get_extmark_by_id(handle.buf, NS, handle.mark_id, {})
+  assert(#pos > 0, 'options: the block anchor was deleted from under a live handle')
+  return pos[1]
+end
+
 --- Whether the cursor sits somewhere inside the block's own rows. A digit
 --- means "pick" only there; everywhere else in the scrollback it is a plain
 --- count prefixing a motion, exactly as it is anywhere else in normal mode.
---- @param handle table an attached handle, with `row`/`height` already set
+--- @param handle table an attached handle
 --- @return boolean
 local function cursor_in_block(handle)
+  if handle.mark_id == nil then
+    -- Not written yet (a stream still owns the tail row): nothing to be on.
+    return false
+  end
   local row = vim.api.nvim_win_get_cursor(0)[1] - 1
-  return row >= handle.row and row < handle.row + handle.height
+  local top = current_row(handle)
+  return row >= top and row < top + handle.height
 end
 
 --- The picks currently toggled on, in the order the agent offered them.
@@ -215,10 +239,24 @@ local function picked(handle)
 end
 
 --- Redraws the list where it already sits, so a toggle does not append a
---- second copy of the block below the first.
+--- second copy of the block below the first. A toggle can only fire once the
+--- block is on screen, but a later turn may have opened a new stream by
+--- then — `rewrite` refuses to run while one is open, so this degrades to a
+--- no-op redraw (the toggle itself already recorded) rather than raising out
+--- of a keypress handler.
 local function redraw(handle)
+  if handle.spent or handle.surface:is_streaming() then
+    return
+  end
+  local row = current_row(handle)
   local lines, marks = M.lines(handle.block, handle.chosen)
-  handle.surface:rewrite(handle.row, lines, marks)
+  handle.surface:rewrite(row, lines, marks)
+  -- `rewrite` replaces the range in place, so the block's row does not
+  -- actually move — but a same-range `nvim_buf_set_lines` drags a right-
+  -- gravity mark to the END of the replacement, which is exactly what left
+  -- gravity would then get wrong for a later edit ABOVE the block. Pinning
+  -- the mark back to the row just written sidesteps relying on either.
+  vim.api.nvim_buf_set_extmark(handle.buf, NS, row, 0, { id = handle.mark_id, right_gravity = true })
 end
 
 local function toggle(handle, index)
@@ -228,6 +266,67 @@ local function toggle(handle, index)
     handle.chosen[index] = true
   end
   redraw(handle)
+end
+
+--- Feeds `lhs` back with `v:count` prepended, so a mapping that declines the
+--- key (cursor off the block) hands Vim back exactly what was typed — not
+--- just this key with any count already consumed by it dropped.
+--- @param lhs string
+local function fall_through(lhs)
+  local count = vim.v.count
+  -- 'n' skips this mapping so the fed key is not re-mapped into it; 'i'
+  -- queues ahead of the rest of e.g. `3j`, not after it.
+  vim.api.nvim_feedkeys((count > 0 and tostring(count) or '') .. lhs, 'ni', false)
+end
+
+--- Binds the digit/<CR>/o keys that answer `handle`'s block, once it is
+--- actually on screen — split out of `attach` because it is the one piece
+--- deferred behind a live stream.
+--- @param handle table the handle `attach` built, with `row`/`height` set
+--- @param block table the parsed block
+--- @param answer fun(indices: integer[])
+--- @param on_other fun()|nil
+local function bind_keys(handle, block, answer, on_other)
+  -- A digit picks only over the block's own rows; elsewhere it falls
+  -- through so Vim's own count-then-motion handling takes it from there.
+  for index = 1, math.min(#block.options, M.DIGIT_KEYS) do
+    local lhs = tostring(index)
+    bind(handle, lhs, function()
+      if handle.spent or not cursor_in_block(handle) then
+        fall_through(lhs)
+        return
+      end
+      if block.multi then
+        toggle(handle, index)
+      else
+        answer({ index })
+      end
+    end, 'nvime: choose option ' .. index)
+  end
+  if block.multi then
+    bind(handle, '<CR>', function()
+      if handle.spent or not cursor_in_block(handle) then
+        -- Off the block, <CR> is the ordinary next-line motion — it must
+        -- not go silently dead for the life of the offer.
+        fall_through('\r')
+        return
+      end
+      answer(picked(handle))
+    end, 'nvime: send the chosen options')
+  end
+  if on_other ~= nil then
+    bind(handle, 'o', function()
+      if handle.spent then
+        return
+      end
+      if not cursor_in_block(handle) then
+        fall_through('o')
+        return
+      end
+      handle.detach()
+      on_other()
+    end, 'nvime: answer in your own words instead')
+  end
 end
 
 --- Writes `block` into `surface` and binds the keys that answer it.
@@ -253,6 +352,9 @@ function M.attach(surface, block, on_answer, on_other)
     chosen = {},
     bound = {},
     spent = false,
+    row = nil,
+    mark_id = nil,
+    height = 0,
   }
 
   function handle.detach()
@@ -261,6 +363,26 @@ function M.attach(surface, block, on_answer, on_other)
     end
     handle.spent = true
     unbind(handle)
+    if handle.mark_id ~= nil then
+      pcall(vim.api.nvim_buf_del_extmark, handle.buf, NS, handle.mark_id)
+    end
+  end
+
+  --- Moves the cursor onto the block's own rows from wherever it is —
+  --- including the prompt buffer. The one way back to a block a reader
+  --- scrolled away from, or whose row a mapped digit cannot reach.
+  --- @return boolean whether a live block was actually there to jump to
+  function handle.jump()
+    if handle.spent or handle.mark_id == nil then
+      return false
+    end
+    local win = vim.fn.bufwinid(handle.buf)
+    if win == -1 then
+      return false
+    end
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { current_row(handle) + 1, 0 })
+    return true
   end
 
   local function answer(indices)
@@ -271,45 +393,28 @@ function M.attach(surface, block, on_answer, on_other)
     on_answer(M.reply(block, indices))
   end
 
-  local lines, marks = M.lines(block, handle.chosen)
-  handle.row = surface:append_marked(lines, marks)
-  -- +1: covers the blank spacer `blank()` writes below the block, where a
-  -- pinned scrollback's cursor lands the instant the block renders.
-  handle.height = #lines + 1
-  surface:blank()
+  -- Never write into the scrollback while a stream owns its tail row —
+  -- `append_marked` asserts this, same as `replace`/`rewrite` — so a caller
+  -- that offers again before the stream it is already showing has closed
+  -- waits for it, rather than racing the tail or raising out of a request
+  -- callback.
+  surface:after_stream(function()
+    if handle.spent then
+      return
+    end
+    local lines, marks = M.lines(block, handle.chosen)
+    handle.row = surface:append_marked(lines, marks)
+    -- Right gravity (the default): an edit landing exactly at the block's
+    -- row — a later stream's line arriving above it — must push the anchor
+    -- down with it, not leave it pointing at the new line instead.
+    handle.mark_id = vim.api.nvim_buf_set_extmark(handle.buf, NS, handle.row, 0, {})
+    -- +1: covers the blank spacer `blank()` writes below the block, where a
+    -- pinned scrollback's cursor lands the instant the block renders.
+    handle.height = #lines + 1
+    surface:blank()
+    bind_keys(handle, block, answer, on_other)
+  end)
 
-  -- A digit picks only over the block's own rows; elsewhere it is fed back
-  -- literally, so Vim's own count-then-motion handling takes it from there.
-  for index = 1, math.min(#block.options, M.DIGIT_KEYS) do
-    local lhs = tostring(index)
-    bind(handle, lhs, function()
-      if handle.spent or not cursor_in_block(handle) then
-        -- 'n' skips this mapping; 'i' queues ahead of the rest of e.g. `3j`,
-        -- not after it (feedkeys appends by default).
-        vim.api.nvim_feedkeys(lhs, 'ni', false)
-        return
-      end
-      if block.multi then
-        toggle(handle, index)
-      else
-        answer({ index })
-      end
-    end, 'nvime: choose option ' .. index)
-  end
-  if block.multi then
-    bind(handle, '<CR>', function()
-      answer(picked(handle))
-    end, 'nvime: send the chosen options')
-  end
-  if on_other ~= nil then
-    bind(handle, 'o', function()
-      if handle.spent then
-        return
-      end
-      handle.detach()
-      on_other()
-    end, 'nvime: answer in your own words instead')
-  end
   return handle
 end
 

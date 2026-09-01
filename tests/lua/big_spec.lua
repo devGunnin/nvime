@@ -681,6 +681,26 @@ describe('a build that outlives the editor', function()
     eq(nil, sent('big.cancel'), 'closing a window never stops a build')
     cleanup()
   end)
+
+  --- A second `select` while already attached used to re-render the panel —
+  --- including a re-offered choice — straight into the follow stream's own
+  --- tail row, which the panel's write primitives refuse to run inside.
+  it('refuses to pick or select another session while already attached to a running build', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.open'] = { result = { session = running_detached() } }
+    big.select('abc123')
+    ok(big.state().attach_id ~= nil, 'the follow stream is live')
+
+    fake.requests = {}
+    big.select('xyz789')
+    eq(nil, sent('big.open'), 'select must refuse while this panel already has a live stream')
+
+    fake.replies['big.list'] = { result = { sessions = {} } }
+    big.pick_session()
+    eq(nil, sent('big.list'), 'pick_session must refuse for the same reason')
+    cleanup()
+  end)
 end)
 
 describe('big change intake: a choice offered instead of a question', function()

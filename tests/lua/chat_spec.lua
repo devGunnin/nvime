@@ -425,6 +425,37 @@ describe('chat: a choice offered in the conversation', function()
     vim.fn.delete(dir, 'rf')
   end)
 
+  --- <CR> used to answer (or swallow) from anywhere in the scrollback for a
+  --- multi-select question; now it is scoped like the digits, and `]o` is the
+  --- reader's way back onto the block from wherever they scrolled to.
+  it('scopes <CR> to the block, and lets ]o jump onto it from anywhere', function()
+    local dir = sandbox()
+    open_on(dir)
+    fake.replies['chat.send'] = done_with_options({
+      prompt = 'which retries?',
+      multi = true,
+      options = { { label = 'fixed backoff' }, { label = 'exponential' } },
+    })
+    chat.send('how should retries work?')
+
+    local win = panel.get('chat').win
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+
+    vim.api.nvim_feedkeys('\r', 'x', false)
+    ok(chat.state().offer ~= nil, '<CR> far from the block must not have answered it')
+    eq(2, vim.api.nvim_win_get_cursor(win)[1], '<CR> must still move the cursor down a line')
+
+    chat.jump_to_offer()
+    vim.api.nvim_feedkeys('1', 'x', false)
+    fake.requests = {}
+    fake.replies['chat.send'] = done_with_options(nil)
+    vim.api.nvim_feedkeys('\r', 'x', false)
+    eq('1: fixed backoff', sent('chat.send').params.prompt, '<CR> answers once ]o put the cursor on the block')
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
   --- The block crosses a process boundary. An unusable one is not a choice —
   --- the prose question is already in the transcript and still gets answered.
   it('offers nothing when the sidecar sent no usable block', function()

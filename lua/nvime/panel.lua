@@ -357,6 +357,9 @@ function M.open(opts)
     spinner = nil,
     spinner_frame = 1,
     stream = nil,
+    --- Callbacks queued by `after_stream` while a stream is open; run once,
+    --- in order, the moment `finish_stream` closes it.
+    stream_waiters = nil,
     on_close = opts.on_close,
   }, Panel)
   if wants_prompt then
@@ -522,6 +525,7 @@ end
 --- @param marks table[] each { row = 1-based index into `lines`, col, end_col, hl }
 --- @return integer the 0-based scrollback row `lines[1]` landed on
 function Panel:append_marked(lines, marks)
+  assert(self.stream == nil, 'panel:append_marked cannot run while a stream is open')
   assert(#lines > 0, 'panel:append_marked needs at least one line')
   local first = self.written and line_count(self.buf) or 0
   for _, line in ipairs(lines) do
@@ -605,6 +609,25 @@ function Panel:begin_stream(speaker, line_hl)
   self.stream = { pending = '', ctx = new_ctx(line_hl), tail_row = nil, swallow_newline = false }
 end
 
+--- @return boolean whether a stream currently owns the tail row
+function Panel:is_streaming()
+  return self.stream ~= nil
+end
+
+--- Runs `fn` now if nothing is streaming, otherwise queues it to run once the
+--- open stream closes. Lets a caller that must write a whole block at once —
+--- `append_marked`/`rewrite` never run mid-stream — wait for the tail row
+--- rather than raising or corrupting it.
+--- @param fn fun()
+function Panel:after_stream(fn)
+  if self.stream == nil then
+    fn()
+    return
+  end
+  self.stream_waiters = self.stream_waiters or {}
+  self.stream_waiters[#self.stream_waiters + 1] = fn
+end
+
 --- Rewrites the volatile tail line; completed lines above it are never touched.
 --- The tail is classified by exactly the call that will classify it again when
 --- it commits, against a COPY of the fence state — so the groups a line is
@@ -675,6 +698,11 @@ function Panel:finish_stream()
   end
   self.stream = nil
   self:blank()
+  local waiters = self.stream_waiters
+  self.stream_waiters = nil
+  for _, fn in ipairs(waiters or {}) do
+    fn()
+  end
 end
 
 --- Inserts a line into a message that is still streaming (a tool one-liner).

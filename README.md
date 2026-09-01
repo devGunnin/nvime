@@ -82,14 +82,19 @@ panel renders them numbered, inline in the conversation:
      Read GREET_MESSAGE via os.environ with a default; no argument parsing.
   3  Config file
      Most flexible, but adds I/O, a file format and error handling.
-  1-3 picks · o for something else
+  1-3 picks · ]o returns here · o for something else
 ```
 
 Press the digit and it answers, echoing your pick into the transcript as
-`→ 2: Environment variable`. Some questions take several answers at once; those
-toggle, and `<CR>` sends them. `o` — or just typing in the prompt — answers in
-your own words instead, and typing the number works too. The keys are
-buffer-local to the panel and released the moment you answer.
+`→ 2: Environment variable` — but only while your cursor sits on the block's
+own rows; anywhere else in the scrollback a digit is the ordinary vim count it
+always is, so a count like `12G` still lands on line 12 rather than being
+swallowed as a pick. `]o` jumps the cursor onto the pending choice from
+wherever you are, prompt included. Some questions take several answers at
+once; those toggle, and `<CR>` sends them, scoped the same way. `o` — or just
+typing in the prompt — answers in your own words instead, and typing the
+number works too. The digit, `<CR>` and `o` keys are buffer-local to the panel
+and released the moment you answer.
 
 **Context is deliberate.** Write `@path/to/file` or `@path/to/dir` in a prompt
 and nvime attaches it — a file as its contents, a directory as a bounded
@@ -457,6 +462,7 @@ Off until `keymaps.enabled = true`.
 | `<C-s>` | prompt, insert | send (so `<CR>` still inserts a newline) |
 | `<C-n>` / `<C-r>` | chat panel | new conversation · resume one |
 | `<C-c>` | panel | stop the running turn |
+| `]o` | chat/big panel | jump to the pending choice |
 | `q` | scrollback | close |
 | `y` / `n` / `<Esc>` | approval float | allow once / deny / deny |
 | `<CR>` / `r` / `d` | changeset | open the file · revert the hunk · unified diff |

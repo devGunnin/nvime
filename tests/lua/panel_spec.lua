@@ -564,6 +564,46 @@ describe('panel — the calm surface', function()
     end, 'past the end')
     panel.close(NAME)
   end)
+
+  --- `append_marked` writes several rows at once, like `replace`/`rewrite` —
+  --- mid-stream it would land in the middle of the volatile tail row those
+  --- two already refuse to touch.
+  it('refuses to append a marked block while a stream is open, like replace and rewrite do', function()
+    local self = open()
+    self:begin_stream(nil)
+    t.throws(function()
+      self:append_marked({ 'only' }, {})
+    end, 'stream is open')
+    self:finish_stream()
+    panel.close(NAME)
+  end)
+
+  it('runs an after_stream callback right away when nothing is streaming', function()
+    local self = open()
+    local ran = false
+    self:after_stream(function()
+      ran = true
+    end)
+    eq(true, ran)
+    panel.close(NAME)
+  end)
+
+  it('queues an after_stream callback until the open stream closes', function()
+    local self = open()
+    self:begin_stream(nil)
+    eq(true, self:is_streaming())
+    local ran = false
+    self:after_stream(function()
+      ran = true
+    end)
+    eq(false, ran, 'must not run while the stream is still open')
+    self:push_delta('mid-stream text')
+    eq(false, ran, 'a delta alone must not release it')
+    self:finish_stream()
+    eq(false, self:is_streaming())
+    eq(true, ran, 'released the moment the stream closes')
+    panel.close(NAME)
+  end)
 end)
 
 --- A `line_hl_group` sits OVER an extmark's foreground, so pinning the body

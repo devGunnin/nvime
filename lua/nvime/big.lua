@@ -421,6 +421,16 @@ function M.offer(raw)
   state.offer = { block = block, handle = handle }
 end
 
+--- `]o`: jumps to the pending choice from anywhere in the panel — the one way
+--- back to it when the cursor is not already on the block (a reader scrolled
+--- away, or a digit that would reach it fell through as a motion instead).
+function M.jump_to_offer()
+  local offer = state.offer
+  if offer == nil or not offer.handle.jump() then
+    vim.notify('nvime: no pending choice', vim.log.levels.INFO)
+  end
+end
+
 --- Freezes the spec and records the base commit; `M.build` makes the clone.
 function M.approve()
   assert(state.session ~= nil, 'big.approve needs a selected session')
@@ -713,9 +723,24 @@ function M.open_threads()
   threads.open(state.root, state.session, adopt)
 end
 
+--- Whether re-rendering the panel right now would race the stream an active
+--- attach already owns. `M.select` writes the whole transcript, including a
+--- possible re-offer, and the panel's write primitives refuse to run while
+--- that stream is open — so this is checked before starting either.
+local function attach_busy()
+  if state.attach_id ~= nil then
+    vim.notify('nvime: already attached to a running build (<C-c> to stop following it)', vim.log.levels.WARN)
+    return true
+  end
+  return false
+end
+
 --- `<C-r>`: pick one of this project's big changes and load it into the panel.
 function M.pick_session()
   assert(type(state.root) == 'string', 'big.pick_session needs an open panel')
+  if attach_busy() then
+    return
+  end
   agent.request('big.list', { root = state.root }, function(err, result)
     if err ~= nil then
       show_error(err)
@@ -745,6 +770,9 @@ end
 --- Loads one session into the panel and replays its conversation.
 --- @param id string
 function M.select(id)
+  if attach_busy() then
+    return
+  end
   agent.request('big.open', { root = state.root, sessionId = id }, function(err, result)
     if err ~= nil then
       show_error(err)
@@ -821,6 +849,7 @@ function M.open()
       { mode = 'n', lhs = '<C-r>', fn = M.pick_session, desc = 'nvime: pick a big change', where = 'both' },
       { mode = 'n', lhs = '<C-t>', fn = M.open_threads, desc = 'nvime: open the review threads', where = 'both' },
       { mode = 'n', lhs = '<C-c>', fn = M.cancel, desc = 'nvime: stop the big change', where = 'both' },
+      { mode = 'n', lhs = ']o', fn = M.jump_to_offer, desc = 'nvime: jump to the pending choice', where = 'both' },
       -- Scrollback only: `s` is `substitute` in the prompt buffer, which the
       -- user is typing in.
       { mode = 'n', lhs = 's', fn = M.open_steer, desc = 'nvime: steer the running build' },

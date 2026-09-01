@@ -78,7 +78,7 @@ describe('options.lines', function()
       '  1  choice 1',
       '  2  choice 2',
       '  3  choice 3',
-      '  1-3 picks · o for something else',
+      '  1-3 picks · ]o returns here · o for something else',
     }, rendered)
   end)
 
@@ -304,6 +304,134 @@ describe('options.attach', function()
 
     vim.api.nvim_feedkeys('2', 'x', false)
     eq('2: choice 2', answered)
+    panel.close(NAME)
+  end)
+
+  --- The fallthrough used to feed back only the one digit that declined the
+  --- key, dropping any count a still-mapped earlier digit had already
+  --- consumed — `12G` silently landed on line 2. Reproduces the reviewer's
+  --- three two-digit probes against a real keystream.
+  it('preserves a two-digit count across the fallthrough, not just its last digit', function()
+    local self = open()
+    for index = 1, 40 do
+      self:append('scrollback line ' .. index, nil)
+    end
+    options.attach(self, options.parse(raw(3)), function() end, function() end)
+    vim.api.nvim_set_current_win(self.win)
+
+    vim.api.nvim_win_set_cursor(self.win, { 1, 0 })
+    vim.api.nvim_feedkeys('12G', 'x', false)
+    eq(12, vim.api.nvim_win_get_cursor(self.win)[1], '12G must reach line 12, not line 2')
+
+    vim.api.nvim_win_set_cursor(self.win, { 1, 0 })
+    vim.api.nvim_feedkeys('21j', 'x', false)
+    eq(22, vim.api.nvim_win_get_cursor(self.win)[1], '21j must move down 21 lines from line 1')
+
+    vim.api.nvim_win_set_cursor(self.win, { 1, 0 })
+    vim.api.nvim_feedkeys('31G', 'x', false)
+    eq(31, vim.api.nvim_win_get_cursor(self.win)[1], '31G must reach line 31, not line 1')
+    panel.close(NAME)
+  end)
+
+  --- <CR> and o used to answer (or hand over) from anywhere in the
+  --- scrollback; they are now scoped like the digits, so a plain <CR> far
+  --- from the block stays the ordinary next-line motion.
+  it('scopes <CR> and o to the block, exactly like the digits', function()
+    local self = open()
+    for index = 1, 30 do
+      self:append('scrollback line ' .. index, nil)
+    end
+    local answered, other = nil, false
+    options.attach(self, options.parse(raw(2, { multi = true })), function(reply)
+      answered = reply
+    end, function()
+      other = true
+    end)
+    vim.api.nvim_set_current_win(self.win)
+    vim.api.nvim_win_set_cursor(self.win, { 1, 0 })
+
+    vim.api.nvim_feedkeys('\r', 'x', false)
+    eq(nil, answered, '<CR> far from the block must not answer')
+    eq(2, vim.api.nvim_win_get_cursor(self.win)[1], '<CR> must still move the cursor down a line')
+
+    vim.api.nvim_win_set_cursor(self.win, { 1, 0 })
+    vim.api.nvim_feedkeys('o', 'x', false)
+    eq(false, other, 'o far from the block must not hand over to the prompt')
+    panel.close(NAME)
+  end)
+
+  --- `]o` is the one way back onto a block a reader scrolled away from — the
+  --- multi-choice's own <CR> then answers exactly as it does from the block.
+  it('jumps onto the block with ]o, from where <CR> then answers it', function()
+    local self = open()
+    for index = 1, 30 do
+      self:append('scrollback line ' .. index, nil)
+    end
+    local answered = nil
+    local handle = options.attach(self, options.parse(raw(2, { multi = true })), function(reply)
+      answered = reply
+    end, function() end)
+    vim.api.nvim_set_current_win(self.win)
+    vim.api.nvim_win_set_cursor(self.win, { 1, 0 })
+
+    ok(handle.jump(), 'a live block is there to jump to')
+    vim.api.nvim_feedkeys('1', 'x', false)
+    vim.api.nvim_feedkeys('\r', 'x', false)
+    eq('1: choice 1', answered)
+    panel.close(NAME)
+  end)
+
+  --- `append_marked` refuses to run while a stream owns the tail row, so
+  --- `attach` must not write the block until the stream closes — reproduces
+  --- the reviewer's delta-after-attach probe.
+  it('defers the block render until a live stream closes, instead of writing into it', function()
+    local self = open()
+    vim.api.nvim_set_current_win(self.win)
+    self:begin_stream(nil)
+    self:push_delta('partial tail')
+    local block = options.parse(raw(2))
+    local handle = options.attach(self, block, function() end, function() end)
+    eq(nil, handle.row, 'must not have written into the buffer while the stream is open')
+    eq('', vim.fn.maparg('1', 'n'), 'the digit keys must not bind before the block is on screen')
+
+    -- One more delta arrives — the reviewer's repro for the shape of the bug:
+    -- a committed line clears the volatile tail and shifts rows around it.
+    self:push_delta('\nmore text after a newline')
+    eq(nil, handle.row, 'still deferred mid-stream')
+
+    self:finish_stream()
+    ok(handle.row ~= nil, 'the block renders once the stream closes')
+    ok(vim.tbl_contains(lines(self), '  1  choice 1'), vim.inspect(lines(self)))
+    ok(vim.fn.maparg('1', 'n') ~= '', 'the digit keys bind once the block is on screen')
+    panel.close(NAME)
+  end)
+
+  --- `handle.row` is captured once, at write time; a scrollback edit above
+  --- the block (the shape of a later stream's tail line landing there) must
+  --- not stale it — the anchor, not that stored integer, is what answers.
+  it('tracks the block through a scrollback edit above it instead of going stale', function()
+    local self = open()
+    local block = options.parse(raw(2))
+    local answered = nil
+    local handle = options.attach(self, block, function(reply)
+      answered = reply
+    end, function() end)
+    local original_row = handle.row
+
+    vim.bo[self.buf].modifiable = true
+    vim.api.nvim_buf_set_lines(self.buf, 0, 0, false, { 'inserted above the block' })
+    vim.bo[self.buf].modifiable = false
+
+    vim.api.nvim_set_current_win(self.win)
+    -- The stored `handle.row` is now stale; pressing 2 there must not answer.
+    vim.api.nvim_win_set_cursor(self.win, { original_row + 1, 0 })
+    vim.api.nvim_feedkeys('2', 'x', false)
+    eq(nil, answered, 'the stale row must not still be treated as the block')
+
+    -- The block actually shifted down by the one inserted line.
+    vim.api.nvim_win_set_cursor(self.win, { original_row + 2, 0 })
+    vim.api.nvim_feedkeys('2', 'x', false)
+    eq('2: choice 2', answered, 'the anchor tracks the real, shifted row')
     panel.close(NAME)
   end)
 end)
