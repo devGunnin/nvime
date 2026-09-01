@@ -6,6 +6,7 @@
 --- Panels are instances keyed by name (`chat`, `edit`, `changeset`), so more
 --- than one surface can be open at a time. `M.open` reuses the live panel of
 --- that name rather than stacking splits.
+local completion = require('nvime.completion')
 local markdown = require('nvime.markdown')
 
 local M = {}
@@ -244,6 +245,14 @@ function M.open(opts)
   }, Panel)
   if wants_prompt then
     self.prompt_buf = make_buffer('nvime://' .. opts.name .. '-prompt', 'markdown')
+    -- `@file`/`@dir` completion, scoped to the root THIS panel captured — never
+    -- re-derived from the prompt buffer's own (fake) path.
+    if type(opts.root) == 'string' then
+      vim.b[self.prompt_buf].nvime_root = opts.root
+      vim.bo[self.prompt_buf].completefunc = "v:lua.require('nvime.completion').completefunc"
+      vim.bo[self.prompt_buf].omnifunc = "v:lua.require('nvime.completion').completefunc"
+      completion.refresh(opts.root)
+    end
   end
   vim.bo[self.buf].modifiable = false
   open_windows(self)

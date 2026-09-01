@@ -214,6 +214,7 @@ function M.open()
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
     prompt_hint = 'instruct · <CR> send (i_<C-s>) · <C-c> stop · <leader>nd changes',
+    root = state.root,
     on_submit = M.send,
     on_close = on_panel_close,
     keys = {
