@@ -198,13 +198,30 @@ Open the session again — the same Neovim, a new one, two at once — and the p
 **attaches**: it replays the log from where it left off, then follows the runner
 live over a unix socket in `$XDG_RUNTIME_DIR/nvime`. Several viewers are fine.
 `<C-c>` stops the build through that socket (the runner writes its terminal
-event and releases its claim); the recorded pid is signalled only if the socket
-will not answer.
+event and releases its claim). Only if the socket will not answer is the
+recorded pid signalled, and only once the session's claim has proved that pid is
+still this build's runner — a killed runner leaves its pid on the record on
+purpose, and pids get reused. Where that proof fails, nvime says the build had
+already died rather than signalling something else.
+
+A runner claims the session **before** it opens the log or binds the socket, so
+one session's `events.ndjson` has exactly one writer: a second runner exits
+without recording a byte. The log is replayed from its tail rather than in
+full, and an attach that starts after older events says how many it skipped.
 
 If the runner cannot be started at all, the build falls back into the sidecar
 **with a notice saying so** — never silently, because then it really would stop
 with your editor. `NVIME_DETACHED=0` forces that older behaviour. Windows is a
 documented non-goal: the control channel is a unix domain socket.
+
+**Who can reach a running build.** The socket's directory is `0700` and the
+socket itself `0600`, so the channel is reachable by processes running as you
+and nobody else — and *anything* running as you includes the build agent's own
+Bash. Every control frame must therefore also carry a per-run token that lives
+only in the session record (also `0600`). That raises the bar from "any process
+you run" to "any process that can read your nvime store"; it is not a boundary
+against yourself. A steer is recorded with the editor that sent it, and a
+viewer renders someone else's as `another editor → build`, never as your own.
 
 ### Steering
 

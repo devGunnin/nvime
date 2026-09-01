@@ -126,6 +126,12 @@ export interface BigRunner {
   /** `build`, `revise`, or `rebase`. */
   what: string;
   startedAt: number;
+  /**
+   * The secret every control frame must carry. Lives here and nowhere else —
+   * the record is 0600, so reaching the socket takes more than running as this
+   * user. Absent on a record an older sidecar wrote; then nothing can dial.
+   */
+  token: string;
 }
 
 export interface BigSession {
@@ -405,6 +411,25 @@ export class BigStore {
   /** Whoever last claimed this session, live or not, or null when nobody has. */
   readLock(session: BigSession): BigLock | null {
     return readLockAt(this.lockPathFor(session.repoRoot, session.id));
+  }
+
+  /**
+   * The runner the record names, but ONLY when it is provably the one behind
+   * the live claim. Both halves are needed: a recorded runner alone proves
+   * nothing — it is deliberately left behind when one is killed, which is what
+   * makes "build died" readable — and a live claim alone could be a second
+   * Neovim. The pid is what ties the claim to the process the record names.
+   *
+   * Everything that signals a pid, or calls a build attachable, goes through
+   * here. A recycled pid cannot pass: the claim's heartbeat is checked first,
+   * and only the runner refreshes it.
+   */
+  liveRunner(session: BigSession): BigRunner | null {
+    const runner = session.runner;
+    if (runner === null) return null;
+    const lock = this.readLock(session);
+    if (lock === null || lock.pid !== runner.pid || !isLockLive(lock)) return null;
+    return runner;
   }
 
   /**

@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import type { Options, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { BigService, type SessionView } from '../src/big.js';
-import { BigStore } from '../src/bigstore.js';
+import { BigStore, type BigRunner } from '../src/bigstore.js';
 import { DetachedService } from '../src/detached.js';
-import { readEventsAfter, type RunEvent } from '../src/runlog.js';
-import { socketPathFor } from '../src/runsock.js';
+import { readLogAfter, type RunEvent } from '../src/runlog.js';
+import { newControlToken, socketPathFor } from '../src/runsock.js';
 import type { FakeScript } from './fixtures/fake-runner.js';
 import { configureGitIdentity } from './fixtures/git-identity.js';
 
@@ -111,6 +112,51 @@ function makeDetached(overrides: Record<string, string> = {}): DetachedService {
   });
 }
 
+function socketOf(id: string): string {
+  return socketPathFor(detachedEnv(), repo, id);
+}
+
+/** A runner record shaped exactly as a real one, for a process of our choosing. */
+function runnerRecord(id: string, pid: number, token = newControlToken()): BigRunner {
+  return {
+    pid,
+    socket: socketOf(id),
+    log: store.logPathFor(repo, id),
+    what: 'build',
+    startedAt: Date.now(),
+    token,
+  };
+}
+
+function killIfAlive(pid: number | undefined): void {
+  if (pid === undefined || !alive(pid)) return;
+  process.kill(pid, 'SIGKILL');
+}
+
+/** What an earlier run of this session left in the shared stderr file. */
+function seedRunnerStderr(id: string, text: string): void {
+  const dir = store.dirFor(repo, id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'runner.err'), text);
+}
+
+/** One runner, run to its exit in the foreground, with its stderr collected. */
+function runFakeRunner(jobPath: string): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--import', TSX, FAKE_RUNNER, jobPath], {
+      cwd: root,
+      env: detachedEnv() as NodeJS.ProcessEnv,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once('exit', (code) => resolve({ code: code ?? -1, stderr }));
+  });
+}
+
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'nvime-det-'));
   repo = join(root, 'repo');
@@ -145,7 +191,7 @@ async function approved(): Promise<SessionView> {
 }
 
 function logOf(id: string): RunEvent[] {
-  return readEventsAfter(store.logPathFor(repo, id), 0);
+  return readLogAfter(store.logPathFor(repo, id), 0).events;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -277,6 +323,35 @@ describe('steering a running build', () => {
     ]);
   });
 
+  it('labels each steer with who sent it, so another editor’s is not shown as yours', async () => {
+    const session = await approved();
+    writeScript({
+      write: { path: 'tool.py', content: 'def main():\n    print("v1")\n' },
+      holdMs: 2000,
+      readyOut: join(root, 'ready'),
+      steersOut: join(root, 'steers'),
+    });
+
+    const running = detached.start(1, 'build', { root: repo, id: session.id });
+    await until('the build to start', () => existsSync(join(root, 'ready')));
+    // A second editor — its own sidecar, so its own origin.
+    const other = new DetachedService({
+      big,
+      store: new BigStore(join(root, 'store')),
+      env: detachedEnv(),
+      emit: () => undefined,
+    });
+    await detached.steer({ root: repo, id: session.id, text: 'mine' });
+    await other.steer({ root: repo, id: session.id, text: 'theirs' });
+    await running;
+
+    const seen = events.filter((entry) => entry.event === 'big.steer' && entry.params.state === 'queued');
+    const mine = seen.find((entry) => entry.params.text === 'mine');
+    const theirs = seen.find((entry) => entry.params.text === 'theirs');
+    assert.equal(mine?.params.mine, true, 'the editor that sent it sees its own');
+    assert.equal(theirs?.params.mine, false, 'and never renders a second editor’s steer as its own');
+  });
+
   it('refuses a steer when no build is running rather than pretending it landed', async () => {
     const session = await approved();
     writeScript({ write: { path: 'tool.py', content: 'x = 1\n' } });
@@ -307,6 +382,45 @@ describe('stopping a detached build', () => {
     assert.equal(terminal?.params.code, 'cancelled');
     assert.equal(existsSync(store.lockPathFor(repo, session.id)), false, 'the claim is released');
     assert.equal(big.open(repo, session.id).runner, null, 'and the runner is off the record');
+  });
+
+  it('never signals a pid the session claim has not proved is its runner', async () => {
+    const session = await approved();
+    // A SIGKILLed runner leaves its pid on the record on purpose — that is what
+    // makes "died — resumable" readable — and pids get reused within hours.
+    const innocent = spawn(process.execPath, ['-e', 'setTimeout(() => undefined, 60000)'], { stdio: 'ignore' });
+    try {
+      await until('the unrelated process to be running', () => innocent.pid !== undefined && alive(innocent.pid));
+      const record = store.require(repo, session.id);
+      record.runner = runnerRecord(session.id, innocent.pid as number);
+      store.save(record);
+
+      assert.deepEqual(await detached.stop({ root: repo, id: session.id }), { stopped: false });
+      assert.equal(alive(innocent.pid as number), true, 'an unrelated process must survive a stop');
+      assert.ok(
+        events.some((entry) => entry.event === 'big.notice' && /already died/.test(String(entry.params.text))),
+        'and the reader is told the build was already gone',
+      );
+    } finally {
+      killIfAlive(innocent.pid);
+    }
+  });
+
+  it('still stops the runner it can prove is live when the socket has gone', async () => {
+    const session = await approved();
+    writeScript({ holdMs: 60_000, readyOut: join(root, 'ready') });
+
+    const running = detached.start(1, 'build', { root: repo, id: session.id });
+    await until('the build to start', () => existsSync(join(root, 'ready')));
+    const pid = store.require(repo, session.id).runner?.pid;
+    assert.ok(pid !== undefined);
+    // The runner is live and holds the claim; only its socket is unreachable.
+    rmSync(socketOf(session.id), { force: true });
+
+    const settled = assert.rejects(running);
+    assert.deepEqual(await detached.stop({ root: repo, id: session.id }), { stopped: true });
+    await settled;
+    await until('the runner to exit', () => !alive(pid));
   });
 
   it('reports a killed runner as a build that died, still resumable, never as building', async () => {
@@ -346,6 +460,40 @@ describe('when the runner cannot start', () => {
     assert.match(String(notice?.params.text), /close Neovim/);
   });
 
+  it('quotes this run’s reason, never the previous run’s and never a bare frame', async () => {
+    const session = await approved();
+    seedRunnerStderr(session.id, 'Error: a failure from the run before this one\n    at older ()\n');
+    const noisy = makeDetached({
+      NVIME_RUNNER_ARGV: JSON.stringify([
+        process.execPath,
+        '-e',
+        'process.stderr.write("Error: this run could not open its store\\n    at main (/x.js:1:1)\\n");process.exit(3);',
+      ]),
+    });
+    inlineTurns.push([init(), result('built it')]);
+    inlineTurns.push([init(), result('triaged', { blocks: [] })]);
+
+    await noisy.start(1, 'build', { root: repo, id: session.id });
+
+    const notice = String(events.find((entry) => entry.event === 'big.notice')?.params.text);
+    assert.match(notice, /this run could not open its store/);
+    assert.doesNotMatch(notice, /the run before this one/, 'runner.err is shared with every earlier run');
+    assert.doesNotMatch(notice, /at main/, 'the message is the first line; a stack frame explains nothing');
+  });
+
+  it('says the runner wrote nothing rather than quoting an older run', async () => {
+    const session = await approved();
+    seedRunnerStderr(session.id, 'Error: a failure from the run before this one\n');
+    const silent = makeDetached({ NVIME_RUNNER_ARGV: JSON.stringify([process.execPath, '-e', 'process.exit(4);']) });
+    inlineTurns.push([init(), result('built it')]);
+    inlineTurns.push([init(), result('triaged', { blocks: [] })]);
+
+    await silent.start(1, 'build', { root: repo, id: session.id });
+
+    const notice = String(events.find((entry) => entry.event === 'big.notice')?.params.text);
+    assert.match(notice, /the runner wrote nothing/);
+  });
+
   it('runs in the sidecar with no notice at all when detached builds are switched off', async () => {
     const session = await approved();
     const inline = makeDetached({ NVIME_DETACHED: '0' });
@@ -369,6 +517,87 @@ describe('when the runner cannot start', () => {
     );
     await detached.stop({ root: repo, id: session.id });
     await assert.rejects(running);
+  });
+});
+
+describe('two runners over one session', () => {
+  it('lets only one write the log, and refuses the loser before it opens one', async () => {
+    const session = await approved();
+    writeScript({ holdMs: 5_000, readyOut: join(root, 'ready') });
+    const running = detached.start(1, 'build', { root: repo, id: session.id });
+    await until('the build to start', () => existsSync(join(root, 'ready')));
+
+    // What a SIGKILLed runner leaves behind is a socket path nothing is behind,
+    // so a second runner binds it and carries on into the session's own log —
+    // two sequence counters over one file, and the loser's refusal recorded as
+    // if the winner had failed. The claim has to come first to stop that.
+    rmSync(socketOf(session.id), { force: true });
+    const second = await runFakeRunner(join(store.dirFor(repo, session.id), 'runner-job.json'));
+
+    assert.notEqual(second.code, 0, second.stderr);
+    assert.match(second.stderr, /another editor|claimed by another/);
+    const log = logOf(session.id);
+    assert.deepEqual(
+      log.filter((entry) => entry.event === 'big.failed'),
+      [],
+      'the loser never wrote its refusal into the winner’s log',
+    );
+    const seqs = log.map((entry) => entry.seq);
+    assert.deepEqual(seqs, [...new Set(seqs)], `one writer, so no seq twice — got ${seqs.join(',')}`);
+    assert.deepEqual(seqs, seqs.map((_, index) => index + 1), 'and the log is numbered without gaps');
+
+    const settled = assert.rejects(running);
+    await detached.stop({ root: repo, id: session.id });
+    await settled;
+  });
+});
+
+describe('following a runner that goes quiet', () => {
+  it('falls through to the log when the connection is taken and never answered', { timeout: 30_000 }, async () => {
+    const session = await approved();
+    writeScript({ write: { path: 'tool.py', content: 'def main():\n    print("v1")\n' } });
+    await detached.start(1, 'build', { root: repo, id: session.id });
+    const full = logOf(session.id);
+    assert.ok(full.length > 0);
+
+    const path = socketOf(session.id);
+    mkdirSync(dirname(path), { recursive: true });
+    rmSync(path, { force: true });
+    // A runner that accepts the connection and says nothing: the attach RPC is
+    // deadline-free on the Lua side, so without an ack deadline it waits forever.
+    const accepted: Socket[] = [];
+    const mute = createServer((socket) => {
+      accepted.push(socket);
+    });
+    await new Promise<void>((resolve) => mute.listen(path, () => resolve()));
+    try {
+      const record = store.require(repo, session.id);
+      record.runner = runnerRecord(session.id, process.pid);
+      store.save(record);
+
+      const seen: Event[] = [];
+      const viewer = new DetachedService({
+        big,
+        store,
+        env: detachedEnv(),
+        emit: (event, params) => seen.push({ event, params }),
+        attachAckMs: 250,
+      });
+      const attached = await viewer.attach(9, { root: repo, id: session.id, after: 0 });
+
+      assert.equal(attached.seq, full[full.length - 1]?.seq, 'the log backstop delivered the whole run');
+      assert.ok(
+        seen.some((entry) => entry.event === 'big.notice' && /never answered/.test(String(entry.params.text))),
+        'and said why it stopped waiting',
+      );
+      assert.ok(seen.some((entry) => entry.event === 'big.done'));
+    } finally {
+      // A socket nothing ever read stays open on the server side, and
+      // `close()` would wait on it forever.
+      for (const socket of accepted) socket.destroy();
+      await new Promise<void>((resolve) => mute.close(() => resolve()));
+      rmSync(path, { force: true });
+    }
   });
 });
 

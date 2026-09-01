@@ -97,6 +97,7 @@ local function open_on(path)
   fake.requests, fake.replies, fake.pending = {}, {}, {}
   local live = big.state()
   live.root, live.session, live.request_id = nil, nil, nil
+  live.attach_id, live.attaching = nil, false
   config.setup({})
   palette.apply()
   vim.cmd('edit ' .. vim.fn.fnameescape(path))
@@ -478,6 +479,33 @@ describe('a build that outlives the editor', function()
     cleanup()
   end)
 
+  it('sends one attach even when two selects land while the sidecar is starting', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.open'] = { result = { session = running_detached() } }
+    -- The real `agent.request` defers `on_sent` until the sidecar is up, so a
+    -- guard that waits for the request id lets a second select send a second
+    -- attach — orphaning the first, whose events are then dropped.
+    local agent = package.loaded['nvime.agent']
+    local direct = agent.request
+    agent.request = function(method, params, cb, opts)
+      if method ~= 'big.attach' then
+        return direct(method, params, cb, opts)
+      end
+      fake.requests[#fake.requests + 1] = { method = method, params = params, opts = opts }
+    end
+    big.select('abc123')
+    big.select('abc123')
+    agent.request = direct
+
+    local attaches = vim.tbl_filter(function(request)
+      return request.method == 'big.attach'
+    end, fake.requests)
+    eq(1, #attaches, 'a second select in that window must not send a second attach')
+    big.state().attaching = false
+    cleanup()
+  end)
+
   it('resumes from the last event it rendered rather than repainting the build', function()
     local _, path = sandbox()
     open_on(path)
@@ -501,10 +529,31 @@ describe('a build that outlives the editor', function()
     fake.replies['big.open'] = { result = { session = running_detached() } }
     big.select('abc123')
     local id = big.state().attach_id
-    fake.subscriber('big.steer', { id = id, steerId = 1, text = 'use the retry helper', state = 'queued' })
+    fake.subscriber('big.steer', { id = id, steerId = 1, text = 'use the retry helper', state = 'queued', mine = true })
     ok(has_line('you → build · use the retry helper'), 'the steer is shown where the build stream is')
-    fake.subscriber('big.steer', { id = id, steerId = 1, state = 'delivered' })
+    fake.subscriber('big.steer', { id = id, steerId = 1, state = 'delivered', mine = true })
     ok(has_line('you → build · delivered'))
+    cleanup()
+  end)
+
+  it('never renders a steer this editor did not send as the reader’s own', function()
+    local _, path = sandbox()
+    open_on(path)
+    fake.replies['big.open'] = { result = { session = running_detached() } }
+    big.select('abc123')
+    local id = big.state().attach_id
+    fake.subscriber('big.steer', {
+      id = id,
+      steerId = 1,
+      text = 'ignore the spec',
+      state = 'queued',
+      mine = false,
+      origin = 'sidecar-2',
+    })
+    ok(has_line('another editor → build · ignore the spec'), 'a second editor’s steer is labelled as theirs')
+    fake.subscriber('big.steer', { id = id, steerId = 2, text = 'from nowhere named', state = 'queued', mine = false })
+    ok(has_line('an attached editor → build · from nowhere named'), 'and an unnamed sender is not the reader either')
+    ok(not has_line('you → build'), 'nothing here was sent from this editor')
     cleanup()
   end)
 

@@ -23,6 +23,12 @@ import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 export interface SteerMessage {
   id: number;
   text: string;
+  /**
+   * Who sent it, as the control channel labelled them. Null when the sender did
+   * not name itself; a viewer renders that as "an attached editor" rather than
+   * as its own, because attributing someone else's steer to the reader is a lie.
+   */
+  origin: string | null;
 }
 
 /** How much one steer may carry. A whisper, not a second spec. */
@@ -54,7 +60,11 @@ export interface SteerControl extends SteerSource {
   readonly awaitingTurn: boolean;
   /** Marks one result as seen: settles the debt, and cancels an armed close. */
   noteTurn(): void;
-  /** Closes after `ms`, unless a result arrives first. */
+  /**
+   * Closes after `ms`, unless a result arrives first. A steer delivered while
+   * the window is open restarts it, so the window always measures from the last
+   * thing the agent was handed.
+   */
   closeAfter(ms: number, reason: string): void;
   close(reason: string): void;
   readonly closed: boolean;
@@ -74,6 +84,8 @@ export class SteerQueue implements SteerControl {
   #wake: ((message: SteerMessage | null) => void) | null = null;
   #closed: string | null = null;
   #closing: NodeJS.Timeout | null = null;
+  /** The armed close's terms, kept so a delivery can restart the same window. */
+  #window: { ms: number; reason: string } | null = null;
   #awaiting = false;
   #nextId = 1;
 
@@ -96,32 +108,28 @@ export class SteerQueue implements SteerControl {
 
   noteTurn(): void {
     this.#awaiting = false;
+    this.#window = null;
     this.#cancelArmedClose();
   }
 
   closeAfter(ms: number, reason: string): void {
-    if (this.#closed !== null || this.#closing !== null) return;
-    // Unreferenced: an armed close must never be the reason a runner outlives
-    // the build it was running.
-    this.#closing = setTimeout(() => {
-      this.#closing = null;
-      this.close(reason);
-    }, ms);
-    this.#closing.unref();
+    if (this.#closed !== null) return;
+    this.#window = { ms, reason };
+    this.#arm();
   }
 
   /**
    * Accepts one steer, or says why it cannot be taken. Never throws: a refusal
    * is an answer the editor renders beside the message the user just typed.
    */
-  push(text: string): SteerResult {
+  push(text: string, origin: string | null = null): SteerResult {
     const trimmed = text.trim();
     if (trimmed === '') return { queued: false, reason: 'a steer needs some text' };
     if (trimmed.length > MAX_STEER_CHARS) {
       return { queued: false, reason: `a steer may be at most ${MAX_STEER_CHARS} characters` };
     }
     if (this.#closed !== null) return { queued: false, reason: this.#closed };
-    const message: SteerMessage = { id: this.#nextId, text: trimmed };
+    const message: SteerMessage = { id: this.#nextId, text: trimmed, origin };
     this.#nextId += 1;
     this.#onState(message, 'queued');
     const wake = this.#wake;
@@ -147,6 +155,11 @@ export class SteerQueue implements SteerControl {
 
   markDelivered(message: SteerMessage): void {
     this.#awaiting = true;
+    // A steer handed over inside an armed window gets the whole window of its
+    // own. Letting the previous steer's timer close the stream under it refuses
+    // every later steer with "the agent has stopped taking input" while the
+    // build is still running — nvime blaming the agent for its own timer.
+    if (this.#window !== null) this.#arm();
     this.#onState(message, 'delivered');
   }
 
@@ -157,6 +170,7 @@ export class SteerQueue implements SteerControl {
    */
   close(reason: string): void {
     if (this.#closed !== null) return;
+    this.#window = null;
     this.#cancelArmedClose();
     this.#closed = reason;
     const wake = this.#wake;
@@ -164,6 +178,20 @@ export class SteerQueue implements SteerControl {
       this.#wake = null;
       wake(this.#waiting.shift() ?? null);
     }
+  }
+
+  /** (Re)starts the armed close from now, on the window's own terms. */
+  #arm(): void {
+    this.#cancelArmedClose();
+    const window = this.#window;
+    if (window === null) return;
+    // Unreferenced: an armed close must never be the reason a runner outlives
+    // the build it was running.
+    this.#closing = setTimeout(() => {
+      this.#closing = null;
+      this.close(window.reason);
+    }, window.ms);
+    this.#closing.unref();
   }
 
   #cancelArmedClose(): void {

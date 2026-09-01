@@ -36,6 +36,9 @@ local state = {
   request_id = nil,
   --- The `big.attach` request following a build this editor did not start.
   attach_id = nil,
+  --- An attach asked for but not yet sent. `attach_id` only exists once the
+  --- sidecar is up, and two attaches sent in that window orphan the first.
+  attaching = false,
   --- The last event seq rendered, so a re-attach picks up rather than repeats.
   seq = 0,
   subscribed = false,
@@ -175,13 +178,24 @@ local function adopt(session)
   refresh_status()
 end
 
+--- Who sent a steer, in this editor's terms. The sidecar decides `mine` by
+--- comparing the recorded origin with its own; a second editor's steer, or an
+--- unnamed one, must never be rendered back to the reader as their own.
+local function steer_author(params)
+  if params.mine then
+    return 'you'
+  end
+  return type(params.origin) == 'string' and 'another editor' or 'an attached editor'
+end
+
 --- One steer, as it moves from accepted to read by the build agent.
 local function render_steer(params)
+  local who = steer_author(params)
   if params.state == 'queued' then
-    surface():interject('  you → build · ' .. (params.text or ''), 'NvimeUser')
+    surface():interject('  ' .. who .. ' → build · ' .. (params.text or ''), 'NvimeUser')
     return
   end
-  surface():interject('  you → build · delivered', 'NvimeDim')
+  surface():interject('  ' .. who .. ' → build · delivered', 'NvimeDim')
 end
 
 local function on_event(name, params)
@@ -528,9 +542,13 @@ function M.attach()
   if session == nil or not session.runnerLive then
     return false
   end
-  if state.request_id ~= nil or state.attach_id ~= nil then
+  if state.request_id ~= nil or state.attach_id ~= nil or state.attaching then
     return false
   end
+  -- Set here, not in `on_sent`: `agent.request` defers the send until the
+  -- sidecar is up, and a second select in that window would send a second
+  -- attach whose id orphans the first — events dropped, follower left behind.
+  state.attaching = true
   surface():append('— attached to the build running outside the editor —', 'NvimeSession')
   surface():begin_stream(nil)
   surface():start_activity()
@@ -539,6 +557,7 @@ function M.attach()
     sessionId = session.id,
     after = state.seq,
   }, function(err)
+    state.attaching = false
     state.attach_id = nil
     surface():stop_activity()
     surface():finish_stream()

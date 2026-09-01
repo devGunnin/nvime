@@ -547,9 +547,13 @@ A big-change build is only mostly confined ~
 The build's control socket ~
     A detached build serves a unix socket under `$XDG_RUNTIME_DIR/nvime` (or
     a per-uid directory in the system temp dir), created 0700 and refused if
-    it is not a real directory this user owns. Anyone who can open it can
-    steer or stop that build — the same reach a local user with your uid
-    already has over your editor.
+    it is not a real directory this user owns; the socket itself is 0600.
+    Every frame must also carry a per-run token kept only in the 0600 session
+    record, so watching, steering or stopping a build takes more than running
+    as your uid — it takes read access to your nvime store. Anything with
+    that reach, the build agent's own Bash included, can steer or stop the
+    build. Steers are recorded with the editor that sent them, so a second
+    editor's shows as `another editor → build`, never as yours.
 
 The paste block is a block, not a sandbox ~
     The answer box refuses the put mappings, refuses |vim.paste()|, and undoes

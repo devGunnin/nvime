@@ -20,14 +20,31 @@
   and nothing re-run. Steers render in the stream as `you → build`, queued then
   delivered, and are part of the session's recorded history. A steer is context
   only: it travels inside the same agent session whose write boundary,
-  permission callback and gate were fixed when the build started.
+  permission callback and gate were fixed when the build started. A steer
+  handed to the agent inside the previous one's settle window restarts that
+  window, so an ordinary second nudge is never refused with "the build agent has
+  stopped taking input" while the build is still running.
 - **Honest death.** A runner that is killed leaves its claim stale and its
   identity on the record, and the session reads `build died — resumable` with
   `resume` and `discard` as its exits — never `building`, and never `built`. A
   live runner reads `building (detached — keeps running)` rather than being
   mistaken for a second editor. `<C-c>` stops a detached build through its own
-  socket, so it writes its terminal event and releases the claim; the recorded
-  pid is signalled only when the socket will not answer.
+  socket, so it writes its terminal event and releases the claim. The recorded
+  pid is signalled only when the socket will not answer AND the session's claim
+  still proves that pid is this build's runner — a pid the claim does not vouch
+  for is left alone, and the stop reports that the build had already died.
+- **One writer per session log.** A runner claims the session before it opens
+  the event log or binds its socket, so a second runner exits without recording
+  a byte and one log never carries two sequence counters. The log bounds every
+  line (not only deltas), terminates a line a killed runner tore in half before
+  appending after it, flushes the terminal event, and is read from its tail —
+  an attach that starts after older events says how many it skipped. A log that
+  cannot be read is an error, never an empty one.
+- **The control channel names its caller.** The socket is `0600` and every
+  frame carries a per-run token kept in the `0600` session record, so reaching a
+  build takes more than running as the same user. Steers are recorded with the
+  editor that sent them, and a second editor's renders as `another editor →
+  build` rather than as your own.
 
 - **Per-mode model + reasoning-effort dial.** A new `models` config table
   (`chat`, `edit`, `big_build`, `big_intake`, `big_triage`, `big_grade`,

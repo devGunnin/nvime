@@ -22,7 +22,6 @@ import {
 } from './bigprompts.js';
 import {
   clearCapture,
-  isLockLive,
   reconcile,
   transition,
   type BigBase,
@@ -32,6 +31,7 @@ import {
   type BigState,
   type BigStore,
   type Reality,
+  type SessionLock,
 } from './bigstore.js';
 import type { EmitEvent } from './chat.js';
 import { dialOptions, type Dial } from './dial.js';
@@ -204,6 +204,13 @@ export interface BigServiceOptions {
    */
   steering?: SteerControl | undefined;
   runner?: BigRunner | undefined;
+  /**
+   * The session's claim, already taken by the process that built this service.
+   * The runner takes it before it opens the event log, so a runner that loses
+   * the race exits without writing a byte — and then this must not take it a
+   * second time, nor drop it when the run ends.
+   */
+  heldLock?: SessionLock | undefined;
   /** Overrides `STEER_SETTLE_MS`; only a test has a reason to shorten it. */
   steerSettleMs?: number | undefined;
 }
@@ -293,6 +300,7 @@ export class BigService {
   readonly #emit: EmitEvent;
   readonly #steering: SteerControl | undefined;
   readonly #runner: BigRunner | undefined;
+  readonly #heldLock: SessionLock | undefined;
   readonly #steerSettleMs: number;
   readonly #running = new Map<number, Run>();
   readonly #runningByKey = new Map<string, number>();
@@ -305,6 +313,7 @@ export class BigService {
     this.#emit = options.emit;
     this.#steering = options.steering;
     this.#runner = options.runner;
+    this.#heldLock = options.heldLock;
     this.#steerSettleMs = options.steerSettleMs ?? STEER_SETTLE_MS;
   }
 
@@ -1169,8 +1178,10 @@ export class BigService {
     }
     // On disk as well as in memory: the in-process map cannot see the second
     // Neovim, which shares this store and would otherwise build in the same
-    // clone and discard the session out from under this run.
-    const lock = this.#store.acquireLock(session, what);
+    // clone and discard the session out from under this run. A runner hands
+    // its own claim in — it took one before it opened the log — and keeps it.
+    const held = this.#heldLock;
+    const lock = held ?? this.#store.acquireLock(session, what);
     const run: Run = { requestId, key, abort: new AbortController() };
     this.#running.set(requestId, run);
     this.#runningByKey.set(key, requestId);
@@ -1188,7 +1199,7 @@ export class BigService {
       this.#running.delete(requestId);
       this.#runningByKey.delete(key);
       this.#writeRunnerField(session, null);
-      lock.release();
+      if (held === undefined) lock.release();
     }
   }
 
@@ -1386,24 +1397,11 @@ export class BigService {
       display: mergeable ? 'mergeable' : session.state,
       detached: result.detached,
       heldElsewhere: result.heldElsewhere,
-      runnerLive: this.#runnerLive(session),
+      runnerLive: this.#store.liveRunner(session) !== null,
       worktreeExists: this.#store.hasWorktree(session),
       hasDiff: this.#store.hasDiff(session),
       counts,
     };
-  }
-
-  /**
-   * Whether the runner the record names is really the one holding the claim.
-   * Both halves are needed: a recorded runner alone proves nothing (it is left
-   * behind when one is killed), and a live claim alone could be a second
-   * Neovim — the pid is what ties the claim to the process the record names.
-   */
-  #runnerLive(session: BigSession): boolean {
-    const runner = session.runner;
-    if (runner === null) return false;
-    const lock = this.#store.readLock(session);
-    return lock !== null && lock.pid === runner.pid && isLockLive(lock);
   }
 }
 

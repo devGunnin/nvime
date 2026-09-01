@@ -14,6 +14,10 @@ function textOf(message: SDKUserMessage): string {
   return typeof content === 'string' ? content : JSON.stringify(content);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 describe('SteerQueue', () => {
   it('records queued when it is accepted and delivered when the agent asks for it', async () => {
     const { states, queue } = recorder();
@@ -36,6 +40,14 @@ describe('SteerQueue', () => {
     assert.equal((await waiting)?.text, 'and a --help flag');
   });
 
+  it('carries who sent a steer, named or not', async () => {
+    const { queue } = recorder();
+    queue.push('from the second editor', 'editor-2');
+    queue.push('from something that did not say');
+    assert.equal((await queue.next())?.origin, 'editor-2');
+    assert.equal((await queue.next())?.origin, null);
+  });
+
   it('refuses a steer once the build has finished, rather than swallowing it', () => {
     const { queue } = recorder();
     queue.close('the build has finished');
@@ -55,6 +67,38 @@ describe('SteerQueue', () => {
     queue.close('the build has finished');
     assert.equal((await queue.next())?.text, 'one', 'an accepted steer is never dropped');
     assert.equal(await queue.next(), null);
+  });
+
+  it('gives a steer delivered inside the settle window the whole window of its own', async () => {
+    const { queue } = recorder();
+    const window = 400;
+    // Steer A: delivered, answered, and the grace window armed off its result.
+    queue.push('A');
+    const first = await queue.next();
+    assert.ok(first !== null);
+    queue.markDelivered(first);
+    queue.noteTurn();
+    queue.closeAfter(window, 'the build agent has stopped taking input');
+
+    // Steer B, half-way through A's window — an ordinary second nudge.
+    await sleep(window / 2);
+    assert.equal(queue.push('B').queued, true);
+    const second = await queue.next();
+    assert.ok(second !== null);
+    queue.markDelivered(second);
+
+    // Past A's window, well inside B's. Closing here would refuse every later
+    // steer with "the agent has stopped taking input" while the build runs on.
+    await sleep(window * 0.75);
+    assert.equal(queue.closed, false, 'B must not be closed under by A’s timer');
+    assert.equal(queue.push('C').queued, true);
+  });
+
+  it('still closes on its own once nothing more is delivered', async () => {
+    const { queue } = recorder();
+    queue.closeAfter(120, 'the build has finished');
+    await sleep(300);
+    assert.equal(queue.closed, true, 'a re-armable window must still be a window');
   });
 
   it('owes a turn from the moment a steer is delivered until one result answers it', async () => {

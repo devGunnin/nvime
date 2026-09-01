@@ -2,12 +2,12 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { BigService, type BigSdk, type BuildDial, type SessionView } from './big.js';
-import { BigStore, type BigRunner } from './bigstore.js';
+import { BigStore, type BigRunner, type SessionLock } from './bigstore.js';
 import { resolveClaudeExecutable } from './env.js';
 import type { Env } from './env.js';
 import { ProtocolError } from './protocol.js';
 import { RunLog } from './runlog.js';
-import { serveControl, socketPathFor, type ControlServer } from './runsock.js';
+import { newControlToken, serveControl, socketPathFor, type ControlServer } from './runsock.js';
 import { SteerQueue } from './steer.js';
 
 /**
@@ -51,11 +51,26 @@ const RUNNER_REQUEST_ID = 1;
  * Runs one job to completion. Resolves with the exit code the process should
  * use: 0 when the build reached a terminal event of its own, 1 when it could
  * not even be started.
+ *
+ * The session's claim is taken FIRST, before the event log is opened and before
+ * the control socket is bound. That ordering is the single-writer invariant: a
+ * runner that loses the race throws here, having written nothing a viewer could
+ * ever read, so one session's log never carries two runs' sequence numbers.
  */
 export async function runJob(job: RunnerJob, deps: RunnerDeps): Promise<number> {
   const store = new BigStore(job.storeRoot);
+  const lock = store.acquireLock(store.require(job.repoRoot, job.sessionId), job.what);
+  try {
+    return await runClaimedJob(job, deps, store, lock);
+  } finally {
+    lock.release();
+  }
+}
+
+async function runClaimedJob(job: RunnerJob, deps: RunnerDeps, store: BigStore, lock: SessionLock): Promise<number> {
   const log = new RunLog(store.logPathFor(job.repoRoot, job.sessionId));
   const socket = socketPathFor(deps.env, job.repoRoot, job.sessionId);
+  const token = newControlToken();
   let server: ControlServer | null = null;
 
   const publish = (event: string, params: Record<string, unknown>): void => {
@@ -65,9 +80,16 @@ export async function runJob(job: RunnerJob, deps: RunnerDeps): Promise<number> 
   };
 
   const steering = new SteerQueue((message, state) => {
-    publish('big.steer', { steerId: message.id, text: message.text, state });
+    publish('big.steer', { steerId: message.id, text: message.text, state, origin: message.origin });
   });
-  const runner: BigRunner = { pid: process.pid, socket, log: log.path, what: job.what, startedAt: Date.now() };
+  const runner: BigRunner = {
+    pid: process.pid,
+    socket,
+    log: log.path,
+    what: job.what,
+    startedAt: Date.now(),
+    token,
+  };
   const service = new BigService({
     sdk: deps.sdk,
     store,
@@ -76,6 +98,7 @@ export async function runJob(job: RunnerJob, deps: RunnerDeps): Promise<number> 
     emit: publish,
     steering,
     runner,
+    heldLock: lock,
   });
 
   // Graceful stop, whichever way it is asked for: the SDK turn is aborted, the
@@ -93,15 +116,19 @@ export async function runJob(job: RunnerJob, deps: RunnerDeps): Promise<number> 
   };
 
   try {
-    server = await serveControl(socket, {
-      replay: (after) => log.readAfter(after),
-      steer: (text) => {
-        const result = steering.push(text);
-        return result.queued ? { queued: true } : { queued: false, reason: result.reason };
+    server = await serveControl(
+      socket,
+      {
+        replay: (after) => log.readAfter(after),
+        steer: (text, from) => {
+          const result = steering.push(text, from);
+          return result.queued ? { queued: true } : { queued: false, reason: result.reason };
+        },
+        cancel: stop,
+        info: () => ({ pid: process.pid, what: job.what, seq: log.seq }),
       },
-      cancel: stop,
-      info: () => ({ pid: process.pid, what: job.what, seq: log.seq }),
-    });
+      token,
+    );
     for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, stop);
 
     publish('big.state', { session: job.sessionId, state: 'building', note: `detached build (pid ${process.pid})` });
