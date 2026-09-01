@@ -346,6 +346,13 @@ the new base, git moves the work, and a build turn resolves whatever conflicted
 and re-runs the tests. Content you already defended carries forward by
 signature; anything the move changed comes back open.
 
+That rebase is an agent turn, so it takes as long as one. Anything the review
+tab runs for more than a moment shows a spinner on the left bar naming what is
+running, and the right bar carries the last thing the run reported doing —
+`Edit lua/nvime/big.lua`, `re-verifying on the new base`. A second keystroke
+while one is in flight says what it is waiting on rather than sending a request
+the sidecar would only refuse.
+
 ### State honesty
 
 Every transition is recorded with its timestamp, and the record is reconciled

@@ -8,7 +8,15 @@ local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
 --- Stands in for the sidecar: records requests, replies from a canned table.
 --- A method with no canned reply stays IN FLIGHT, the way a streaming request
 --- really does, and `fake.settle` answers it later.
-local fake = { requests = {}, replies = {}, pending = {}, subscriber = nil }
+local fake = { requests = {}, replies = {}, pending = {}, subscribers = {} }
+
+--- Fans one server-pushed event out to every listener, the way the real
+--- `agent.on_event` does: the panel and the review tab both subscribe.
+function fake.subscriber(name, params)
+  for _, fn in ipairs(fake.subscribers) do
+    fn(name, params)
+  end
+end
 
 function fake.request(method, params, cb, opts)
   fake.requests[#fake.requests + 1] = { method = method, params = params, opts = opts }
@@ -39,7 +47,7 @@ local real_agent = require('nvime.agent')
 package.loaded['nvime.agent'] = {
   request = fake.request,
   on_event = function(fn)
-    fake.subscriber = fn
+    fake.subscribers[#fake.subscribers + 1] = fn
     return function() end
   end,
   is_running = function()

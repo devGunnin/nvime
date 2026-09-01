@@ -63,11 +63,13 @@ import {
   branchNameFor,
   checkMerge,
   expectedTree,
+  holderMessage,
   landDiff,
   landedAlready,
   type LandResult,
   type MergeFacts,
   type MergeRefusal,
+  type SessionHolder,
 } from './merge.js';
 import { classifyBuildTool, READ_ONLY_TOOLS, realPathOf } from './policy.js';
 import { ProtocolError } from './protocol.js';
@@ -950,7 +952,7 @@ export class BigService {
     return {
       diff: text === null ? null : parseUnifiedDiff(text),
       counts,
-      heldElsewhere: this.#store.foreignLock(session) !== null,
+      heldBy: this.#heldBy(session),
     };
   }
 
@@ -1002,10 +1004,19 @@ export class BigService {
    * editor is actively working.
    */
   #refuseIfHeldElsewhere(session: BigSession): void {
-    const held = this.#store.foreignLock(session);
-    if (held !== null) {
-      throw new ProtocolError('busy', `this big change is running in another editor (${held.what})`);
-    }
+    const held = this.#heldBy(session);
+    if (held !== null) throw new ProtocolError('busy', holderMessage(held));
+  }
+
+  /**
+   * Who holds this session's claim, when it is not this run. The claim alone
+   * cannot tell a detached runner from a second Neovim, so the recorded runner
+   * is checked against it — `liveRunner` demands both.
+   */
+  #heldBy(session: BigSession): SessionHolder | null {
+    const lock = this.#store.foreignLock(session);
+    if (lock === null) return null;
+    return { detached: this.#store.liveRunner(session) !== null, what: lock.what };
   }
 
   /**

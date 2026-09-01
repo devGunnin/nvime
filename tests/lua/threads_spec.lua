@@ -5,20 +5,47 @@ local palette = require('nvime.palette')
 local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
 
 --- Stands in for the sidecar: records requests, replies from a canned table.
-local fake = { requests = {}, replies = {} }
+--- A method with no canned reply stays IN FLIGHT, the way an agent turn really
+--- does, and `fake.settle` answers it later.
+local fake = { requests = {}, replies = {}, pending = {}, subscribers = {} }
 
-function fake.request(method, params, cb)
-  fake.requests[#fake.requests + 1] = { method = method, params = params }
+function fake.request(method, params, cb, opts)
+  fake.requests[#fake.requests + 1] = { method = method, params = params, opts = opts }
+  if opts ~= nil and opts.on_sent ~= nil then
+    opts.on_sent(#fake.requests)
+  end
   local reply = fake.replies[method]
   if reply ~= nil then
     cb(reply.err, reply.result)
+    return
+  end
+  fake.pending[#fake.pending + 1] = { method = method, cb = cb }
+end
+
+--- Answers the oldest in-flight `method`. Returns whether one was waiting.
+function fake.settle(method, err, result)
+  for index, entry in ipairs(fake.pending) do
+    if entry.method == method then
+      table.remove(fake.pending, index)
+      entry.cb(err, result)
+      return true
+    end
+  end
+  return false
+end
+
+--- One server-pushed event, to every listener.
+function fake.emit(name, params)
+  for _, fn in ipairs(fake.subscribers) do
+    fn(name, params)
   end
 end
 
 local real_agent = require('nvime.agent')
 package.loaded['nvime.agent'] = {
   request = fake.request,
-  on_event = function()
+  on_event = function(fn)
+    fake.subscribers[#fake.subscribers + 1] = fn
     return function() end
   end,
   is_running = function()
@@ -122,7 +149,7 @@ end
 local function open_review(blocks)
   threads.close()
   compose.dismiss()
-  fake.requests, fake.replies = {}, {}
+  fake.requests, fake.replies, fake.pending = {}, {}, {}
   palette.apply()
   fake.replies['big.diff'] = { result = { diff = { text = DIFF, hunks = HUNKS } } }
   threads.open('/tmp/project', session(blocks))
@@ -866,5 +893,125 @@ describe('the grade the reader is told about', function()
     ok(seen[1]:find('\n') == nil, 'one line only: ' .. seen[1])
     ok(vim.fn.strchars(seen[1]) < vim.fn.strchars(verdict), seen[1])
     ok(seen[1]:find('88', 1, true) ~= nil, seen[1])
+  end)
+end)
+
+--- The winbar the tree window is currently rendering.
+local function tree_bar()
+  return vim.wo[threads.view().tree_win].winbar
+end
+
+local function pane_bar()
+  return vim.wo[threads.view().pane_win].winbar
+end
+
+--- Waits until the indicator has outlived its delay and painted, or gives up.
+local function wait_for_spinner()
+  return vim.wait(2000, function()
+    return (threads.activity() or {}).shown == true
+  end, 20)
+end
+
+describe('issue #10: the base moved, R rebases, M merges', function()
+  it('walks the whole stuck sequence: M refused, R, then M lands it', function()
+    open_review({ block({ state = 'resolved' }) })
+    -- M, with the base moved out from under the build.
+    fake.replies['big.merge'] = {
+      result = {
+        merged = false,
+        refusals = { { code = 'base-moved', message = 'main has moved since the build started' } },
+        session = session({ block({ state = 'resolved' }) }),
+      },
+    }
+    local seen = with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    ok(said(seen, 'press R to rebase'), vim.inspect(seen))
+
+    -- R: a real rebase is an agent turn, so it stays in flight.
+    fake.replies['big.merge'] = nil
+    local rebased = session({ block({ state = 'resolved' }) }, { base = { commit = 'aa9fb774', branch = 'main' } })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    ok(threads.activity() ~= nil, 'the rebase is in flight and the tab says so')
+    eq('rebasing the build onto the updated base', threads.activity().label)
+
+    seen = with_notices(function()
+      ok(fake.settle('big.rebase', nil, { session = rebased }))
+    end)
+    eq(nil, threads.activity(), 'the indicator clears when the rebase settles')
+    ok(said(seen, 'rebased onto the updated base'), vim.inspect(seen))
+
+    -- M again, on the rebased build: it lands.
+    fake.replies['big.merge'] = {
+      result = {
+        merged = true,
+        refusals = {},
+        session = session({ block({ state = 'resolved' }) }, {
+          display = 'merged',
+          state = 'merged',
+          merge = { branch = 'nvime/big/backoff', commit = 'deadbeefcafe', baseBranch = 'main' },
+        }),
+      },
+    }
+    seen = with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    ok(said(seen, 'merged'), vim.inspect(seen))
+    threads.close()
+  end)
+
+  it('shows a spinner and what the rebase is doing until it settles', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    ok(wait_for_spinner(), 'a request past the delay paints an indicator')
+    ok(tree_bar():find('rebasing the build', 1, true) ~= nil, tree_bar())
+
+    -- The runner's progress is addressed to the request that started it.
+    local id = fake.requests[#fake.requests].opts.on_sent ~= nil and threads.activity().request_id or nil
+    ok(id ~= nil, 'the review tab tracks the request id its events carry')
+    fake.emit('big.tool', { id = id, tool = 'Edit', summary = 'Edit lua/nvime/big.lua' })
+    ok(pane_bar():find('Edit lua/nvime/big.lua', 1, true) ~= nil, pane_bar())
+    fake.emit('big.tool', { id = id + 99, summary = 'somebody else’s build' })
+    ok(pane_bar():find('somebody', 1, true) == nil, 'another request’s progress is not this tab’s')
+
+    with_notices(function()
+      ok(fake.settle('big.rebase', nil, { session = session({ block({ state = 'resolved' }) }) }))
+    end)
+    eq(nil, threads.activity())
+    ok(tree_bar():find('rebasing', 1, true) == nil, tree_bar())
+    ok(pane_bar():find('M merge', 1, true) ~= nil, 'the keys come back once the tab is idle')
+    threads.close()
+  end)
+
+  it('says what is running instead of stacking a second request on it', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    local before = #fake.requests
+    local seen = with_notices(function()
+      press(threads.view().tree_buf, 'M')
+      press(threads.view().tree_buf, 'R')
+    end)
+    eq(before, #fake.requests, 'neither keystroke sent a request the sidecar would only refuse')
+    ok(said(seen, 'rebasing the build onto the updated base'), vim.inspect(seen))
+    ok(said(seen, 'wait for that to finish'), vim.inspect(seen))
+    threads.close()
+    eq(nil, threads.activity(), 'closing the tab stops the indicator')
+  end)
+
+  it('keeps a fast round trip silent — no spinner flashes for a toggle', function()
+    open_review({ block({ substantial = false, state = 'resolved' }) })
+    fake.replies['big.toggle'] = { result = { session = session({ block({ substantial = false }) }) } }
+    with_notices(function()
+      press(threads.view().tree_buf, 'X')
+    end)
+    eq(nil, threads.activity(), 'it settled before the indicator was ever due')
+    ok(tree_bar():find('defended', 1, true) ~= nil, tree_bar())
+    threads.close()
   end)
 end)
