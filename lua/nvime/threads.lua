@@ -51,8 +51,10 @@ local PANE_TITLE_ROOM = 12
 --- otherwise tick against dead windows, is paused. `generation` is what keeps
 --- a stale callback from touching a LATER request's record: `run_op` captures
 --- it when the request goes out, and only clears the indicator, stops the
---- timer, or frees the latch when that generation is still the current one.
---- @type table|nil { label, detail, request_id, frame, shown, timer, generation }
+--- timer, or frees the latch when both that generation AND `session_id` are
+--- still current — a reopen onto a DIFFERENT change must not inherit this
+--- record just because nothing has replaced it yet (see `current_activity`).
+--- @type table|nil { label, detail, request_id, frame, shown, timer, generation, session_id }
 local activity = nil
 
 --- Bumped once per request; `activity.generation` pins a callback to the
@@ -312,7 +314,7 @@ function M.keys_hint(session)
   end
   -- `R rebase` is deliberately absent: it only applies once the base has
   -- moved, and the merge refusal names it at exactly that moment.
-  return 'a answer · e explain · r changes · X re-open · ]t/[t · M merge'
+  return 'a answer · e explain · r changes · X re-open · ]t/[t · M merge · <C-c> give up on a wedged request'
 end
 
 local function paint(buf, marks)
@@ -333,15 +335,29 @@ local function paint(buf, marks)
   end
 end
 
+--- `activity`, but only when it belongs to the change the tab is showing
+--- right now. A record left over from a change the reader has since moved
+--- away from (a reopen onto a different session, `<C-r>` then `<C-t>`) is
+--- still running on the sidecar, but it must read as idle here: it is not
+--- this change's latch, and not this change's spinner.
+--- @return table|nil
+local function current_activity()
+  if activity == nil or activity.session_id ~= (view.session or {}).id then
+    return nil
+  end
+  return activity
+end
+
 --- The spinner and label for the request in flight, or nil when the tab is
 --- idle (or the request has not yet outlived `ACTIVITY_DELAY_MS`).
 --- @return string|nil
 function M.activity_line()
-  if activity == nil or not activity.shown then
+  local current = current_activity()
+  if current == nil or not current.shown then
     return nil
   end
   local frames = require('nvime.icons').get().spinner
-  return frames[(activity.frame - 1) % #frames + 1] .. ' ' .. activity.label
+  return frames[(current.frame - 1) % #frames + 1] .. ' ' .. current.label
 end
 
 --- The two bars. The gate's count goes on the narrow tree, where it always
@@ -363,13 +379,14 @@ local function status()
     return
   end
   local pane_width = vim.api.nvim_win_get_width(view.pane_win)
+  local current = current_activity()
   local keys
-  if activity ~= nil then
+  if current ~= nil then
     -- The streamed detail is whatever the sidecar sent — unbounded, and often
     -- multi-line (runner stderr, a git error). Collapsed to one line and cut
     -- to fit before it ever reaches the winbar, the same as the left bar
     -- already was; the static keys hint below is short enough it never needed this.
-    keys = shape.ellipsise(((activity.detail or ''):gsub('%s+', ' ')), math.max(pane_width - PANE_TITLE_ROOM - 4, 8))
+    keys = shape.ellipsise(((current.detail or ''):gsub('%s+', ' ')), math.max(pane_width - PANE_TITLE_ROOM - 4, 8))
   else
     keys = M.keys_hint(view.session)
   end
@@ -486,10 +503,22 @@ end
 --- Starts the indicator for one request. Nothing is drawn for the first
 --- `ACTIVITY_DELAY_MS`, so a round trip the reader would not have noticed
 --- anyway never flashes a spinner at them.
+---
+--- Callers only reach this once `refuse_if_busy` (session-scoped, see
+--- `current_activity`) has said the tab is free, so a leftover `activity` here
+--- can only be a foreign change's record — still running on the sidecar, but
+--- not this change's latch to hold. Its timer is paused rather than touched
+--- any other way: the record itself is left alone so its own generation check
+--- in `run_op` quarantines its eventual answer once nothing points at it.
 --- @param label string what is running, in the reader's words
 local function begin_activity(label)
   assert(type(label) == 'string' and label ~= '', 'threads.begin_activity needs a label')
-  assert(activity == nil, 'the review tab runs one request at a time')
+  local session_id = (view.session or {}).id
+  assert(activity == nil or activity.session_id ~= session_id, 'the review tab runs one request at a time per change')
+  if activity ~= nil and activity.timer ~= nil then
+    activity.timer:stop()
+    activity.timer:close()
+  end
   next_generation = next_generation + 1
   activity = {
     label = label,
@@ -499,6 +528,7 @@ local function begin_activity(label)
     shown = false,
     timer = nil,
     generation = next_generation,
+    session_id = session_id,
   }
   arm_timer(activity, false)
 end
@@ -543,13 +573,16 @@ local function end_activity()
 end
 
 --- Says what is already running, so a second keystroke reads as "not yet"
---- rather than firing a request the sidecar will only refuse as busy.
+--- rather than firing a request the sidecar will only refuse as busy. Scoped
+--- to the change on screen: a request still running for a change the reader
+--- has since left is not this change's latch (see `current_activity`).
 --- @return boolean true when the caller must not proceed
 local function refuse_if_busy()
-  if activity == nil then
+  local current = current_activity()
+  if current == nil then
     return false
   end
-  notify(activity.label .. ' — wait for that to finish', vim.log.levels.WARN)
+  notify(current.label .. ' — wait for that to finish', vim.log.levels.WARN)
   return true
 end
 
@@ -557,9 +590,10 @@ end
 --- there is no cancel channel every op can reach (see `answer()`) — so this
 --- only frees the local latch. The abandoned request keeps a generation that
 --- is no longer current, so if it does answer later it renders its outcome
---- but can never re-arm the latch or touch whatever runs next.
+--- but can never re-arm the latch or touch whatever runs next. Scoped to the
+--- change on screen: it must not reach into a foreign change's latch.
 local function give_up()
-  if activity == nil then
+  if current_activity() == nil then
     return
   end
   end_activity()
@@ -568,10 +602,18 @@ end
 
 --- Every request the review tab makes, with the indicator around it.
 ---
---- One at a time: the sidecar claims the session for the duration of a turn
---- and would refuse a second one, so the guard belongs here where it can say
---- what is running instead of relaying a `busy`.
---- @param spec table label, method, params, and optional no_deadline/on_error/on_failure
+--- One at a time per change: the sidecar claims the session for the duration
+--- of a turn and would refuse a second one, so the guard belongs here where
+--- it can say what is running instead of relaying a `busy`.
+---
+--- `spec.always_deliver` opts a call site out of quarantine — only safe for a
+--- callback that touches nothing but its own float (`explain`, which never
+--- reads or writes `view.session`). Every other call site is left quarantined
+--- by default: `on_result`/`on_failure` are skipped entirely once the answer
+--- is no longer current, so it can never mutate `view.session`, fire
+--- `on_update`, or issue another request against a change the reader has left
+--- — only its outcome line is rendered.
+--- @param spec table label, method, params, and optional no_deadline/on_error/on_failure/always_deliver
 --- @param on_result fun(result: table) called only when the request succeeded
 local function run_op(spec, on_result)
   assert(type(spec.label) == 'string' and spec.label ~= '', 'threads.run_op needs a label')
@@ -582,15 +624,29 @@ local function run_op(spec, on_result)
   end
   begin_activity(spec.label)
   local generation = activity.generation
+  local session_id = activity.session_id
   agent.request(spec.method, spec.params, function(err, result)
-    -- Only touch the indicator/timer/latch when this answer is still for the
-    -- CURRENT request. A tab close preserves the latch (see `pause_activity`),
-    -- so the usual case is that generation still matches; it stops matching
-    -- once `give_up` released it, or once a later request took the latch
-    -- after this one settled stale. Either way the outcome below still
-    -- renders — a stale answer is shown, it just cannot touch what runs now.
-    if activity ~= nil and activity.generation == generation then
+    -- Two different questions. `is_same_record`: has nothing later replaced
+    -- this record (generation)? If so the request genuinely just finished,
+    -- and the latch must be freed regardless of what the tab shows now — an
+    -- answered request left un-cleared would read as busy forever the next
+    -- time the reader comes back to this same change. `is_current` narrows
+    -- that to "and the tab still shows the change this was for": only then
+    -- may `on_result`/`on_failure` run, since only then are `view.session`,
+    -- `on_update`, and another `big.diff` safe to touch.
+    local is_same_record = activity ~= nil and activity.generation == generation
+    local is_current = is_same_record and (view.session or {}).id == session_id
+    if is_same_record then
       end_activity()
+    end
+    if not (is_current or spec.always_deliver) then
+      local outcome = err ~= nil and (err.message or spec.on_error or 'that request failed')
+        or (spec.label .. ' finished')
+      notify(
+        outcome .. ' — for a change you have since left',
+        err ~= nil and vim.log.levels.WARN or vim.log.levels.INFO
+      )
+      return
     end
     if err ~= nil then
       if spec.on_failure ~= nil then
@@ -784,6 +840,10 @@ local function explain()
     -- runs to completion regardless (or until `<C-c>` gives up on it locally),
     -- and other actions refuse with "wait for that to finish" until it does.
     no_deadline = true,
+    -- Safe to always deliver: neither branch below touches `view.session`,
+    -- so a reader who switched changes while this ran still gets their
+    -- answer rather than a generic "finished elsewhere" notice.
+    always_deliver = true,
     params = {
       root = view.root,
       sessionId = view.session.id,
@@ -1191,8 +1251,14 @@ function M.open(root, session, on_update)
   build_tab()
   -- Re-adopts a request that was already in flight when the tab last closed
   -- (a plain reopen, or `<C-t>` from the big panel) rather than orphaning it:
-  -- the latch survived `M.close`, only its timer was paused.
-  resume_activity()
+  -- the latch survived `M.close`, only its timer was paused. Only for THIS
+  -- change, though — reopening onto a DIFFERENT change must not inherit a
+  -- leftover latch that belongs to the one the reader left (issue-#10
+  -- regression N1): that record is left alone, quarantined by `run_op`'s own
+  -- generation/session check once it eventually settles.
+  if activity ~= nil and activity.session_id == session.id then
+    resume_activity()
+  end
   status()
   M.reload(session)
 end
@@ -1202,9 +1268,11 @@ function M.view()
   return view
 end
 
---- Test hook: the request in flight, or nil.
+--- Test hook: the request in flight for the change on screen, or nil — what
+--- the reader would actually see, not a leftover record for a change they
+--- have since left (see `current_activity`).
 function M.activity()
-  return activity
+  return current_activity()
 end
 
 return M

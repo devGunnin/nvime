@@ -146,7 +146,9 @@ local function session(blocks, overrides)
   }, overrides or {})
 end
 
-local function open_review(blocks)
+--- @param session_overrides table|nil so a test can reopen on a DIFFERENT
+--- change (a different `id`) instead of the default one.
+local function open_review(blocks, session_overrides)
   threads.close()
   compose.dismiss()
   -- `fake.pending` deliberately survives: reopening the review must not lose
@@ -156,7 +158,7 @@ local function open_review(blocks)
   fake.requests, fake.replies = {}, {}
   palette.apply()
   fake.replies['big.diff'] = { result = { diff = { text = DIFF, hunks = HUNKS } } }
-  threads.open('/tmp/project', session(blocks))
+  threads.open('/tmp/project', session(blocks, session_overrides))
 end
 
 --- Invokes the buffer-local mapping the user would press.
@@ -1109,7 +1111,15 @@ describe('issue #10: the base moved, R rebases, M merges', function()
       (threads.activity() or {}).generation,
       "the merge's own indicator must survive the stale rebase settling under it"
     )
-    ok(said(seen, 'rebased onto the updated base'), vim.inspect(seen), 'the stale answer still renders its own outcome')
+    -- N2 fix: a stale on_result no longer runs at all (it used to fire
+    -- `M.reload`, mutating `view.session` out from under the merge in
+    -- flight) — only a generic outcome line renders now.
+    ok(
+      said(seen, 'rebasing the build onto the updated base finished'),
+      vim.inspect(seen),
+      'the stale answer still renders an outcome line, but never mutates state'
+    )
+    eq('abc123', threads.view().session.id, "the stale rebase's own on_result must not have run")
 
     -- Settle the merge too, so nothing is left in flight for the next test.
     with_notices(function()
@@ -1121,6 +1131,75 @@ describe('issue #10: the base moved, R rebases, M merges', function()
         )
       )
     end)
+    threads.close()
+  end)
+
+  -- Fix-round-1 delta finding N1/N2: the latch was per-module, not
+  -- per-session, so reopening the review on a DIFFERENT change inherited
+  -- the old one's latch — the reviewer's A-rebase, pick B, `<C-t>` probe.
+  it('does not inherit a stale latch when the tab reopens on a different change', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    ok(threads.activity() ~= nil, 'a rebase on change A is in flight')
+
+    -- The reader picks a different change from the panel (`<C-r>`) and opens
+    -- its review (`<C-t>`) while A's rebase is still running on the sidecar.
+    open_review(
+      { block({ id = 'b2', title = 'other change', state = 'resolved' }) },
+      { id = 'session-B', title = 'other change' }
+    )
+    eq('session-B', threads.view().session.id)
+    ok(threads.activity() == nil, "change B must not inherit change A's latch")
+
+    -- B's own M must reach the sidecar rather than being refused as busy
+    -- because of a rebase running on a change the reader has left.
+    fake.replies['big.merge'] = {
+      result = {
+        merged = true,
+        refusals = {},
+        session = session({ block({ id = 'b2', title = 'other change', state = 'resolved' }) }, {
+          id = 'session-B',
+          display = 'merged',
+          state = 'merged',
+          merge = { branch = 'nvime/big/other', commit = 'deadbeefcafe', baseBranch = 'main' },
+        }),
+      },
+    }
+    local seen = with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    ok(said(seen, 'merged'), vim.inspect(seen))
+
+    -- Drain A's stale rebase so it does not leak into a later test.
+    with_notices(function()
+      ok(fake.settle('big.rebase', nil, { session = session({ block({ state = 'resolved' }) }) }))
+    end)
+    threads.close()
+  end)
+
+  it('quarantines a stale rebase that settles after the tab has moved to another change', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+
+    open_review(
+      { block({ id = 'b2', title = 'other change', state = 'resolved' }) },
+      { id = 'session-B', title = 'other change' }
+    )
+    local requests_before = #fake.requests
+
+    -- A's stale rebase finally answers. It must still tell the reader
+    -- something happened, but it must not touch the tab that has since
+    -- moved to B: no mutated `view.session`, no `big.diff` re-issued.
+    local seen = with_notices(function()
+      ok(fake.settle('big.rebase', nil, { session = session({ block({ state = 'resolved' }) }) }))
+    end)
+    eq('session-B', threads.view().session.id, "A's stale answer must not flip the tab back to A")
+    eq(requests_before, #fake.requests, 'a stale settle must not issue big.diff for the change it belongs to')
+    ok(said(seen, 'rebas'), 'the stale settle still renders its own outcome line: ' .. vim.inspect(seen))
     threads.close()
   end)
 

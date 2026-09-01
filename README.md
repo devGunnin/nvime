@@ -353,6 +353,12 @@ running, and the right bar carries the last thing the run reported doing —
 while one is in flight says what it is waiting on rather than sending a request
 the sidecar would only refuse.
 
+Unlike the panel's `<C-c>` (which reaches the runner and actually stops the
+turn), `<C-c>` in the review tab only gives up **locally** — the review tab has
+no cancel channel a grading round can reach, so the run keeps going on the
+sidecar and may still land. Giving up just frees the tab to send the next
+request rather than refuse it as busy.
+
 ### State honesty
 
 Every transition is recorded with its timestamp, and the record is reconciled
@@ -428,6 +434,7 @@ Off until `keymaps.enabled = true`.
 | `]t` / `[t` | review | next · previous thread |
 | `a` / `e` / `r` | review | defend this thread · explain a cleared one · request changes |
 | `X` / `R` / `M` | review | re-open a trivial thread · rebase onto a moved base · merge |
+| `<C-c>` | review | give up waiting on a wedged request — does not stop it, unlike the panel's `<C-c>` |
 | `<CR>` | review | open this file in the build clone |
 | `c` `e` `b` `d` / `<CR>` | dashboard | chat · edit · big · changeset / open the change under the cursor |
 

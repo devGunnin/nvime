@@ -102,7 +102,7 @@ export class DetachedService {
     const session = this.#store.require(params.root, params.id);
     const held = this.#store.holderOf(session);
     if (held !== null) {
-      throw new ProtocolError('busy', `${holderMessage(held)} — attach to it instead`);
+      throw new ProtocolError('busy', `${holderMessage(held)}; attach to it instead`);
     }
     const from = lastSeqOf(this.#store.logPathFor(params.root, params.id));
     let spawned: SpawnedRunner;
@@ -213,7 +213,7 @@ export class DetachedService {
     const session = this.#store.read(params.root, params.id);
     const held = session === null ? null : this.#store.holderOf(session);
     if (held === null) return;
-    throw new ProtocolError('busy', `${holderMessage(held)} — attach to it instead`);
+    throw new ProtocolError('busy', `${holderMessage(held)}; attach to it instead`);
   }
 
   #socketFor(params: { root: string; id: string }): string {
