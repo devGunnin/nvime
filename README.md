@@ -407,7 +407,8 @@ require('nvime').setup({
     big_intake = { model = nil, effort = nil },
     -- Triage decides what the gate reviews, and grading IS the gate: neither
     -- may be 'low', and neither defaults to nil — an unset gate effort names
-    -- 'medium' rather than silently inheriting the shell's own.
+    -- 'medium' rather than silently inheriting the shell's own. An unset
+    -- big_triage.model uses big_build's model, not the CLI default.
     big_triage = { model = nil, effort = 'medium' },
     big_grade = { model = nil, effort = 'medium' },
     explain = { model = nil, effort = nil },

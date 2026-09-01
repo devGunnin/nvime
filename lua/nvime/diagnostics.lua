@@ -221,7 +221,11 @@ end
 local function check_model_dial(entries)
   local active = models.summary()
   if #active == 0 then
-    info(entries, 'model dial: every lane uses the CLI default')
+    local floors = {}
+    for _, lane in ipairs(config.GATE_LANES) do
+      floors[#floors + 1] = string.format('%s (effort %s)', lane, config.defaults.models[lane].effort)
+    end
+    info(entries, 'model dial: CLI default everywhere except ' .. table.concat(floors, ', '))
     return
   end
   info(entries, 'model dial: ' .. table.concat(active, '  '))

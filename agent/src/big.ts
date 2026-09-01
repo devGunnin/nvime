@@ -113,13 +113,28 @@ export const BIG_READ_DENIED = [...BIG_DENIED_TOOLS, 'Bash', 'BashOutput', 'Kill
 /** How much of a diff the triage turn is shown. Past it, triage sees a prefix. */
 export const MAX_TRIAGE_BYTES = 128 * 1024;
 
-type Phase = 'intake' | 'build' | 'triage' | 'grade' | 'explain';
+export type Phase = 'intake' | 'build' | 'triage' | 'grade' | 'explain';
 
 /** The phases whose output the comprehension gate depends on: never effort 'low'. */
 const GATE_PHASES: ReadonlySet<Phase> = new Set(['triage', 'grade']);
 
 /** The floor a gate phase's effort defaults to when its own dial leaves it unset. */
 const GATE_EFFORT_FLOOR: EffortLevel = 'medium';
+
+/**
+ * A gate phase's effort can never be below the floor — a CLAMP, not a
+ * default: an explicit `'low'` is raised to the floor exactly like an unset
+ * one, regardless of whatever call-site guard did or didn't check first.
+ * `#buildOptions` is the single place every turn's options are assembled, so
+ * this is the one function that must hold the invariant; the call-site
+ * refusals (`refuseLowTriage`, `answer`'s effort check) stay only for the
+ * user-facing error message, not as the enforcement itself.
+ */
+export function gateDial(phase: Phase, dial: Dial): Dial {
+  if (!GATE_PHASES.has(phase)) return dial;
+  const effort = dial.effort === undefined || dial.effort === 'low' ? GATE_EFFORT_FLOOR : dial.effort;
+  return { model: dial.model, effort };
+}
 
 /**
  * A build/capture/revise/rebase call's own dial, plus the triage lane's on
@@ -1154,17 +1169,15 @@ export class BigService {
 
   #buildOptions(requestId: number, spec: TurnSpec, abort: AbortController): Options {
     const build = spec.phase === 'build';
-    // Triage decides what the gate reviews and grade IS the gate; neither may
-    // silently inherit an unset ambient effort — floored to 'medium' here,
-    // the single place every gate turn's options are actually assembled.
     const gate = GATE_PHASES.has(spec.phase);
-    const dial: Dial = gate ? { model: spec.dial.model, effort: spec.dial.effort ?? GATE_EFFORT_FLOOR } : spec.dial;
+    const dial = gateDial(spec.phase, spec.dial);
     const realWorktree = buildWriteBoundary(build, spec.worktreeRoot);
     return {
       cwd: spec.cwd,
       // A copy per turn: the SDK mutates the env object it is handed. A gate
-      // turn also loses its own effort/model env overrides, so the floor
-      // above cannot be undercut by a variable in the shell it was launched from.
+      // turn also loses every MODEL/EFFORT-named env override plus the ambient
+      // thinking-depth toggles (stripGateEnv) — not everything that could
+      // shape the turn, only what is known to name its own model/effort/depth.
       env: gate ? stripGateEnv(this.#env) : { ...this.#env },
       pathToClaudeCodeExecutable: this.#claudePath,
       abortController: abort,

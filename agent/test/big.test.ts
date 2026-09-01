@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { BIG_AUTO_ALLOWED, BigService, buildWriteBoundary, type SessionView } from '../src/big.js';
+import { BIG_AUTO_ALLOWED, BigService, buildWriteBoundary, gateDial, type SessionView } from '../src/big.js';
 import { BigStore } from '../src/bigstore.js';
 import { ProtocolError } from '../src/protocol.js';
 import { TRIVIA_ACK_TITLE } from '../src/triage.js';
@@ -1717,6 +1717,21 @@ describe('the model dial', () => {
     assert.equal(triageEnv.CLAUDE_CODE_EFFORT_LEVEL, undefined, 'triage must not see the ambient effort override');
     assert.equal(triageEnv.ANTHROPIC_MODEL, undefined, 'triage must not see the ambient model override');
     assert.equal(calls[calls.length - 1]?.options.effort, 'medium', 'and the turn itself never ran at low');
+  });
+
+  it('clamps an explicit low gate effort to the floor — a call-site guard is not the only thing stopping it', () => {
+    // Drives #buildOptions' clamp directly rather than through build/answer,
+    // which both refuse 'low' before ever reaching it. A regression here
+    // (e.g. reverting the clamp to `effort ?? GATE_EFFORT_FLOOR`) would pass
+    // silently through every other test in this file, since every live call
+    // site still refuses 'low' on its own — this is the one test that fails
+    // pre-fix.
+    assert.equal(gateDial('triage', { model: 'claude-sonnet-5', effort: 'low' }).effort, 'medium');
+    assert.equal(gateDial('grade', { effort: 'low' }).effort, 'medium');
+    assert.equal(gateDial('triage', { effort: undefined }).effort, 'medium', 'unset still floors, as before');
+    assert.equal(gateDial('triage', { effort: 'high' }).effort, 'high', 'above the floor passes through');
+    assert.equal(gateDial('build', { effort: 'low' }).effort, 'low', 'a non-gate phase is never clamped');
+    assert.equal(gateDial('triage', { model: 'claude-haiku-5', effort: 'low' }).model, 'claude-haiku-5', 'model untouched');
   });
 
   it('omits model and effort from SDK options when neither lane value is set', async () => {

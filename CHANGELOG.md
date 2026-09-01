@@ -11,7 +11,8 @@
   `big_grade` both refuse effort `low` and never nil-inherit an ambient one
   (defaulting to `medium`, with the shell's own `CLAUDE_CODE_EFFORT_LEVEL`
   stripped from their turns): triage decides what the comprehension gate
-  reviews, and grading IS the gate. Replaces the old, single global
+  reviews, and grading IS the gate. An unset `big_triage.model` uses
+  `big_build`'s model, not the CLI default. Replaces the old, single global
   `agent.model` setting — `setup()` now refuses that key outright.
 
 ## 2.0.0

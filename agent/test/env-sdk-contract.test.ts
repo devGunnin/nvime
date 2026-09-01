@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { describe, it } from 'node:test';
-import { GATE_ENV_VARS, STRIPPED_ENV_VARS } from '../src/env.js';
+import { GATE_ENV_VARS, GATE_THINKING_ENV_VARS, STRIPPED_ENV_VARS } from '../src/env.js';
 
 /**
  * `STRIPPED_ENV_VARS` is a hand-written list, and a hand-written list rots: the
@@ -184,5 +184,23 @@ describe('the gate env additions against the installed SDK', () => {
   it('keeps the exclusion list honest: every entry is a name still in the bundle', () => {
     const stale = [...GATE_ALLOWED_UNSTRIPPED.keys()].filter((name) => !found.includes(name));
     assert.deepEqual(stale, [], 'these were excluded against an SDK that no longer reads them');
+  });
+});
+
+/**
+ * `GATE_THINKING_ENV_VARS` names ambient vars that cut a gate turn's
+ * reasoning depth without naming a model or effort, so the MODEL/EFFORT scan
+ * above cannot see them — pinned here by hand instead. This is not a scan of
+ * the bundle for every such name (there is no single shape that would find
+ * them without also catching unrelated MCP/proxy toggles); it only proves the
+ * two names `stripGateEnv` actually strips still exist in the pinned SDK.
+ */
+describe('the gate thinking-depth strip list against the installed SDK', () => {
+  const source = readFileSync(SDK_BUNDLE, 'utf8');
+
+  it('names only variables the installed bundle actually reads', () => {
+    for (const name of GATE_THINKING_ENV_VARS) {
+      assert.ok(source.includes(name), `${name} is no longer in ${SDK_BUNDLE} — update GATE_THINKING_ENV_VARS`);
+    }
   });
 });

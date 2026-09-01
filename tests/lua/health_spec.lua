@@ -156,6 +156,20 @@ describe('health.check', function()
     ok(entry.message:find('CLI default', 1, true) ~= nil, entry.message)
   end)
 
+  it('names the gate lanes and their medium floor rather than claiming every lane is unset', function()
+    -- big_triage/big_grade ship at effort 'medium', never nil, so they never
+    -- show up in models.summary() and the blanket "CLI default" line used to
+    -- misstate exactly the two lanes a reader opens the doctor to confirm.
+    config.setup({})
+    require('nvime.models').reset_all()
+    local reported = checkhealth(healthy_world(true))
+    local entry = find(reported, 'model dial')
+    ok(entry ~= nil, vim.inspect(reported))
+    ok(entry.message:find('big_triage', 1, true) ~= nil, entry.message)
+    ok(entry.message:find('big_grade', 1, true) ~= nil, entry.message)
+    ok(entry.message:find('effort medium', 1, true) ~= nil, entry.message)
+  end)
+
   it('names the active lane and its dial once one is set', function()
     config.setup({})
     require('nvime.models').set('big_grade', 'claude-opus-5', 'high')

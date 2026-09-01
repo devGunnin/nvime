@@ -374,7 +374,11 @@ models.{lane}.model    string or nil, for each of `chat`, `edit`, `big_build`,
                        `big_intake`, `big_triage`, `big_grade`, `explain`. A
                        model id or alias (e.g. `claude-opus-5`, `haiku`); nil
                        uses the CLI's own default. Not whitelisted: any string
-                       passes through to the SDK unchanged.
+                       passes through to the SDK unchanged. `big_triage` is the
+                       exception: an unset `big_triage.model` uses `big_build`'s
+                       model, not the CLI default, so a build lane pinned to a
+                       cheaper model silently triages on it too unless
+                       `big_triage.model` is set explicitly.
 models.{lane}.effort   'low' | 'medium' | 'high' | nil. Reasoning effort for
                        that lane; nil uses the CLI default. `big_triage` and
                        `big_grade` are different: triage decides what the gate

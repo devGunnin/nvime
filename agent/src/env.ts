@@ -97,10 +97,25 @@ export function subscriptionEnv(source: Env): Env {
  */
 export const GATE_ENV_VARS = ['CLAUDE_CODE_EFFORT_LEVEL', 'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_MODEL'] as const;
 
-/** `subscriptionEnv`'s result, with the gate turn's own effort/model overrides removed too. */
+/**
+ * Ambient vars that cut a gate turn's reasoning depth without naming a model
+ * or an effort level, so they carry neither "MODEL" nor "EFFORT" and the scan
+ * behind `GATE_ENV_VARS` cannot see them. Hand-picked rather than
+ * scan-derived; `test/env-sdk-contract.test.ts` pins each name against the
+ * installed bundle so a rename or removal fails loudly instead of quietly.
+ */
+export const GATE_THINKING_ENV_VARS = ['MAX_THINKING_TOKENS', 'CLAUDE_CODE_DISABLE_THINKING'] as const;
+
+/**
+ * `subscriptionEnv`'s result, with the gate turn's own effort/model overrides
+ * (`GATE_ENV_VARS`) and thinking-depth toggles (`GATE_THINKING_ENV_VARS`)
+ * removed too. Not every variable that could shape a gate turn — only the
+ * ones known to name its own model, effort, or reasoning depth.
+ */
 export function stripGateEnv(env: Env): Env {
   const copy: Env = { ...env };
   for (const name of GATE_ENV_VARS) delete copy[name];
+  for (const name of GATE_THINKING_ENV_VARS) delete copy[name];
   return copy;
 }
 
