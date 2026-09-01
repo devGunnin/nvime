@@ -8,7 +8,6 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk';
 import {
   composePrompt,
-  renderProjectInstructionsAppend,
   stripContextSections,
   type ContextBlock,
   type ProjectInstructions,
@@ -176,8 +175,8 @@ export class ChatService {
     resume: string | undefined,
     abort: AbortController,
   ): Promise<ChatDone> {
-    const options = this.#buildOptions(params.root, resume, abort, params.projectInstructions ?? null);
-    const prompt = composePrompt(params.prompt, params.context, params.root);
+    const options = this.#buildOptions(params.root, resume, abort);
+    const prompt = composePrompt(params.prompt, params.context, params.root, params.projectInstructions ?? null);
     let sessionId = resume ?? '';
 
     try {
@@ -232,12 +231,7 @@ export class ChatService {
     throw new ProtocolError('agent_error', 'the agent stream ended without a result');
   }
 
-  #buildOptions(
-    root: string,
-    resume: string | undefined,
-    abort: AbortController,
-    projectInstructions: ProjectInstructions | null,
-  ): Options {
+  #buildOptions(root: string, resume: string | undefined, abort: AbortController): Options {
     return {
       cwd: root,
       // A copy per run: the SDK mutates the env object it is handed.
@@ -253,20 +247,12 @@ export class ChatService {
       // .claude/settings.json — whose `hooks` run shell commands and whose
       // `apiKeyHelper`/`env` re-add the credential env.ts just stripped, none
       // of them gated by the tool lists. Read-only cannot be voidable by the
-      // repo being read. CLAUDE.md/AGENTS.md come back through the append
-      // below instead, as inert prose rather than settings.
+      // repo being read. CLAUDE.md/AGENTS.md come back as an untrusted section
+      // of the user message instead (`composePrompt`) — never `systemPrompt`,
+      // which repo text must never reach.
       settingSources: [],
       ...(resume === undefined ? {} : { resume }),
       ...(this.#model === undefined ? {} : { model: this.#model }),
-      ...(projectInstructions === null
-        ? {}
-        : {
-            systemPrompt: {
-              type: 'preset',
-              preset: 'claude_code',
-              append: renderProjectInstructionsAppend(projectInstructions),
-            },
-          }),
     };
   }
 
