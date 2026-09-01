@@ -266,6 +266,16 @@ function M.open(opts)
     -- `<C-r>` in insert mode is a register put; it is the one paste route that
     -- is a single keystroke, so it gets its own refusal rather than a revert.
     bind('i', '<C-r>', refuse)
+    -- `'complete'` defaults to `.,w,b,u,t`: other windows' and every loaded
+    -- buffer's words, the diff pane included. <C-n>/<C-p> could lift one
+    -- identifier at a time out of the material under 32 chars, the paste
+    -- guard's burst threshold — never triggering it. `.` (this buffer only)
+    -- is left in: it can only offer back what the reader already typed here,
+    -- never anything from elsewhere. An empty `'complete'` was tried first —
+    -- Neovim inserts the raw <C-n> control byte instead of a no-op then.
+    vim.bo[buf].complete = '.'
+    vim.bo[buf].omnifunc = ''
+    vim.bo[buf].completefunc = ''
     local restore = block_vim_paste(buf)
     local detach = block_paste(buf, win)
     active.detach = function()
