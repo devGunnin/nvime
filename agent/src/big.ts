@@ -123,6 +123,16 @@ export const BIG_READ_DENIED = [...BIG_DENIED_TOOLS, 'Bash', 'BashOutput', 'Kill
 /** How much of a diff the triage turn is shown. Past it, triage sees a prefix. */
 export const MAX_TRIAGE_BYTES = 128 * 1024;
 
+/**
+ * How long a steered turn waits for the steer's own turn to start before it
+ * decides the build is over. Comfortably above the ~1s the CLI takes to answer
+ * a queued message, and paid once, at the end of a steered build.
+ */
+export const STEER_SETTLE_MS = 10_000;
+
+/** Why a steer is refused once its build turn has stopped reading input. */
+export const STEER_CLOSED = 'the build agent has stopped taking input — start a revision instead';
+
 export type Phase = 'intake' | 'build' | 'triage' | 'grade' | 'explain';
 
 /** The phases whose output the comprehension gate depends on: never effort 'low'. */
@@ -188,6 +198,8 @@ export interface BigServiceOptions {
    */
   steering?: SteerControl | undefined;
   runner?: BigRunner | undefined;
+  /** Overrides `STEER_SETTLE_MS`; only a test has a reason to shorten it. */
+  steerSettleMs?: number | undefined;
 }
 
 /** What the picker lists: enough to choose, without the diff or the blocks. */
@@ -275,6 +287,7 @@ export class BigService {
   readonly #emit: EmitEvent;
   readonly #steering: SteerControl | undefined;
   readonly #runner: BigRunner | undefined;
+  readonly #steerSettleMs: number;
   readonly #running = new Map<number, Run>();
   readonly #runningByKey = new Map<string, number>();
 
@@ -286,6 +299,7 @@ export class BigService {
     this.#emit = options.emit;
     this.#steering = options.steering;
     this.#runner = options.runner;
+    this.#steerSettleMs = options.steerSettleMs ?? STEER_SETTLE_MS;
   }
 
   get activeRuns(): number {
@@ -1210,48 +1224,72 @@ export class BigService {
     let sessionId = spec.resume ?? '';
     let last: TurnResult | null = null;
 
-    for await (const message of this.#sdk.query({ prompt, options })) {
-      if (message.type === 'system' && message.subtype === 'init') {
-        sessionId = message.session_id;
-        this.#emit('big.started', { id: requestId, phase: spec.phase, sessionId, model: message.model });
-      } else if (message.type === 'stream_event') {
-        const delta = textDelta(message.event);
-        if (delta !== null) this.#emit('big.delta', { id: requestId, text: delta });
-      } else if (message.type === 'assistant') {
-        if (message.error === 'authentication_failed') {
-          throw new ProtocolError(
-            'not_logged_in',
-            'claude is installed but not logged in — run `claude` in a terminal and sign in',
-          );
-        }
-        for (const call of toolCalls(message.message, spec.cwd)) {
-          this.#emit('big.tool', { id: requestId, tool: call.tool, summary: call.summary });
-        }
-      } else if (message.type === 'result') {
-        if (message.subtype !== 'success' || message.is_error) {
-          const detail = message.subtype === 'success' ? message.result : message.errors.join('; ');
-          throw new ProtocolError('agent_error', `the ${spec.phase} turn failed (${message.subtype})`, detail);
-        }
-        last = {
-          sessionId: sessionId === '' ? message.session_id : sessionId,
-          text: message.result,
-          structured: message.structured_output,
-          usage: readUsage(message.usage),
-          costUsd: message.total_cost_usd,
-        };
-        if (steering === undefined) return last;
-        // Deciding this synchronously with the result is what makes it safe: a
-        // steer cannot arrive between reading the counts and closing the queue,
-        // so nothing accepted from an editor is ever dropped unrun.
-        const owed = steering.awaitingTurn;
-        steering.noteTurn();
-        if (!owed && steering.pending === 0 && (message.queued_turn_count ?? 0) === 0) {
-          steering.close('the build has finished — start a revision instead');
+    try {
+      for await (const message of this.#sdk.query({ prompt, options })) {
+        if (message.type === 'system' && message.subtype === 'init') {
+          sessionId = message.session_id;
+          this.#emit('big.started', { id: requestId, phase: spec.phase, sessionId, model: message.model });
+        } else if (message.type === 'stream_event') {
+          const delta = textDelta(message.event);
+          if (delta !== null) this.#emit('big.delta', { id: requestId, text: delta });
+        } else if (message.type === 'assistant') {
+          if (message.error === 'authentication_failed') {
+            throw new ProtocolError(
+              'not_logged_in',
+              'claude is installed but not logged in — run `claude` in a terminal and sign in',
+            );
+          }
+          for (const call of toolCalls(message.message, spec.cwd)) {
+            this.#emit('big.tool', { id: requestId, tool: call.tool, summary: call.summary });
+          }
+        } else if (message.type === 'result') {
+          if (message.subtype !== 'success' || message.is_error) {
+            const detail = message.subtype === 'success' ? message.result : message.errors.join('; ');
+            throw new ProtocolError('agent_error', `the ${spec.phase} turn failed (${message.subtype})`, detail);
+          }
+          last = {
+            sessionId: sessionId === '' ? message.session_id : sessionId,
+            text: message.result,
+            structured: message.structured_output,
+            usage: readUsage(message.usage),
+            costUsd: message.total_cost_usd,
+          };
+          if (steering === undefined) return last;
+          this.#settleSteeredTurn(steering, message.queued_turn_count);
         }
       }
+      if (last !== null) return last;
+      throw new ProtocolError('agent_error', `the ${spec.phase} turn ended without a result`);
+    } finally {
+      // However this turn ended, it is no longer reading input. Without this a
+      // steer sent during the capture and triage that follow would be accepted
+      // by a queue nothing is behind any more.
+      steering?.close(STEER_CLOSED);
     }
-    if (last !== null) return last;
-    throw new ProtocolError('agent_error', `the ${spec.phase} turn ended without a result`);
+  }
+
+  /**
+   * Decides, at each result of a steered turn, whether the build is over.
+   *
+   * Measured against the shipped CLI rather than assumed: a message handed over
+   * mid-turn is answered by a SECOND result about a second later, and BOTH
+   * results report `queued_turn_count: 0` — the field never says "one more
+   * follows" here. Trusting it alone would end the input stream between the two
+   * and drop the steer's turn; refusing to end it until a second result arrives
+   * hangs forever in the other common case, where the agent read the steer
+   * inside the turn already running and there is no second result at all.
+   *
+   * So a turn that took a steer gets a grace window instead of a verdict: the
+   * next result cancels it, and its absence ends the build. Nothing is lost
+   * either way — a steer already handed over is in the CLI's pipe, and closing
+   * the stream flushes it rather than discarding it.
+   */
+  #settleSteeredTurn(steering: SteerControl, queued: number | undefined): void {
+    const owed = steering.awaitingTurn;
+    steering.noteTurn();
+    if (steering.pending > 0 || (queued ?? 0) > 0) return;
+    if (owed) steering.closeAfter(this.#steerSettleMs, STEER_CLOSED);
+    else steering.close(STEER_CLOSED);
   }
 
   #abortFor(requestId: number): AbortController {

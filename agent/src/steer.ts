@@ -48,14 +48,14 @@ export interface SteerSource {
  */
 export interface SteerControl extends SteerSource {
   /**
-   * A steer was handed over since the last result, so one more turn is owed.
-   * The result's own `queued_turn_count` normally says the same thing; this is
-   * the belt to its braces, because closing the stream one result too early
-   * would silently drop a steer the editor already told the user was accepted.
+   * A steer was handed over since the last result, so the turn that just ended
+   * may or may not have been the last one — see `closeAfter`.
    */
   readonly awaitingTurn: boolean;
-  /** Marks one result as seen, settling the debt for the turn it answered. */
+  /** Marks one result as seen: settles the debt, and cancels an armed close. */
   noteTurn(): void;
+  /** Closes after `ms`, unless a result arrives first. */
+  closeAfter(ms: number, reason: string): void;
   close(reason: string): void;
   readonly closed: boolean;
 }
@@ -73,6 +73,7 @@ export class SteerQueue implements SteerControl {
   readonly #waiting: SteerMessage[] = [];
   #wake: ((message: SteerMessage | null) => void) | null = null;
   #closed: string | null = null;
+  #closing: NodeJS.Timeout | null = null;
   #awaiting = false;
   #nextId = 1;
 
@@ -95,6 +96,18 @@ export class SteerQueue implements SteerControl {
 
   noteTurn(): void {
     this.#awaiting = false;
+    this.#cancelArmedClose();
+  }
+
+  closeAfter(ms: number, reason: string): void {
+    if (this.#closed !== null || this.#closing !== null) return;
+    // Unreferenced: an armed close must never be the reason a runner outlives
+    // the build it was running.
+    this.#closing = setTimeout(() => {
+      this.#closing = null;
+      this.close(reason);
+    }, ms);
+    this.#closing.unref();
   }
 
   /**
@@ -144,12 +157,19 @@ export class SteerQueue implements SteerControl {
    */
   close(reason: string): void {
     if (this.#closed !== null) return;
+    this.#cancelArmedClose();
     this.#closed = reason;
     const wake = this.#wake;
     if (wake !== null) {
       this.#wake = null;
       wake(this.#waiting.shift() ?? null);
     }
+  }
+
+  #cancelArmedClose(): void {
+    if (this.#closing === null) return;
+    clearTimeout(this.#closing);
+    this.#closing = null;
   }
 }
 
