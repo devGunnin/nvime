@@ -525,6 +525,9 @@ describe('two runners over one session', () => {
     const session = await approved();
     writeScript({ holdMs: 5_000, readyOut: join(root, 'ready') });
     const running = detached.start(1, 'build', { root: repo, id: session.id });
+    // Asserted below, but `#follow` can rarely settle it this early — mark it
+    // handled now so node:test never flags the race as unhandled rather than caught.
+    running.catch(() => undefined);
     await until('the build to start', () => existsSync(join(root, 'ready')));
 
     // What a SIGKILLed runner leaves behind is a socket path nothing is behind,
