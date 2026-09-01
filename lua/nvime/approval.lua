@@ -51,18 +51,21 @@ function M.render(request, width)
   assert(type(request) == 'table', 'approval.render needs a request')
   assert(type(width) == 'number' and width > 0, 'approval.render needs a positive width')
   local body_width = math.max(width - #INDENT, 8)
-  local lines = {
-    ' claude wants to:',
-    INDENT .. (request.summary or request.tool or 'run a tool'),
-    '',
-    ' nvime will not allow that on its own:',
-    INDENT .. (request.reason or 'outside the agreed scope'),
-    '',
-  }
-  local marks = {
-    { row = 0, col = 0, end_col = #lines[1], hl = 'NvimeLabel' },
-    { row = 3, col = 0, end_col = #lines[4], hl = 'NvimeLabel' },
-  }
+  -- Every line is pre-wrapped to the border, so the float's height in buffer
+  -- lines is also its height on screen. Without this a two-line summary
+  -- silently pushes the payload — the thing being consented to — off the
+  -- bottom of a float sized for one.
+  local lines, marks = {}, {}
+  local function section(label, body)
+    lines[#lines + 1] = label
+    marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #label, hl = 'NvimeLabel' }
+    for _, line in ipairs(text.wrap(body, body_width)) do
+      lines[#lines + 1] = INDENT .. line
+    end
+    lines[#lines + 1] = ''
+  end
+  section(' claude wants to:', request.summary or request.tool or 'run a tool')
+  section(' nvime will not allow that on its own:', request.reason or 'outside the agreed scope')
   local alerts = {}
   local detail = request.detail
   local shown = type(detail) == 'table' and type(detail.text) == 'string' and detail.text or nil
@@ -113,6 +116,21 @@ function M.render(request, width)
   return lines, alerts, marks
 end
 
+--- Rows `lines` occupies once the window has wrapped them. `render`
+--- pre-wraps, so this normally equals `#lines`; it is the backstop that keeps
+--- the payload on screen if anything ever exceeds the width anyway.
+--- @param lines string[]
+--- @param width integer
+--- @return integer
+function M.screen_rows(lines, width)
+  assert(type(width) == 'number' and width > 0, 'screen_rows needs a positive width')
+  local rows = 0
+  for _, line in ipairs(lines) do
+    rows = rows + math.max(math.ceil(vim.fn.strdisplaywidth(line) / width), 1)
+  end
+  return rows
+end
+
 --- Opens the float for `ask` and wires the approval keys to `answer`.
 local function show(ask, answer)
   local width = math.min(WIDTH, math.max(vim.o.columns - 4, 20))
@@ -133,7 +151,7 @@ local function show(ask, answer)
   vim.bo[buf].modifiable = false
   vim.bo[buf].bufhidden = 'wipe'
 
-  local height = #lines
+  local height = M.screen_rows(lines, width)
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
     width = width,

@@ -628,3 +628,34 @@ describe('the review’s own typography', function()
     ok(threads.keys_hint({ display = 'reviewing' }):find('a answer') ~= nil)
   end)
 end)
+
+describe('the grade the reader is told about', function()
+  it('clips a long verdict so the toast never stops the editor on hit-enter', function()
+    local verdict = string.rep('a long verdict sentence. ', 20)
+    local graded = {
+      blocks = {
+        block({
+          id = 'b1',
+          state = 'resolved',
+          rounds = {
+            round(88, {
+              result = {
+                grade = 88,
+                verdict = verdict,
+                hint = '',
+                followup = '',
+              },
+            }),
+          },
+        }),
+      },
+    }
+    local seen = with_notices(function()
+      threads.report_grade(graded, 'b1')
+    end)
+    eq(1, #seen)
+    ok(seen[1]:find('\n') == nil, 'one line only: ' .. seen[1])
+    ok(vim.fn.strchars(seen[1]) < vim.fn.strchars(verdict), seen[1])
+    ok(seen[1]:find('88', 1, true) ~= nil, seen[1])
+  end)
+end)

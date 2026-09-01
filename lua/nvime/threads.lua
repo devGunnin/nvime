@@ -19,6 +19,9 @@ local TREE_WIDTH = 40
 --- Chip width, so the badge highlight and the title column agree.
 local CHIP_WIDTH = 6
 
+--- The one-column left gutter both review windows are drawn with.
+local GUTTER = 1
+
 --- The chip a thread carries, its highlight, and what the reader does about it.
 local CHIPS = {
   defend = { text = 'DEFEND', hl = 'NvimeThreadDefend' },
@@ -304,7 +307,9 @@ local function status()
   if not win_valid(view.tree_win) then
     return
   end
-  local gate = shape.ellipsise(M.gate_status(view.session), TREE_WIDTH - 2)
+  -- Less the bar's own leading and trailing space, and one more: a bar that
+  -- exactly fills its window makes nvim scroll it and show a `<` instead.
+  local gate = shape.ellipsise(M.gate_status(view.session), vim.api.nvim_win_get_width(view.tree_win) - 3)
   vim.wo[view.tree_win].winbar = '%#NvimeBar# ' .. M.escape_winbar(gate) .. ' %=%#NvimeBar# '
   if not win_valid(view.pane_win) then
     return
@@ -329,8 +334,10 @@ local function draw_pane()
 end
 
 local function draw_tree()
+  -- Less the one-column gutter: a row that fills the window exactly still
+  -- wraps, and a wrapped row puts the cursor out of step with its thread.
   local width = win_valid(view.tree_win) and vim.api.nvim_win_get_width(view.tree_win) or TREE_WIDTH
-  local lines, highlights = M.tree_lines(blocks(), width)
+  local lines, highlights = M.tree_lines(blocks(), width - GUTTER)
   write(view.tree_buf, lines)
   paint(view.tree_buf, highlights)
 end
@@ -543,11 +550,20 @@ function M.report_grade(session, block_id)
     notify(last.ungraded or 'that answer was not graded — the thread stays open', vim.log.levels.WARN)
     return
   end
+  -- Clipped to one line: a grader's verdict runs to several sentences, and a
+  -- multi-line `vim.notify` stops the editor on a hit-enter prompt. The whole
+  -- text is in the thread's gate record either way.
+  local room = math.max(vim.o.columns - 24, 24)
   if block.state == 'resolved' then
-    notify(string.format('cleared (%d) — %s', last.result.grade or 0, last.result.verdict or ''))
+    notify(
+      string.format('cleared (%d) — %s', last.result.grade or 0, shape.ellipsise(last.result.verdict or '', room))
+    )
     return
   end
-  notify(string.format('%d, not enough — %s', last.result.grade or 0, last.result.hint or ''), vim.log.levels.WARN)
+  notify(
+    string.format('%d, not enough — %s', last.result.grade or 0, shape.ellipsise(last.result.hint or '', room)),
+    vim.log.levels.WARN
+  )
 end
 
 --- Brings buffers under the project root up to date with what just landed.
@@ -752,10 +768,16 @@ local function build_tab()
     vim.wo[win].number = false
     vim.wo[win].relativenumber = false
     vim.wo[win].signcolumn = 'no'
-    vim.wo[win].statuscolumn = ' '
+    vim.wo[win].statuscolumn = string.rep(' ', GUTTER)
     vim.wo[win].fillchars = 'eob: '
     vim.wo[win].winhighlight = 'CursorLine:NvimeCursorLine'
   end
+  -- The list is one row per thread, cut to fit; the pane is prose and diff.
+  vim.wo[view.tree_win].wrap = false
+  vim.wo[view.pane_win].wrap = true
+  vim.wo[view.pane_win].linebreak = true
+  vim.wo[view.pane_win].breakindent = true
+  vim.wo[view.pane_win].breakindentopt = 'shift:2'
   vim.wo[view.tree_win].cursorline = true
 
   local group = vim.api.nvim_create_augroup('NvimeThreads', { clear = true })

@@ -288,3 +288,33 @@ describe('approval.dismiss_all', function()
     eq(0, approval.queued())
   end)
 end)
+
+describe('the approval float is tall enough for what it shows', function()
+  it('wraps the summary and the reason to the border, so no line needs a second row', function()
+    local lines = approval.render({
+      approvalId = 'a1',
+      tool = 'Bash',
+      summary = 'running ' .. string.rep('find . -name "pool.py" -print ', 4),
+      reason = string.rep('shell commands are never auto-allowed here ', 4),
+      detail = { kind = 'command', text = 'echo hi', bytes = 7 },
+    }, 60)
+    for _, line in ipairs(lines) do
+      ok(vim.fn.strchars(line) <= 60, vim.fn.strchars(line) .. ': ' .. line)
+    end
+    eq(#lines, approval.screen_rows(lines, 60), 'the buffer height is the screen height')
+  end)
+
+  it('still shows the payload when the summary needed several lines', function()
+    local lines = approval.render({
+      approvalId = 'a1',
+      tool = 'Bash',
+      summary = string.rep('a wordy summary that will not fit on one line ', 5),
+      reason = 'shell is never auto-allowed',
+      detail = { kind = 'command', text = 'rm -rf /tmp/x', bytes = 13 },
+    }, 60)
+    local page = table.concat(lines, '\n')
+    ok(page:find('rm -rf /tmp/x', 1, true) ~= nil, page)
+    -- The float is opened at exactly this many rows, so the payload is on it.
+    eq(#lines, approval.screen_rows(lines, 60))
+  end)
+end)

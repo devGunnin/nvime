@@ -244,6 +244,8 @@ function M.open(opts)
   })
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
+  -- One column of gutter, so the text is not written against the border.
+  vim.wo[win].statuscolumn = ' '
   -- Cut to the border: a longer hint makes nvim scroll the bar sideways, and
   -- the reader sees the tail of the question with its start off screen.
   local hint = shape.ellipsise(opts.hint or 'type your answer', math.max(width - 2, 8))
