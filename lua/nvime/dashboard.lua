@@ -104,7 +104,13 @@ function M.render(facts, width)
   local title_width = math.max((width or WIDTH) - TITLE_COL, 12)
   -- A blank line at each end, so the page breathes inside its border.
   local lines, marks = { '', ' nvime — no vibe coding in my editor', '' }, {}
+  -- end_col < 0 means "to the end of this row's own line": resolved here to
+  -- the line's real byte length. nvim 0.11 errors on end_row given without an
+  -- end_col, even with strict=false — 0.12 silently tolerates it.
   local function mark(row, col, end_col, hl)
+    if end_col < 0 then
+      end_col = #(lines[row + 1] or '')
+    end
     marks[#marks + 1] = { row = row, col = col, end_col = end_col, hl = hl }
   end
   mark(1, 0, -1, 'NvimeHeading')
@@ -183,9 +189,12 @@ local function draw(lines, rows, marks)
   vim.bo[view.buf].modifiable = false
   vim.api.nvim_buf_clear_namespace(view.buf, NS, 0, -1)
   for _, mark in ipairs(marks or {}) do
-    vim.api.nvim_buf_set_extmark(view.buf, NS, mark.row, mark.col, {
-      end_col = mark.end_col < 0 and nil or mark.end_col,
-      end_row = mark.end_col < 0 and mark.row + 1 or nil,
+    -- Belt: a future render bug degrades to a short highlight here, never
+    -- a draw() error — clamp against the line actually written to the buffer.
+    local line_bytes = #(lines[mark.row + 1] or '')
+    local end_col = math.min(mark.end_col, line_bytes)
+    vim.api.nvim_buf_set_extmark(view.buf, NS, mark.row, math.min(mark.col, end_col), {
+      end_col = end_col,
       hl_group = mark.hl,
       strict = false,
     })

@@ -153,6 +153,19 @@ describe('the dashboard page', function()
     local page = table.concat(dashboard.render(facts({}, { build = 'missing — run npm' })), '\n')
     ok(page:match('build    missing — run npm') ~= nil, page)
   end)
+
+  it('never emits a mark past the byte length of its own line', function()
+    -- Version-independent: nvim_buf_set_extmark rejects this shape on 0.11
+    -- even with strict=false, while 0.12 silently clamps it — catch it here
+    -- regardless of which nvim is running the suite.
+    local lines, _, marks = dashboard.render(facts({ summary(), summary({ id = 'sess2', title = 'retry ceiling' }) }))
+    for _, mark in ipairs(marks) do
+      local line = lines[mark.row + 1]
+      ok(line ~= nil, 'mark row ' .. mark.row .. ' has no line')
+      ok(mark.col <= mark.end_col, 'end_col before col: ' .. vim.inspect(mark))
+      ok(mark.end_col <= #line, 'end_col past the line: ' .. vim.inspect(mark) .. ' line=' .. vim.inspect(line))
+    end
+  end)
 end)
 
 describe('the dashboard float', function()
