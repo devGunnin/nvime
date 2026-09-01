@@ -313,18 +313,48 @@ describe('reconcile', () => {
 });
 
 describe('clearCapture', () => {
-  it('nulls a pinned land attempt along with the capture it was built from', () => {
-    // A land attempt pins branch+tree from the CAPTURE it lands (bigstore.ts's
-    // `withDefaults` doc). Once a revision disowns that capture, the pin must
-    // go with it — otherwise a later, unrelated capture is judged against a
-    // land attempt that describes different content (P4 gate-reviewer LOW).
+  it('disowns the capture but leaves landAttempt untouched — callers null it deliberately', () => {
+    // clearCapture is called from both a genuine re-capture (big.ts's
+    // #captureAndTriage, which nulls landAttempt itself right beside this
+    // call) AND from `reconcile`, which runs unlocked and must never destroy
+    // the one crash-recovery pin that lets a landed-but-unrecorded merge be
+    // found again (P5 cold-review finding 3). clearCapture cannot tell which
+    // caller it is, so it leaves the pin alone and trusts the caller.
     const session = built();
     session.diffId = 'abc';
     session.diffCapturedAt = Date.now();
     session.landAttempt = { branch: 'nvime/big/old', tree: 'f'.repeat(40) };
     clearCapture(session);
-    assert.equal(session.landAttempt, null);
+    assert.deepEqual(session.landAttempt, { branch: 'nvime/big/old', tree: 'f'.repeat(40) });
     assert.equal(session.diffId, null);
+  });
+});
+
+describe('reconcile and the landAttempt crash-recovery pin', () => {
+  it('preserves a pinned land attempt when repairing a reviewing record whose diff went missing', () => {
+    // Reproduces the exact sequence from finding 3: `merge()` lands the
+    // commit and pins `landAttempt` (bigstore.ts:628-632, saved successfully
+    // as part of a still-`reviewing` record); `#afterLanding`'s own save then
+    // fails (full disk, store directory removed under a live run — the case
+    // it is written for). The on-disk record is left `reviewing`, its diff
+    // gone, with the pin intact. The next unlocked read reconciles it — and
+    // must NOT destroy the pin `#repairLandedRecord` needs to recognize the
+    // landing as this session's own on the following merge attempt.
+    const session = built();
+    session.diffCapturedAt = Date.now();
+    transition(session, 'reviewing', 'test');
+    session.landAttempt = { branch: 'nvime/big/7', tree: 'a'.repeat(40) };
+    store.save(session);
+
+    const result = reconcile(session, reality({ diffExists: false }));
+
+    assert.equal(result.changed, true);
+    assert.equal(session.state, 'triaging', 'the diff being gone still re-triages');
+    assert.deepEqual(
+      session.landAttempt,
+      { branch: 'nvime/big/7', tree: 'a'.repeat(40) },
+      'an unlocked reconcile must never wipe the crash-recovery pin — only a genuine new capture may',
+    );
   });
 });
 

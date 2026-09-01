@@ -649,15 +649,18 @@ export function diffIdOf(diff: string): string {
   return createHash('sha256').update(diff, 'utf8').digest('hex').slice(0, 32);
 }
 
-/** Disowns the capture and everything derived from it, in one place. */
+/**
+ * Disowns the capture and everything derived from it, in one place. Does NOT
+ * touch `landAttempt` — `reconcile` also calls this, outside the run lock, to
+ * repair a `reviewing` record whose diff went missing, and `landAttempt` is
+ * the one thing crash recovery needs surviving that repair. Callers that are
+ * genuinely re-capturing (a new triage, a rebase) null it themselves.
+ */
 export function clearCapture(session: BigSession): void {
   session.blocks = [];
   session.diffId = null;
   session.diffCapturedAt = null;
   session.diffBytes = 0;
-  // A pinned land attempt names a commit built from THIS capture; a revision
-  // that clears the capture must stop honoring it as "already landed".
-  session.landAttempt = null;
 }
 
 function requireId(id: string): string {

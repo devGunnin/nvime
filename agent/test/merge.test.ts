@@ -452,7 +452,10 @@ describe('a merge whose record write did not survive', () => {
     // the session still says `reviewing` with the old land attempt pinned.
     // The reader then revises the change (a new build capture), which must
     // disown that pin — otherwise the REVISED session is told it "already
-    // landed" as the stale, pre-revision commit.
+    // landed" as the stale, pre-revision commit. `clearCapture` itself no
+    // longer nulls the pin (a reconcile-holding reviewing record must keep
+    // it, P5 finding 3) — the caller genuinely re-capturing, here standing in
+    // for big.ts's `#captureAndTriage`, disowns it explicitly.
     const tree = await ownTree();
     await landDiff(landRequest({ branch: OWN_BRANCH }));
     const revised = session({
@@ -460,6 +463,7 @@ describe('a merge whose record write did not survive', () => {
       landAttempt: { branch: OWN_BRANCH, tree },
     });
     clearCapture(revised);
+    revised.landAttempt = null;
     const refusals = await checkMerge(revised, {
       diff: parseUnifiedDiff(patch()),
       counts: { total: 1, open: 0, substantial: 1, defended: 1 },

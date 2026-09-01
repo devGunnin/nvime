@@ -945,6 +945,9 @@ export class BigService {
     const base = requireBase(session);
     const previous = session.blocks;
     clearCapture(session);
+    // A pinned land attempt names a commit built from the capture just
+    // disowned; a fresh triage must stop honoring it as "already landed".
+    session.landAttempt = null;
     transition(session, 'triaging', 'capturing the diff');
     this.#emit('big.state', { id: requestId, session: session.id, state: 'triaging' });
     this.#store.save(session);
