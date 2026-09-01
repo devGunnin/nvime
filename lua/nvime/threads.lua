@@ -368,7 +368,10 @@ local function answer()
         adopt(result.session)
         M.report_grade(result.session, block.id)
       end, {
-        -- A grading round is an agent turn; <C-c> bounds it, not a timer.
+        -- A grading round is an agent turn with no bound at all: its request
+        -- id is never stored where `big.cancel` can see it, and closing the
+        -- answer box only destroys the window — the turn keeps running and
+        -- still holds the session lock. There is no <C-c> for this one.
         no_deadline = true,
       })
     end,
@@ -404,7 +407,9 @@ local function explain()
     end
     explain_ui.show(title, (result or {}).text or '')
   end, {
-    -- An agent turn; <C-c>-equivalent is closing the float, not a timer.
+    -- An agent turn with no cancel: closing the float only destroys the
+    -- window, not the request — the turn runs to completion regardless, and
+    -- other actions refuse with "already running" until it does.
     no_deadline = true,
   })
 end
