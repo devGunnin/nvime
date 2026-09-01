@@ -12,7 +12,7 @@ local M = {}
 function M.get()
   local icons = require('nvime.icons').get()
   if require('nvime.chat').is_running() then
-    return 'nvime: chat' .. icons.dot
+    return 'nvime: chat ' .. icons.busy
   end
   local edit = require('nvime.edit')
   if edit.is_running() then

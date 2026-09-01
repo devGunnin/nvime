@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { describeTool, MAX_DETAIL_BYTES, toolDetail } from '../src/stream.js';
+import { homedir } from 'node:os';
+import { describeTool, MAX_DETAIL_BYTES, shortPath, toolDetail } from '../src/stream.js';
 
 describe('toolDetail: what the user is asked to authorize', () => {
   it('carries a long command verbatim, where the summary clips it', () => {
@@ -51,5 +52,27 @@ describe('toolDetail: what the user is asked to authorize', () => {
     assert.equal(toolDetail('Glob', { pattern: '**/*.ts' }), null);
     assert.equal(toolDetail('Bash', {}), null);
     assert.equal(toolDetail('Bash', { command: '' }), null);
+  });
+});
+
+describe('shortPath: where a status line says a file is', () => {
+  it('writes a file inside the project relative to it', () => {
+    assert.equal(shortPath('/work/proj/fleet/queue.py', '/work/proj'), 'fleet/queue.py');
+    assert.equal(describeTool('Read', { file_path: '/work/proj/a/b.py' }, '/work/proj'), 'reading a/b.py');
+  });
+
+  it('never answers with a ladder of `..` for a file outside the project', () => {
+    const summary = describeTool('Read', { file_path: '/elsewhere/repo/fleet/queue.py' }, '/work/a/b/c/d/e');
+    assert.ok(!summary.includes('..'), summary);
+    assert.ok(summary.includes('/elsewhere/repo/fleet/queue.py'), summary);
+  });
+
+  it('writes a path under the home directory with a tilde', () => {
+    const home = homedir();
+    assert.equal(shortPath(`${home}/src/other/x.py`, '/work/proj'), '~/src/other/x.py');
+  });
+
+  it('leaves the project root itself readable', () => {
+    assert.equal(shortPath('/work/proj', '/work/proj'), '/work/proj');
   });
 });

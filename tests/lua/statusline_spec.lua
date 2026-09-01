@@ -51,7 +51,7 @@ describe('statusline.get', function()
         return true
       end,
     } }, function()
-      eq(('nvime: chat' .. require('nvime.icons').get().dot), statusline.get())
+      eq(('nvime: chat ' .. require('nvime.icons').get().busy), statusline.get())
     end)
   end)
 
@@ -127,7 +127,7 @@ describe('statusline.get', function()
         end,
       },
     }, function()
-      eq(('nvime: chat' .. require('nvime.icons').get().dot), statusline.get())
+      eq(('nvime: chat ' .. require('nvime.icons').get().busy), statusline.get())
     end)
   end)
 end)
@@ -147,7 +147,7 @@ describe('statusline.toggle_winbar', function()
       eq(true, on)
       ok(vim.o.winbar ~= '', 'the winbar option is set')
       local rendered = vim.api.nvim_eval_statusline(vim.o.winbar, { winid = vim.api.nvim_get_current_win() })
-      eq(('nvime: chat' .. require('nvime.icons').get().dot), rendered.str)
+      eq(('nvime: chat ' .. require('nvime.icons').get().busy), rendered.str)
 
       local off = statusline.toggle_winbar()
       eq(false, off)

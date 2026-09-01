@@ -61,16 +61,40 @@ local function win_valid(win)
   return win ~= nil and vim.api.nvim_win_is_valid(win)
 end
 
+--- How far from the last line still counts as "reading the tail".
+local FOLLOW_SLACK = 2
+
 --- Follows the tail unless the reader has scrolled up to look at something.
+---
+--- The decision is a remembered flag, not a fresh comparison of the cursor
+--- against the line count: a single delta can commit several lines at once,
+--- and re-deriving it would then see a cursor more than `FOLLOW_SLACK` behind
+--- and unpin the panel for the rest of the run. `unpin_on_move` is what puts
+--- the reader back in charge.
 local function follow(self)
-  if not win_valid(self.win) then
+  -- The window can be showing something else entirely (the user opened a file
+  -- over the panel), and its cursor is then no business of ours.
+  if not self.pinned or not win_valid(self.win) or vim.api.nvim_win_get_buf(self.win) ~= self.buf then
     return
   end
-  local last = line_count(self.buf)
-  local cursor = vim.api.nvim_win_get_cursor(self.win)[1]
-  if cursor >= last - 2 then
-    vim.api.nvim_win_set_cursor(self.win, { last, 0 })
-  end
+  vim.api.nvim_win_set_cursor(self.win, { line_count(self.buf), 0 })
+end
+
+--- Re-pins whenever the reader's cursor is back at the tail, unpins when it
+--- is not. `follow` moves the cursor itself, which lands here and re-pins.
+local function unpin_on_move(self)
+  vim.api.nvim_create_autocmd('CursorMoved', {
+    group = vim.api.nvim_create_augroup('NvimePanel:' .. self.name, { clear = true }),
+    buffer = self.buf,
+    desc = 'nvime: follow the stream only while the reader is at the tail',
+    callback = function()
+      if not win_valid(self.win) then
+        return
+      end
+      local cursor = vim.api.nvim_win_get_cursor(self.win)[1]
+      self.pinned = cursor >= line_count(self.buf) - FOLLOW_SLACK
+    end,
+  })
 end
 
 --- Highlights a completed fenced block with the real grammar for its language.
@@ -285,6 +309,9 @@ function M.open(opts)
     status_text = nil,
     status_hint = opts.status_hint,
     written = false,
+    --- Whether new output scrolls the scrollback. Cleared when the reader
+    --- scrolls up, set again when they come back to the tail.
+    pinned = true,
     spinner = nil,
     spinner_frame = 1,
     stream = nil,
@@ -308,6 +335,7 @@ function M.open(opts)
   end
   vim.bo[self.buf].modifiable = false
   open_windows(self)
+  unpin_on_move(self)
 
   if wants_prompt then
     local function submit()
