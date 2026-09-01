@@ -109,6 +109,31 @@ export interface BigTurn {
   at: number;
 }
 
+/**
+ * The detached process driving this session's build, while one is driving it.
+ *
+ * Written by the runner itself, under the same run claim as everything else it
+ * writes, and cleared when it finishes. A record that still names a runner
+ * whose claim has gone stale is exactly how "the build died" is told apart from
+ * "the build is running" — nothing here is guessed from a pid alone.
+ */
+export interface BigRunner {
+  pid: number;
+  /** The control socket. Derived, not authoritative: recorded for diagnosis. */
+  socket: string;
+  /** The append-only event log this run is writing. */
+  log: string;
+  /** `build`, `revise`, or `rebase`. */
+  what: string;
+  startedAt: number;
+  /**
+   * The secret every control frame must carry. Lives here and nowhere else —
+   * the record is 0600, so reaching the socket takes more than running as this
+   * user. Absent on a record an older sidecar wrote; then nothing can dial.
+   */
+  token: string;
+}
+
 export interface BigSession {
   version: 1;
   id: string;
@@ -132,6 +157,8 @@ export interface BigSession {
   /** Recorded at approval, moved by a rebase. Outlives the clone. */
   base: BigBase | null;
   worktree: BigWorktree | null;
+  /** The detached runner driving the build, or null when none is recorded. */
+  runner: BigRunner | null;
   /** Set once, when the change landed. Null for everything not yet merged. */
   merge: BigMerge | null;
   /** Pinned right before the current or most recent land attempt. Null before
@@ -206,6 +233,11 @@ export class BigStore {
     return join(this.dirFor(repoRoot, id), 'lock.json');
   }
 
+  /** The session's append-only build log. Survives every run, and is replayed. */
+  logPathFor(repoRoot: string, id: string): string {
+    return join(this.dirFor(repoRoot, id), 'events.ndjson');
+  }
+
   create(repoRoot: string, title: string, difficulty: Difficulty = DEFAULT_DIFFICULTY): BigSession {
     if (title.trim() === '') throw new ProtocolError('bad_request', 'a big change needs a title');
     const now = Date.now();
@@ -227,6 +259,7 @@ export class BigStore {
       gradeSessionId: null,
       base: null,
       worktree: null,
+      runner: null,
       merge: null,
       landAttempt: null,
       diffId: null,
@@ -381,6 +414,25 @@ export class BigStore {
   }
 
   /**
+   * The runner the record names, but ONLY when it is provably the one behind
+   * the live claim. Both halves are needed: a recorded runner alone proves
+   * nothing — it is deliberately left behind when one is killed, which is what
+   * makes "build died" readable — and a live claim alone could be a second
+   * Neovim. The pid is what ties the claim to the process the record names.
+   *
+   * Everything that signals a pid, or calls a build attachable, goes through
+   * here. A recycled pid cannot pass: the claim's heartbeat is checked first,
+   * and only the runner refreshes it.
+   */
+  liveRunner(session: BigSession): BigRunner | null {
+    const runner = session.runner;
+    if (runner === null) return null;
+    const lock = this.readLock(session);
+    if (lock === null || lock.pid !== runner.pid || !isLockLive(lock)) return null;
+    return runner;
+  }
+
+  /**
    * A live claim held by someone else — another editor is driving this session,
    * so it is read-only here and neither resumable nor discardable.
    */
@@ -401,6 +453,7 @@ export class BigStore {
    */
   acquireLock(session: BigSession, what: string): SessionLock {
     const path = this.lockPathFor(session.repoRoot, session.id);
+    const sessionKey = `${session.repoRoot}\0${session.id}`;
     mkdirSync(this.dirFor(session.repoRoot, session.id), { recursive: true });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const claim: BigLock = {
@@ -411,7 +464,7 @@ export class BigStore {
         startedAt: Date.now(),
         heartbeatAt: Date.now(),
       };
-      if (tryClaim(path, claim)) return confirmClaim(path, claim);
+      if (tryClaim(path, claim)) return confirmClaim(path, claim, sessionKey);
       const observed = statLockAt(path);
       if (observed !== null && observed.lock !== null && isLockLive(observed.lock)) {
         throw new ProtocolError('busy', `this big change is running in another editor (${observed.lock.what})`);
@@ -439,6 +492,9 @@ export interface BigLock {
 }
 
 export interface SessionLock {
+  /** `${repoRoot}\0${sessionId}`, matching `BigService`'s own key — the claim
+   *  is only ever valid for the one session it was taken on. */
+  sessionKey: string;
   release(): void;
 }
 
@@ -535,12 +591,12 @@ function removeIfUnchanged(path: string, expectedIno: number): void {
  * must be re-read before it is trusted, so a takeover this process lost by a
  * hair is discovered here rather than by a build running unlocked.
  */
-function confirmClaim(path: string, claim: BigLock): SessionLock {
+function confirmClaim(path: string, claim: BigLock, sessionKey: string): SessionLock {
   const held = readLockAt(path);
   if (held === null || held.owner !== claim.owner) {
     throw new ProtocolError('busy', 'this big change is being claimed by another editor');
   }
-  return heartbeat(path, claim);
+  return heartbeat(path, claim, sessionKey);
 }
 
 /**
@@ -556,7 +612,7 @@ function confirmClaim(path: string, claim: BigLock): SessionLock {
  * no expected-inode. The residual window is a takeover landing between them,
  * which needs this beat to be 15s stale (why it was reclaimed) and running now.
  */
-function heartbeat(path: string, claim: BigLock): SessionLock {
+function heartbeat(path: string, claim: BigLock, sessionKey: string): SessionLock {
   const timer = setInterval(() => {
     const held = readLockAt(path);
     if (held === null || held.owner !== claim.owner) {
@@ -578,6 +634,7 @@ function heartbeat(path: string, claim: BigLock): SessionLock {
   // The sidecar must still be able to exit while a lock is held.
   timer.unref();
   return {
+    sessionKey,
     release: () => {
       clearInterval(timer);
       // Only ours: a claim reclaimed as stale while this run was wedged now
@@ -632,6 +689,9 @@ function withDefaults(session: BigSession): BigSession {
   if (session.gradeSessionId === undefined) session.gradeSessionId = null;
   if (session.merge === undefined) session.merge = null;
   if (session.landAttempt === undefined) session.landAttempt = null;
+  // A record written before detached builds existed has no runner, which is
+  // the same thing as never having had one: nothing is driving it.
+  if (session.runner === undefined) session.runner = null;
   // The base used to live on the worktree, before it had to outlive the clone.
   const legacy = session.worktree as unknown as { baseCommit?: string; baseBranch?: string | null } | null;
   if (session.base == null && legacy?.baseCommit !== undefined) {

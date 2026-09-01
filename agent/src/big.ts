@@ -1,6 +1,13 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { EffortLevel, HookInput, HookJSONOutput, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  EffortLevel,
+  HookInput,
+  HookJSONOutput,
+  Options,
+  SDKMessage,
+  SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import {
   composeBuildPrompt,
   composeExplainPrompt,
@@ -18,13 +25,15 @@ import {
   reconcile,
   transition,
   type BigBase,
+  type BigRunner,
   type BigSession,
   type BigSpec,
   type BigState,
   type BigStore,
   type Reality,
+  type SessionLock,
 } from './bigstore.js';
-import type { EmitEvent, SdkBindings } from './chat.js';
+import type { EmitEvent } from './chat.js';
 import { dialOptions, type Dial } from './dial.js';
 import { stripGateEnv, subscriptionEnv, type Env } from './env.js';
 import {
@@ -62,6 +71,7 @@ import {
 } from './merge.js';
 import { classifyBuildTool, READ_ONLY_TOOLS, realPathOf } from './policy.js';
 import { ProtocolError } from './protocol.js';
+import { steeredPrompt, type SteerControl } from './steer.js';
 import { readUsage, textDelta, toolCalls, type RunUsage } from './stream.js';
 import {
   carryForward,
@@ -93,6 +103,12 @@ import { parseUnifiedDiff, renderForTriage, type DiffHunk, type ParsedDiff, type
  * live to see the end of comes back as "building, nobody driving", never as
  * "built". A lock file beside the record says whether that "nobody" is real,
  * because another Neovim on the same store may be the one driving it.
+ *
+ * This service does not decide WHERE it runs. In the sidecar it is one editor's
+ * build; in the detached runner (`runner.ts`) it is the same code with a steer
+ * queue and a runner identity handed in, driving a build that outlives the
+ * editor. Both go through the same turns, the same write boundary and the same
+ * gate floors — the only difference is who is watching.
  */
 
 /** Read-only, exactly as chat: intake and triage may look and nothing else. */
@@ -112,6 +128,16 @@ export const BIG_READ_DENIED = [...BIG_DENIED_TOOLS, 'Bash', 'BashOutput', 'Kill
 
 /** How much of a diff the triage turn is shown. Past it, triage sees a prefix. */
 export const MAX_TRIAGE_BYTES = 128 * 1024;
+
+/**
+ * How long a steered turn waits for the steer's own turn to start before it
+ * decides the build is over. Comfortably above the ~1s the CLI takes to answer
+ * a queued message, and paid once, at the end of a steered build.
+ */
+export const STEER_SETTLE_MS = 10_000;
+
+/** Why a steer is refused once its build turn has stopped reading input. */
+export const STEER_CLOSED = 'the build agent has stopped taking input — start a revision instead';
 
 export type Phase = 'intake' | 'build' | 'triage' | 'grade' | 'explain';
 
@@ -153,12 +179,40 @@ export const MAX_ANSWER_CHARS = 8000;
 /** The most threads one grading round may cover. Past it, answer in batches. */
 export const MAX_ANSWERS_PER_ROUND = 20;
 
+/**
+ * The SDK surface big-change mode needs. Wider than chat's on one axis only:
+ * a build turn may be driven by a stream of user messages rather than a single
+ * prompt string, which is what makes steering a running build possible.
+ */
+export interface BigSdk {
+  query: (params: {
+    prompt: string | AsyncIterable<SDKUserMessage>;
+    options?: Options;
+  }) => AsyncIterable<SDKMessage>;
+}
+
 export interface BigServiceOptions {
-  sdk: Pick<SdkBindings, 'query'>;
+  sdk: BigSdk;
   store: BigStore;
   claudePath: string;
   env: Env;
   emit: EmitEvent;
+  /**
+   * Set only in the detached runner: the queue a running build reads steers
+   * from, and the identity it records on the session while it holds the claim.
+   * Absent in the sidecar, where a build is editor-scoped and unsteerable.
+   */
+  steering?: SteerControl | undefined;
+  runner?: BigRunner | undefined;
+  /**
+   * The session's claim, already taken by the process that built this service.
+   * The runner takes it before it opens the event log, so a runner that loses
+   * the race exits without writing a byte — and then this must not take it a
+   * second time, nor drop it when the run ends.
+   */
+  heldLock?: SessionLock | undefined;
+  /** Overrides `STEER_SETTLE_MS`; only a test has a reason to shorten it. */
+  steerSettleMs?: number | undefined;
 }
 
 /** What the picker lists: enough to choose, without the diff or the blocks. */
@@ -181,6 +235,12 @@ export interface SessionView extends BigSession {
   detached: boolean;
   /** Another editor holds a live claim: read-only here, not ours to resume. */
   heldElsewhere: boolean;
+  /**
+   * The recorded detached runner is really behind the claim. Distinct from
+   * `heldElsewhere`, which cannot tell a runner from a second Neovim: a live
+   * runner is something to attach to and steer, another editor is not.
+   */
+  runnerLive: boolean;
   worktreeExists: boolean;
   hasDiff: boolean;
   counts: TriageCounts;
@@ -228,14 +288,20 @@ interface TurnSpec {
   resume: string | null;
   schema?: Record<string, unknown>;
   worktreeRoot?: string;
+  /** Present only for a build turn a runner can steer; see `steer.ts`. */
+  steering?: SteerControl | undefined;
 }
 
 export class BigService {
-  readonly #sdk: Pick<SdkBindings, 'query'>;
+  readonly #sdk: BigSdk;
   readonly #store: BigStore;
   readonly #claudePath: string;
   readonly #env: Env;
   readonly #emit: EmitEvent;
+  readonly #steering: SteerControl | undefined;
+  readonly #runner: BigRunner | undefined;
+  readonly #heldLock: SessionLock | undefined;
+  readonly #steerSettleMs: number;
   readonly #running = new Map<number, Run>();
   readonly #runningByKey = new Map<string, number>();
 
@@ -245,6 +311,10 @@ export class BigService {
     this.#claudePath = options.claudePath;
     this.#env = subscriptionEnv(options.env);
     this.#emit = options.emit;
+    this.#steering = options.steering;
+    this.#runner = options.runner;
+    this.#heldLock = options.heldLock;
+    this.#steerSettleMs = options.steerSettleMs ?? STEER_SETTLE_MS;
   }
 
   get activeRuns(): number {
@@ -406,6 +476,7 @@ export class BigService {
         resume,
         worktreeRoot: worktree.path,
         dial: { model: params.model, effort: params.effort },
+        steering: this.#steering,
       });
       session.buildSessionId = result.sessionId;
       session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
@@ -452,6 +523,7 @@ export class BigService {
         resume: session.buildSessionId,
         worktreeRoot: worktree.path,
         dial: { model: params.model, effort: params.effort },
+        steering: this.#steering,
       });
       session.buildSessionId = result.sessionId;
       session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
@@ -839,6 +911,7 @@ export class BigService {
       resume: session.buildSessionId,
       worktreeRoot: clonePath,
       dial,
+      steering: this.#steering,
     });
     session.buildSessionId = result.sessionId;
     session.conversation.push({ role: 'agent', text: result.text, at: Date.now() });
@@ -1105,11 +1178,22 @@ export class BigService {
     }
     // On disk as well as in memory: the in-process map cannot see the second
     // Neovim, which shares this store and would otherwise build in the same
-    // clone and discard the session out from under this run.
-    const lock = this.#store.acquireLock(session, what);
+    // clone and discard the session out from under this run. A runner hands
+    // its own claim in — it took one before it opened the log — and keeps it.
+    const held = this.#heldLock;
+    if (held !== undefined && held.sessionKey !== key) {
+      throw new Error(`this service's held claim is for a different session than ${key}`);
+    }
+    const lock = held ?? this.#store.acquireLock(session, what);
     const run: Run = { requestId, key, abort: new AbortController() };
     this.#running.set(requestId, run);
     this.#runningByKey.set(key, requestId);
+    // Holding the claim makes this process the record's only writer, so this is
+    // the one place the runner field is set and cleared. A sidecar run clears
+    // whatever a dead runner left behind; a runner writes its own identity, and
+    // the clear in `finally` is skipped when it is killed — which is precisely
+    // how a record ends up saying "a runner was driving this, and it is gone".
+    this.#writeRunnerField(session, this.#runner ?? null);
     try {
       return await body();
     } catch (cause) {
@@ -1117,48 +1201,115 @@ export class BigService {
     } finally {
       this.#running.delete(requestId);
       this.#runningByKey.delete(key);
-      lock.release();
+      this.#writeRunnerField(session, null);
+      if (held === undefined) lock.release();
     }
   }
 
-  /** One agent turn, streamed into the panel and reduced to its result. */
+  /**
+   * Rewrites ONLY the runner field, on the record as it stands now. A run's
+   * body re-reads and saves the record (`merge` and `answer` both do), so
+   * saving the object this call started with would silently revert their work.
+   */
+  #writeRunnerField(session: BigSession, runner: BigRunner | null): void {
+    try {
+      const held = this.#store.read(session.repoRoot, session.id);
+      if (held === null || sameRunner(held.runner, runner)) {
+        session.runner = runner;
+        return;
+      }
+      held.runner = runner;
+      this.#store.save(held);
+      session.runner = runner;
+    } catch (cause) {
+      // A store removed under a live run. The run itself will fail on its own
+      // work; swallowing this would only hide which write went first.
+      process.stderr.write(`nvime: could not record the build runner: ${messageOf(cause)}\n`);
+    }
+  }
+
+  /**
+   * One agent turn, streamed into the panel and reduced to its result.
+   *
+   * A steerable turn is the same turn driven from a stream of user messages
+   * instead of one string: each steer the SDK takes runs as a further turn, so
+   * this loop keeps the LAST result rather than returning the first, and only
+   * ends the input stream once nothing is left to deliver.
+   */
   async #turn(requestId: number, spec: TurnSpec): Promise<TurnResult> {
     const abort = this.#abortFor(requestId);
     const options = this.#buildOptions(requestId, spec, abort);
+    const steering = spec.steering;
+    const prompt = steering === undefined ? spec.prompt : steeredPrompt(spec.prompt, steering);
     let sessionId = spec.resume ?? '';
+    let last: TurnResult | null = null;
 
-    for await (const message of this.#sdk.query({ prompt: spec.prompt, options })) {
-      if (message.type === 'system' && message.subtype === 'init') {
-        sessionId = message.session_id;
-        this.#emit('big.started', { id: requestId, phase: spec.phase, sessionId, model: message.model });
-      } else if (message.type === 'stream_event') {
-        const delta = textDelta(message.event);
-        if (delta !== null) this.#emit('big.delta', { id: requestId, text: delta });
-      } else if (message.type === 'assistant') {
-        if (message.error === 'authentication_failed') {
-          throw new ProtocolError(
-            'not_logged_in',
-            'claude is installed but not logged in — run `claude` in a terminal and sign in',
-          );
+    try {
+      for await (const message of this.#sdk.query({ prompt, options })) {
+        if (message.type === 'system' && message.subtype === 'init') {
+          sessionId = message.session_id;
+          this.#emit('big.started', { id: requestId, phase: spec.phase, sessionId, model: message.model });
+        } else if (message.type === 'stream_event') {
+          const delta = textDelta(message.event);
+          if (delta !== null) this.#emit('big.delta', { id: requestId, text: delta });
+        } else if (message.type === 'assistant') {
+          if (message.error === 'authentication_failed') {
+            throw new ProtocolError(
+              'not_logged_in',
+              'claude is installed but not logged in — run `claude` in a terminal and sign in',
+            );
+          }
+          for (const call of toolCalls(message.message, spec.cwd)) {
+            this.#emit('big.tool', { id: requestId, tool: call.tool, summary: call.summary });
+          }
+        } else if (message.type === 'result') {
+          if (message.subtype !== 'success' || message.is_error) {
+            const detail = message.subtype === 'success' ? message.result : message.errors.join('; ');
+            throw new ProtocolError('agent_error', `the ${spec.phase} turn failed (${message.subtype})`, detail);
+          }
+          last = {
+            sessionId: sessionId === '' ? message.session_id : sessionId,
+            text: message.result,
+            structured: message.structured_output,
+            usage: readUsage(message.usage),
+            costUsd: message.total_cost_usd,
+          };
+          if (steering === undefined) return last;
+          this.#settleSteeredTurn(steering, message.queued_turn_count);
         }
-        for (const call of toolCalls(message.message, spec.cwd)) {
-          this.#emit('big.tool', { id: requestId, tool: call.tool, summary: call.summary });
-        }
-      } else if (message.type === 'result') {
-        if (message.subtype !== 'success' || message.is_error) {
-          const detail = message.subtype === 'success' ? message.result : message.errors.join('; ');
-          throw new ProtocolError('agent_error', `the ${spec.phase} turn failed (${message.subtype})`, detail);
-        }
-        return {
-          sessionId: sessionId === '' ? message.session_id : sessionId,
-          text: message.result,
-          structured: message.structured_output,
-          usage: readUsage(message.usage),
-          costUsd: message.total_cost_usd,
-        };
       }
+      if (last !== null) return last;
+      throw new ProtocolError('agent_error', `the ${spec.phase} turn ended without a result`);
+    } finally {
+      // However this turn ended, it is no longer reading input. Without this a
+      // steer sent during the capture and triage that follow would be accepted
+      // by a queue nothing is behind any more.
+      steering?.close(STEER_CLOSED);
     }
-    throw new ProtocolError('agent_error', `the ${spec.phase} turn ended without a result`);
+  }
+
+  /**
+   * Decides, at each result of a steered turn, whether the build is over.
+   *
+   * Measured against the shipped CLI rather than assumed: a message handed over
+   * mid-turn is answered by a SECOND result about a second later, and BOTH
+   * results report `queued_turn_count: 0` — the field never says "one more
+   * follows" here. Trusting it alone would end the input stream between the two
+   * and drop the steer's turn; refusing to end it until a second result arrives
+   * hangs forever in the other common case, where the agent read the steer
+   * inside the turn already running and there is no second result at all.
+   *
+   * So a turn that took a steer gets a grace window instead of a verdict: the
+   * next result cancels it, and its absence ends the build. Nothing is lost
+   * either way — a steer already handed over is in the CLI's pipe, and closing
+   * the stream flushes it rather than discarding it.
+   */
+  #settleSteeredTurn(steering: SteerControl, queued: number | undefined): void {
+    const owed = steering.awaitingTurn;
+    steering.noteTurn();
+    if (steering.pending > 0 || (queued ?? 0) > 0) return;
+    if (owed) steering.closeAfter(this.#steerSettleMs, STEER_CLOSED);
+    else steering.close(STEER_CLOSED);
   }
 
   #abortFor(requestId: number): AbortController {
@@ -1249,11 +1400,18 @@ export class BigService {
       display: mergeable ? 'mergeable' : session.state,
       detached: result.detached,
       heldElsewhere: result.heldElsewhere,
+      runnerLive: this.#store.liveRunner(session) !== null,
       worktreeExists: this.#store.hasWorktree(session),
       hasDiff: this.#store.hasDiff(session),
       counts,
     };
   }
+}
+
+/** Whether two runner records name the same run. Null is "nobody driving it". */
+function sameRunner(a: BigRunner | null, b: BigRunner | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.pid === b.pid && a.startedAt === b.startedAt;
 }
 
 /**

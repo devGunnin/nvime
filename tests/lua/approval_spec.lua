@@ -179,6 +179,21 @@ describe('approval: the payload the user is asked to authorize', function()
     ok(shown[alerts[1]]:find('really lands', 1, true) ~= nil, 'got: ' .. tostring(shown[alerts[1]]))
   end)
 
+  it('keeps the wide gap between the two keys — it is what makes them findable fast', function()
+    -- Pinned deliberately: the row is wrapped like every other line the sheet
+    -- builds, and a wrapper that collapses runs of spaces would silently turn
+    -- the one row a reader must scan into an ordinary sentence.
+    local lines = approval.render(request('a1'), 72)
+    local keys = nil
+    for _, line in ipairs(lines) do
+      if line:find('allow once', 1, true) ~= nil then
+        keys = line
+      end
+    end
+    ok(keys ~= nil, 'the decision row is rendered')
+    ok(keys:find('y  allow once      n  deny', 1, true) ~= nil, 'got: ' .. tostring(keys))
+  end)
+
   it('puts the destination in the float on screen, above the y/n keys', function()
     fresh()
     local frame = symlinked_out_frame()

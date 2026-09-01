@@ -8,7 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outfile=dist/index.js",
+    "build": "esbuild src/index.ts src/runner.ts --bundle --platform=node --format=esm --target=node20 --packages=external --outdir=dist",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts"
   },

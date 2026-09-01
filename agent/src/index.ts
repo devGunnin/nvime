@@ -5,6 +5,7 @@ import { BigService } from './big.js';
 import { BigStore, defaultBigRoot } from './bigstore.js';
 import { ChatService } from './chat.js';
 import { parseContextBlocks, parseProjectInstructions } from './context.js';
+import { DetachedService } from './detached.js';
 import { parseDial, parseTriageDial } from './dial.js';
 import { EditService, parseScope } from './edit.js';
 import { resolveClaudeExecutable, strippedNames } from './env.js';
@@ -80,8 +81,18 @@ function main(): void {
           emit: (event, params) => write({ event, params }),
         });
 
+  const detached =
+    big === null
+      ? null
+      : new DetachedService({
+          big,
+          store: bigStore,
+          env: process.env,
+          emit: (event, params) => write({ event, params }),
+        });
+
   const dispatcher = new Dispatcher(write);
-  registerHandlers(dispatcher, { chat, edit, big }, claudePath, store.path);
+  registerHandlers(dispatcher, { chat, edit, big, detached }, claudePath, store.path);
   readStdin(dispatcher);
 }
 
@@ -89,6 +100,7 @@ interface Services {
   chat: ChatService | null;
   edit: EditService | null;
   big: BigService | null;
+  detached: DetachedService | null;
 }
 
 /**
@@ -145,7 +157,7 @@ function registerHandlers(
   claudePath: string | null,
   storePath: string,
 ): void {
-  const { chat, edit, big } = services;
+  const { chat, edit, big, detached } = services;
   let claudeVersion: string | null = null;
 
   dispatcher.register('ping', async () => {
@@ -227,7 +239,7 @@ function registerHandlers(
     ),
   }));
 
-  registerBigHandlers(dispatcher, big);
+  registerBigHandlers(dispatcher, big, detached);
 }
 
 /**
@@ -235,7 +247,11 @@ function registerHandlers(
  * session it acts on; the sidecar holds no "current" big change, so two open
  * editors cannot disagree about which one a keystroke meant.
  */
-function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): void {
+function registerBigHandlers(
+  dispatcher: Dispatcher,
+  big: BigService | null,
+  detached: DetachedService | null,
+): void {
   dispatcher.register('big.create', async (_id, params) => ({
     session: present(big).create(
       requireAbsolutePath(params, 'root'),
@@ -278,7 +294,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
   }));
 
   dispatcher.register('big.build', async (id, params) => ({
-    session: await present(big).build(id, {
+    session: await present(detached).start(id, 'build', {
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
       ...parseDial(params),
@@ -296,7 +312,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
   }));
 
   dispatcher.register('big.revise', async (id, params) => ({
-    session: await present(big).revise(id, {
+    session: await present(detached).start(id, 'revise', {
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
       blockId: requireString(params, 'blockId'),
@@ -350,7 +366,7 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
   );
 
   dispatcher.register('big.rebase', async (id, params) => ({
-    session: await present(big).rebase(id, {
+    session: await present(detached).start(id, 'rebase', {
       root: requireAbsolutePath(params, 'root'),
       id: requireString(params, 'sessionId'),
       ...parseDial(params),
@@ -358,9 +374,53 @@ function registerBigHandlers(dispatcher: Dispatcher, big: BigService | null): vo
     }),
   }));
 
-  dispatcher.register('big.cancel', async (_id, params) => ({
-    cancelled: present(big).cancel(requireTarget(params)),
+  // Read-only: replays the build log from `after`, then follows the runner live.
+  // Long-lived, like a build — it answers when the run ends or `big.detach`
+  // lets go, so several editors can watch one build at once.
+  dispatcher.register('big.attach', async (id, params) =>
+    present(detached).attach(id, {
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+      after: optionalSeq(params, 'after'),
+    }),
+  );
+
+  dispatcher.register('big.steer', async (_id, params) =>
+    present(detached).steer({
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+      text: requireString(params, 'text'),
+    }),
+  );
+
+  dispatcher.register('big.stop', async (_id, params) =>
+    present(detached).stop({
+      root: requireAbsolutePath(params, 'root'),
+      id: requireString(params, 'sessionId'),
+    }),
+  );
+
+  dispatcher.register('big.detach', async (_id, params) => ({
+    detached: present(detached).detach(requireTarget(params)),
   }));
+
+  // A detached build has no in-process run to abort, so the runner is asked
+  // first; a build still inside this sidecar falls through to the old path.
+  dispatcher.register('big.cancel', async (_id, params) => {
+    const target = requireTarget(params);
+    if (detached !== null && (await detached.cancel(target))) return { cancelled: true };
+    return { cancelled: present(big).cancel(target) };
+  });
+}
+
+/** The `after` cursor an attach resumes from. 0 means "replay everything". */
+function optionalSeq(params: Record<string, unknown>, key: string): number {
+  const value = params[key];
+  if (value === undefined || value === null) return 0;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new ProtocolError('bad_request', `params.${key} must be an integer >= 0`);
+  }
+  return value;
 }
 
 /** The gate's difficulty, named by the plugin. Anything else is a bad request. */
