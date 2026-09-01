@@ -64,6 +64,65 @@ describe('config.setup', function()
   end)
 end)
 
+describe('the models table', function()
+  it('defaults every lane to the CLI default model, and every effort too — except the gate lanes', function()
+    local opts = config.setup(nil)
+    local gate = {}
+    for _, lane in ipairs(config.GATE_LANES) do
+      gate[lane] = true
+    end
+    for _, lane in ipairs(config.MODEL_LANES) do
+      eq(nil, opts.models[lane].model, lane)
+      if gate[lane] then
+        -- The gate lanes never nil-inherit an ambient effort: unset means
+        -- 'medium', not "whatever the CLI would otherwise pick".
+        eq('medium', opts.models[lane].effort, lane)
+      else
+        eq(nil, opts.models[lane].effort, lane)
+      end
+    end
+  end)
+
+  it('rejects the dead `agent.model` key rather than silently ignoring it', function()
+    t.throws(function()
+      config.setup({ agent = { model = 'claude-haiku-5' } })
+    end, 'agent%.model')
+    config.setup(nil)
+  end)
+
+  it('sets one lane without disturbing the others', function()
+    local opts = config.setup({ models = { big_build = { model = 'claude-opus-5', effort = 'high' } } })
+    eq('claude-opus-5', opts.models.big_build.model)
+    eq('high', opts.models.big_build.effort)
+    eq(nil, opts.models.chat.model, 'an untouched lane keeps the default')
+    config.setup(nil)
+  end)
+
+  it('takes any of the three efforts, and nothing else', function()
+    for _, effort in ipairs(config.EFFORTS) do
+      eq(effort, config.setup({ models = { chat = { effort = effort } } }).models.chat.effort)
+    end
+    t.throws(function()
+      config.setup({ models = { chat = { effort = 'xhigh' } } })
+    end, 'models%.chat%.effort')
+    t.throws(function()
+      config.setup({ models = { chat = { model = 5 } } })
+    end, 'models%.chat%.model')
+    config.setup(nil)
+  end)
+
+  it('refuses the gate lanes at effort low — grading is the gate, and triage decides what it reviews', function()
+    for _, lane in ipairs(config.GATE_LANES) do
+      t.throws(function()
+        config.setup({ models = { [lane] = { effort = 'low' } } })
+      end, lane)
+      -- medium/high still work; low is the only refused value.
+      eq('high', config.setup({ models = { [lane] = { effort = 'high' } } }).models[lane].effort)
+      config.setup(nil)
+    end
+  end)
+end)
+
 describe('the gate difficulty', function()
   it('defaults to medium, as the design fixed', function()
     config.setup()

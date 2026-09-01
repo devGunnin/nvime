@@ -68,7 +68,6 @@ describe('agent.sidecar_env', function()
     local env = agent.sidecar_env()
     eq('60000', env.NVIME_APPROVAL_TIMEOUT_MS, 'the sidecar must not invent its own approval deadline')
     eq(nil, env.NVIME_CLAUDE_PATH)
-    eq(nil, env.NVIME_MODEL)
   end)
 
   it('reaches the spawned sidecar', function()

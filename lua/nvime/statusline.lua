@@ -6,10 +6,9 @@
 --- own redraw cycle to re-evaluate it, so nothing here polls either.
 local M = {}
 
---- One line: which surface is doing something, and how far along it is.
---- Empty when nothing is worth reporting.
+--- The base status text, before any model-dial suffix is appended.
 --- @return string
-function M.get()
+local function base_status()
   local icons = require('nvime.icons').get()
   if require('nvime.chat').is_running() then
     return 'nvime: chat ' .. icons.busy
@@ -32,9 +31,39 @@ function M.get()
   return string.format('nvime: big %d/%d defended', counts.defended or 0, counts.substantial or 0)
 end
 
+--- One line: which surface is doing something, how far along it is, and (only
+--- while at least one lane is off the CLI default) which model/effort dial is
+--- active — e.g. "nvime: chat ●  big_build:opus/high". Empty when there is
+--- nothing to report and every lane is at its default.
+---
+--- Returned as plain text, `%` included unescaped: the documented call form
+--- for a user's own 'statusline' is `%{v:lua...get()}`, which does NOT
+--- re-scan its result for more `%` items — only the built-in winbar's
+--- `%{%...%}` form does that, and `M.get_for_winbar` escapes for it instead.
+--- @return string
+function M.get()
+  local status = base_status()
+  local dial = table.concat(require('nvime.models').summary(), '  ')
+  if dial == '' then
+    return status
+  end
+  if status == '' then
+    return 'nvime: ' .. dial
+  end
+  return status .. '  ' .. dial
+end
+
+--- `get()`, escaped for the built-in winbar's `%{%...%}` form, which DOES
+--- re-scan its result for more `%` items — a user-typed model name
+--- (`:Nvime model`) needs doubling before it ever reaches one.
+--- @return string
+function M.get_for_winbar()
+  return (M.get():gsub('%%', '%%%%'))
+end
+
 --- Neovim re-evaluates a `%{%...%}` winbar item on its own redraws — this is
 --- what makes the toggle event-driven with no extra timer.
-local WINBAR_EXPR = "%{%v:lua.require('nvime.statusline').get()%}"
+local WINBAR_EXPR = "%{%v:lua.require('nvime.statusline').get_for_winbar()%}"
 
 local enabled = false
 

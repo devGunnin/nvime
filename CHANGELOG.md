@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Per-mode model + reasoning-effort dial.** A new `models` config table
+  (`chat`, `edit`, `big_build`, `big_intake`, `big_triage`, `big_grade`,
+  `explain`) sets the model and effort each lane's agent turns run at; nil
+  model keeps the CLI default. `:Nvime model` layers a session-scoped override
+  on top — only the field you actually pick replaces the configured one —
+  visible in `:Nvime doctor` and appended to `statusline()`. `big_triage` and
+  `big_grade` both refuse effort `low` and never nil-inherit an ambient one
+  (defaulting to `medium`, with the shell's own `CLAUDE_CODE_EFFORT_LEVEL`
+  stripped from their turns): triage decides what the comprehension gate
+  reviews, and grading IS the gate. An unset `big_triage.model` uses
+  `big_build`'s model, not the CLI default. Replaces the old, single global
+  `agent.model` setting — `setup()` now refuses that key outright.
+
 ## 2.0.0
 
 A ground-up rewrite. v1's 32k lines of Lua, 30 commands, 8 internal lanes and

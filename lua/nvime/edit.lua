@@ -8,6 +8,7 @@ local apply = require('nvime.apply')
 local approval = require('nvime.approval')
 local config = require('nvime.config')
 local context = require('nvime.context')
+local models = require('nvime.models')
 local panel = require('nvime.panel')
 
 local M = {}
@@ -302,12 +303,15 @@ function M.send(text)
   surface():begin_stream('claude')
   surface():start_activity()
 
+  local dial = models.dial('edit')
   agent.request('edit.start', {
     root = state.root,
     prompt = text,
     scope = scope,
     sessionId = state.session_id,
     projectInstructions = context.project_instructions(state.root),
+    model = dial.model,
+    effort = dial.effort,
   }, function(err, result)
     state.request_id = nil
     approval.dismiss_all()

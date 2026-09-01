@@ -3,6 +3,7 @@ import type { HookInput, HookJSONOutput, Options, SDKMessage } from '@anthropic-
 import { ApprovalGate, DEFAULT_APPROVAL_TIMEOUT_MS } from './approvals.js';
 import type { SdkBindings } from './chat.js';
 import { composePrompt, type ContextBlock, type ProjectInstructions } from './context.js';
+import { dialOptions, type Dial } from './dial.js';
 import { subscriptionEnv, type Env } from './env.js';
 import {
   classifyTool,
@@ -59,7 +60,7 @@ export type EditScope =
   | { kind: 'file'; path: string }
   | { kind: 'selection'; path: string; startLine: number; endLine: number; text: string };
 
-export interface EditStartParams {
+export interface EditStartParams extends Dial {
   root: string;
   prompt: string;
   scope: EditScope;
@@ -95,7 +96,6 @@ export interface EditServiceOptions {
   claudePath: string;
   env: Env;
   emit: (event: string, params: Record<string, unknown>) => void;
-  model?: string | undefined;
   approvalTimeoutMs?: number | undefined;
 }
 
@@ -120,7 +120,6 @@ export class EditService {
   readonly #claudePath: string;
   readonly #env: Env;
   readonly #emit: EditServiceOptions['emit'];
-  readonly #model: string | undefined;
   readonly #gate: ApprovalGate;
   readonly #running = new Map<number, Run>();
   readonly #runningByRoot = new Map<string, number>();
@@ -132,7 +131,6 @@ export class EditService {
     this.#claudePath = options.claudePath;
     this.#env = subscriptionEnv(options.env);
     this.#emit = options.emit;
-    this.#model = options.model;
     this.#gate = new ApprovalGate(options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS);
   }
 
@@ -194,7 +192,7 @@ export class EditService {
   }
 
   async #drive(run: Run, params: EditStartParams): Promise<EditDone> {
-    const options = this.#buildOptions(run, params.sessionId);
+    const options = this.#buildOptions(run, params);
     const prompt = composeEditPrompt(params.prompt, params.scope, run.root, params.projectInstructions ?? null);
     let sessionId = params.sessionId ?? '';
 
@@ -382,7 +380,7 @@ export class EditService {
     run.approvalIds.clear();
   }
 
-  #buildOptions(run: Run, resume: string | undefined): Options {
+  #buildOptions(run: Run, params: EditStartParams): Options {
     return {
       cwd: run.root,
       // A copy per run: the SDK mutates the env object it is handed.
@@ -411,8 +409,8 @@ export class EditService {
       // section of the user message instead (`composeEditPrompt`) — never
       // `systemPrompt`, which repo text must never reach.
       settingSources: [],
-      ...(resume === undefined ? {} : { resume }),
-      ...(this.#model === undefined ? {} : { model: this.#model }),
+      ...(params.sessionId === undefined ? {} : { resume: params.sessionId }),
+      ...dialOptions(params),
     };
   }
 

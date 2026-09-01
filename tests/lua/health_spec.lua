@@ -113,16 +113,15 @@ describe('agent.sidecar_env', function()
     eq({ NVIME_APPROVAL_TIMEOUT_MS = '60000', NVIME_BIG_ROOT = agent.big_root() }, agent.sidecar_env())
   end)
 
-  it('carries the configured claude path, model and approval deadline', function()
+  it('carries the configured claude path and approval deadline', function()
     config.setup({
-      agent = { claude = '/opt/homebrew/bin/claude', model = 'claude-opus-5' },
+      agent = { claude = '/opt/homebrew/bin/claude' },
       edit = { approval_timeout_ms = 5000 },
     })
     eq({
       NVIME_APPROVAL_TIMEOUT_MS = '5000',
       NVIME_BIG_ROOT = agent.big_root(),
       NVIME_CLAUDE_PATH = '/opt/homebrew/bin/claude',
-      NVIME_MODEL = 'claude-opus-5',
     }, agent.sidecar_env())
     config.setup({})
   end)
@@ -145,6 +144,40 @@ describe('health.check', function()
     ok(find(reported, 'sidecar built') ~= nil)
     ok(find(reported, 'nvime%-agent 0%.1%.0') ~= nil, 'the ping answer is reported')
     ok(find(reported, 'claude 2%.1%.251') ~= nil)
+  end)
+
+  it('reports every lane at the CLI default when no dial is active', function()
+    config.setup({})
+    require('nvime.models').reset_all()
+    local reported = checkhealth(healthy_world(true))
+    local entry = find(reported, 'model dial')
+    ok(entry ~= nil, vim.inspect(reported))
+    eq('info', entry.level)
+    ok(entry.message:find('CLI default', 1, true) ~= nil, entry.message)
+  end)
+
+  it('names the gate lanes and their medium floor rather than claiming every lane is unset', function()
+    -- big_triage/big_grade ship at effort 'medium', never nil, so they never
+    -- show up in models.summary() and the blanket "CLI default" line used to
+    -- misstate exactly the two lanes a reader opens the doctor to confirm.
+    config.setup({})
+    require('nvime.models').reset_all()
+    local reported = checkhealth(healthy_world(true))
+    local entry = find(reported, 'model dial')
+    ok(entry ~= nil, vim.inspect(reported))
+    ok(entry.message:find('big_triage', 1, true) ~= nil, entry.message)
+    ok(entry.message:find('big_grade', 1, true) ~= nil, entry.message)
+    ok(entry.message:find('effort medium', 1, true) ~= nil, entry.message)
+  end)
+
+  it('names the active lane and its dial once one is set', function()
+    config.setup({})
+    require('nvime.models').set('big_grade', 'claude-opus-5', 'high')
+    local reported = checkhealth(healthy_world(true))
+    local entry = find(reported, 'model dial')
+    ok(entry ~= nil, vim.inspect(reported))
+    ok(entry.message:find('big_grade:claude%-opus%-5/high') ~= nil, entry.message)
+    require('nvime.models').reset('big_grade')
   end)
 
   it('probes the sidecar with the configured claude path, not a bare env', function()

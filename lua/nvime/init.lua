@@ -6,6 +6,7 @@ local chat = require('nvime.chat')
 local config = require('nvime.config')
 local edit = require('nvime.edit')
 local keymaps = require('nvime.keymaps')
+local models = require('nvime.models')
 local palette = require('nvime.palette')
 local statusline = require('nvime.statusline')
 
@@ -74,5 +75,10 @@ M.toggle_statusline = statusline.toggle_winbar
 --- node, the claude CLI, a best-effort login-file check, the sidecar build,
 --- and this repo's git identity (a big change's local merge needs one).
 M.doctor = require('nvime.doctor').open
+
+--- `:Nvime model`: pick a lane (chat/edit/big_build/big_intake/big_triage/
+--- big_grade/explain), then type/choose its model and reasoning effort — a
+--- session-scoped override on top of `models.*` from `setup()`.
+M.model = models.open
 
 return M

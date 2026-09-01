@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { BIG_AUTO_ALLOWED, BigService, buildWriteBoundary, type SessionView } from '../src/big.js';
+import { BIG_AUTO_ALLOWED, BigService, buildWriteBoundary, gateDial, type SessionView } from '../src/big.js';
 import { BigStore } from '../src/bigstore.js';
 import { ProtocolError } from '../src/protocol.js';
 import { TRIVIA_ACK_TITLE } from '../src/triage.js';
@@ -1603,5 +1603,192 @@ describe('rebasing onto a base that moved', () => {
       () => service.rebase(4, { root: repo, id: view.id }),
       (error: unknown) => error instanceof ProtocolError && /has not moved/.test(error.message),
     );
+  });
+});
+
+describe('the model dial', () => {
+  it('threads the intake lane\'s model and effort into the intake turn', async () => {
+    const created = service.create(repo, 'version flag', 'medium');
+    turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ok', spec: SPEC })] });
+    await service.intake(1, {
+      root: repo,
+      id: created.id,
+      message: 'add a --version flag',
+      model: 'claude-opus-5',
+      effort: 'high',
+    });
+    assert.equal(calls[0]?.options.model, 'claude-opus-5');
+    assert.equal(calls[0]?.options.effort, 'high');
+  });
+
+  it('threads the build lane\'s model into the build turn, and the triage turn inherits it', async () => {
+    const approvedView = await approved();
+    calls.length = 0; // drop the intake call `approved()` already made
+    scriptBuild([{ title: 'behavior', substantial: true }]);
+    // The build runs at 'high'; triage has no dial of its own, so its model
+    // follows the build but its effort must NOT — see the next test.
+    await service.build(2, { root: repo, id: approvedView.id, model: 'claude-sonnet-5', effort: 'high' });
+    assert.equal(calls[0]?.options.model, 'claude-sonnet-5', 'the build turn');
+    assert.equal(calls[0]?.options.effort, 'high', 'the build turn');
+    assert.equal(calls[1]?.options.model, 'claude-sonnet-5', 'triage defaults to the build lane\'s model');
+  });
+
+  it('never lets triage inherit a low build effort — it decides what the gate reviews', async () => {
+    // The reviewer's probe: a build lane set to 'low' (fully legal — nothing
+    // guards `big_build`) must not carry into triage, the turn that decides
+    // what `substantial` even means for the gate.
+    const approvedView = await approved();
+    calls.length = 0;
+    scriptBuild([{ title: 'behavior', substantial: true }]);
+    await service.build(2, { root: repo, id: approvedView.id, model: 'claude-sonnet-5', effort: 'low' });
+    assert.equal(calls[0]?.options.effort, 'low', 'the build turn really did run at low');
+    assert.equal(calls[1]?.options.effort, 'medium', 'triage floors to medium regardless');
+  });
+
+  it('lets an explicit triage dial override the build lane entirely', async () => {
+    const approvedView = await approved();
+    calls.length = 0;
+    scriptBuild([{ title: 'behavior', substantial: true }]);
+    await service.build(2, {
+      root: repo,
+      id: approvedView.id,
+      model: 'claude-sonnet-5',
+      effort: 'high',
+      triageModel: 'claude-haiku-5',
+      triageEffort: 'high',
+    });
+    assert.equal(calls[1]?.options.model, 'claude-haiku-5', 'triage\'s own model wins');
+    assert.equal(calls[1]?.options.effort, 'high', 'triage\'s own effort wins');
+  });
+
+  it('refuses an explicit triageEffort low before any run starts', async () => {
+    const approvedView = await approved();
+    const callsBefore = calls.length;
+    await assert.rejects(
+      service.build(2, { root: repo, id: approvedView.id, triageEffort: 'low' }),
+      (error: unknown) => error instanceof ProtocolError && error.code === 'bad_request' && /triage never runs at effort low/.test(error.message),
+    );
+    assert.equal(calls.length, callsBefore, 'the refusal never reaches the SDK');
+  });
+
+  it('defaults the grade lane\'s effort to medium rather than inheriting an unset one', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 70 }]);
+    await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'an answer' }] });
+    assert.equal(calls[calls.length - 1]?.options.effort, 'medium');
+  });
+
+  it('strips the gate turn\'s own effort/model env overrides so an ambient CLAUDE_CODE_EFFORT_LEVEL cannot undercut the floor', async () => {
+    // The reviewer's export-low probe: a shell-level effort override, which
+    // `subscriptionEnv` alone does not strip because it is not a credential.
+    const gateEnvService = new BigService({
+      sdk: { query: ({ prompt, options }: { prompt: string; options?: Options }) => {
+        calls.push({ prompt, options: options as Options });
+        const turn = turns.shift();
+        assert.ok(turn !== undefined, `no scripted turn for: ${prompt.slice(0, 60)}`);
+        return (async function* () {
+          if (turn.act !== undefined) await turn.act(options as Options);
+          for (const frame of typeof turn.frames === 'function' ? turn.frames(prompt) : turn.frames) yield frame;
+        })();
+      } },
+      store,
+      claudePath: '/usr/bin/true',
+      env: { PATH: process.env.PATH, CLAUDE_CODE_EFFORT_LEVEL: 'low', ANTHROPIC_MODEL: 'claude-haiku-5' },
+      emit: (event, params) => events.push({ event, params }),
+    });
+    const created = gateEnvService.create(repo, 'version flag', 'medium');
+    turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ok', spec: SPEC })] });
+    await gateEnvService.intake(1, { root: repo, id: created.id, message: 'go' });
+    const intakeEnv = calls[calls.length - 1]?.options.env as Record<string, string | undefined>;
+    assert.equal(intakeEnv.CLAUDE_CODE_EFFORT_LEVEL, 'low', 'a non-gate turn keeps honoring the ambient default');
+
+    const approvedGateView = await gateEnvService.approve(repo, created.id);
+    turns.push({
+      act: async (options) => {
+        const target = join(String(options.cwd), 'tool.py');
+        await useTool(options, 'Write', { file_path: target, content: 'v2\n' }, () => writeFileSync(target, 'v2\n'));
+      },
+      frames: [frames.init(), frames.result('built it')],
+    });
+    turns.push({ frames: [frames.init(), frames.result('t', { blocks: [] })] });
+    await gateEnvService.build(2, { root: repo, id: approvedGateView.id });
+    const triageEnv = calls[calls.length - 1]?.options.env as Record<string, string | undefined>;
+    assert.equal(triageEnv.CLAUDE_CODE_EFFORT_LEVEL, undefined, 'triage must not see the ambient effort override');
+    assert.equal(triageEnv.ANTHROPIC_MODEL, undefined, 'triage must not see the ambient model override');
+    assert.equal(calls[calls.length - 1]?.options.effort, 'medium', 'and the turn itself never ran at low');
+  });
+
+  it('clamps an explicit low gate effort to the floor — a call-site guard is not the only thing stopping it', () => {
+    // Drives #buildOptions' clamp directly rather than through build/answer,
+    // which both refuse 'low' before ever reaching it. A regression here
+    // (e.g. reverting the clamp to `effort ?? GATE_EFFORT_FLOOR`) would pass
+    // silently through every other test in this file, since every live call
+    // site still refuses 'low' on its own — this is the one test that fails
+    // pre-fix.
+    assert.equal(gateDial('triage', { model: 'claude-sonnet-5', effort: 'low' }).effort, 'medium');
+    assert.equal(gateDial('grade', { effort: 'low' }).effort, 'medium');
+    assert.equal(gateDial('triage', { effort: undefined }).effort, 'medium', 'unset still floors, as before');
+    assert.equal(gateDial('triage', { effort: 'high' }).effort, 'high', 'above the floor passes through');
+    assert.equal(gateDial('build', { effort: 'low' }).effort, 'low', 'a non-gate phase is never clamped');
+    assert.equal(gateDial('triage', { model: 'claude-haiku-5', effort: 'low' }).model, 'claude-haiku-5', 'model untouched');
+  });
+
+  it('omits model and effort from SDK options when neither lane value is set', async () => {
+    const created = service.create(repo, 'version flag', 'medium');
+    turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ok', spec: SPEC })] });
+    await service.intake(1, { root: repo, id: created.id, message: 'add a --version flag' });
+    assert.equal(calls[0]?.options.model, undefined);
+    assert.equal(calls[0]?.options.effort, undefined);
+  });
+
+  it('threads the grade lane\'s model and effort into the grading turn', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 70 }]);
+    await service.answer(3, {
+      root: repo,
+      id: view.id,
+      answers: [{ blockId: thread, text: 'an answer' }],
+      model: 'claude-opus-5',
+      effort: 'high',
+    });
+    const gradeCall = calls[calls.length - 1];
+    assert.equal(gradeCall?.options.model, 'claude-opus-5');
+    assert.equal(gradeCall?.options.effort, 'high');
+  });
+
+  it('refuses to grade at effort low — grading is the gate, not something to rush', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    const callsBefore = calls.length;
+    await assert.rejects(
+      service.answer(3, {
+        root: repo,
+        id: view.id,
+        answers: [{ blockId: thread, text: 'an answer' }],
+        effort: 'low',
+      }),
+      (error: unknown) => error instanceof ProtocolError && error.code === 'bad_request' && /effort low/.test(error.message),
+    );
+    assert.equal(calls.length, callsBefore, 'the refusal never reaches the SDK');
+  });
+
+  it('threads the explain lane\'s model and effort into the explain turn', async () => {
+    const view = await reviewing();
+    const thread = view.blocks[0]?.id ?? '';
+    scriptGrades([{ threadId: thread, grade: 70 }]);
+    await service.answer(3, { root: repo, id: view.id, answers: [{ blockId: thread, text: 'an answer' }] });
+    turns.push({ frames: [frames.init(), frames.result('it prints the version and exits')] });
+    await service.explain(4, {
+      root: repo,
+      id: view.id,
+      blockId: thread,
+      model: 'claude-haiku-5',
+      effort: 'low',
+    });
+    const explainCall = calls[calls.length - 1];
+    assert.equal(explainCall?.options.model, 'claude-haiku-5');
+    assert.equal(explainCall?.options.effort, 'low');
   });
 });

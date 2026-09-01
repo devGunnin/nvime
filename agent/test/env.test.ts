@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  GATE_ENV_VARS,
   STRIPPED_ENV_VARS,
   resolveClaudeExecutable,
   strippedNames,
+  stripGateEnv,
   subscriptionEnv,
 } from '../src/env.js';
 
@@ -58,6 +60,27 @@ describe('subscriptionEnv', () => {
       'ANTHROPIC_API_KEY',
     ]);
     assert.deepEqual(strippedNames({ PATH: '/usr/bin' }), []);
+  });
+});
+
+describe('stripGateEnv', () => {
+  it('removes every gate-only override by name', () => {
+    const source: Record<string, string | undefined> = { PATH: '/usr/bin' };
+    for (const name of GATE_ENV_VARS) source[name] = 'leaked';
+    const env = stripGateEnv(source);
+    for (const name of GATE_ENV_VARS) assert.equal(env[name], undefined, `${name} must not reach a gate turn`);
+  });
+
+  it('keeps the rest of the environment intact', () => {
+    const env = stripGateEnv({ PATH: '/usr/bin', HOME: '/home/x', CLAUDE_CODE_EFFORT_LEVEL: 'low' });
+    assert.equal(env.PATH, '/usr/bin');
+    assert.equal(env.HOME, '/home/x');
+  });
+
+  it('does not mutate the caller environment', () => {
+    const source = { CLAUDE_CODE_EFFORT_LEVEL: 'low' };
+    stripGateEnv(source);
+    assert.equal(source.CLAUDE_CODE_EFFORT_LEVEL, 'low');
   });
 });
 
