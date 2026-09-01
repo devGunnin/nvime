@@ -8,7 +8,7 @@ ideas.
 
 ### The shape
 
-- **Three capabilities, six commands.** Chat, Edit and Big Change behind one
+- **Three capabilities, eight commands.** Chat, Edit and Big Change behind one
   `:Nvime` entry point and a single `<leader>n` namespace. Plans, perf, critic,
   recap, the MCP server, the PR sidecar, the attribution ledger and the usage
   dashboard are all cut.
@@ -86,8 +86,10 @@ ideas.
   by whether it cleared the thread.
 - `ui.icons` picks between a plain-Unicode glyph set (no private-use Nerd Font
   codepoints) and pure ASCII.
-- Every surface is screenshot-verified in both a light and a dark background;
-  the set is committed under `assets/`.
+- Every surface is screenshot-verified against a real terminal, in both a
+  light and a dark background except the approval float (dark only) and the
+  transparent-background case (light only); the set is committed under
+  `assets/`.
 
 ### Fixed
 

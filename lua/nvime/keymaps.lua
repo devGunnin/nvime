@@ -49,6 +49,7 @@ function M.all(opts)
     { scope = 'threads', mode = 'n', lhs = ']t', desc = 'nvime: next thread' },
     { scope = 'threads', mode = 'n', lhs = '[t', desc = 'nvime: previous thread' },
     { scope = 'threads', mode = 'n', lhs = 'a', desc = 'nvime: answer this thread' },
+    { scope = 'threads', mode = 'n', lhs = 'e', desc = 'nvime: explain this thread' },
     { scope = 'threads', mode = 'n', lhs = 'r', desc = 'nvime: request changes' },
     { scope = 'threads', mode = 'n', lhs = 'X', desc = 'nvime: re-open or clear a trivial thread' },
     { scope = 'threads', mode = 'n', lhs = 'R', desc = 'nvime: rebase onto the moved base' },

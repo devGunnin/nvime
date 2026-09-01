@@ -379,7 +379,7 @@ Override any of them after `setup()` with |nvim_set_hl()|.
     NvimeFence          the fence lines around it
     NvimeInlineCode     `inline code`
     NvimeBold           **bold**
-    NvimeItalic         *italic*
+    NvimeItalic         _italic_
     NvimeDim            secondary text
     NvimeActivity       the next step a surface suggests
     NvimeError          failures and refusals
