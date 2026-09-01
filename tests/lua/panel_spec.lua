@@ -169,7 +169,7 @@ describe('panel', function()
     current():finish_stream()
     eq({ 'claude', '```lua', 'local x = 1', '```', '' }, lines())
     local code = vim.tbl_filter(function(mark)
-      return mark[4].hl_group == 'NvimeCode'
+      return mark[4].line_hl_group == 'NvimeCode'
     end, marks())
     eq(1, #code)
     panel.close(NAME)

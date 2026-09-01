@@ -60,3 +60,22 @@ describe('picker.open', function()
     eq('id-2', chosen)
   end)
 end)
+
+describe('picker highlighting', function()
+  it('dims the metadata column and marks the session already resumed', function()
+    local win = picker.open({
+      { label = '15m ago     first prompt', lead = 12, value = 'a' },
+      { label = '2h ago      second prompt', lead = 12, current = true, value = 'b' },
+    }, { on_choice = function() end })
+    local buf = vim.api.nvim_win_get_buf(win)
+    local ns = vim.api.nvim_create_namespace('nvime.picker')
+    local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
+    local groups = {}
+    for _, mark in ipairs(marks) do
+      groups[mark[4].hl_group] = (groups[mark[4].hl_group] or 0) + 1
+    end
+    eq(2, groups.NvimeDim, 'both ages are dimmed')
+    eq(1, groups.NvimeSelected, 'only the resumed session is marked')
+    vim.api.nvim_win_close(win, true)
+  end)
+end)

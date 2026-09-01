@@ -11,10 +11,12 @@
 --- panel's one-line summary is clipped, and nobody can consent to a command
 --- they were shown three quarters of.
 local keymaps = require('nvime.keymaps')
+local text = require('nvime.text')
 
 local M = {}
 
-local WIDTH = 72
+local WIDTH = 88
+local NS = vim.api.nvim_create_namespace('nvime.approval')
 
 --- Room for the two-space indent the payload is rendered with.
 local INDENT = '  '
@@ -36,26 +38,6 @@ local function close_window()
   end
 end
 
---- `text` broken into rendered lines of at most `width` characters, its own
---- newlines kept. Character-based, so a multi-byte payload is never cut in
---- half; nothing is ever elided.
---- @return string[]
-local function wrapped(text, width)
-  local out = {}
-  for _, line in ipairs(vim.split(text, '\n', { plain = true })) do
-    local total = vim.fn.strchars(line)
-    if total == 0 then
-      out[#out + 1] = ''
-    end
-    local at = 0
-    while at < total do
-      out[#out + 1] = vim.fn.strcharpart(line, at, width)
-      at = at + width
-    end
-  end
-  return out
-end
-
 --- The float's contents.
 ---
 --- The decision and its keys sit at the top, where they stay visible however
@@ -64,6 +46,7 @@ end
 --- @param width integer columns available inside the border
 --- @return string[] lines
 --- @return integer[] alerts 1-based rows to paint as errors
+--- @return table[] marks each { row = 0-based, col, end_col, hl }
 function M.render(request, width)
   assert(type(request) == 'table', 'approval.render needs a request')
   assert(type(width) == 'number' and width > 0, 'approval.render needs a positive width')
@@ -76,6 +59,10 @@ function M.render(request, width)
     INDENT .. (request.reason or 'outside the agreed scope'),
     '',
   }
+  local marks = {
+    { row = 0, col = 0, end_col = #lines[1], hl = 'NvimeLabel' },
+    { row = 3, col = 0, end_col = #lines[4], hl = 'NvimeLabel' },
+  }
   local alerts = {}
   local detail = request.detail
   local shown = type(detail) == 'table' and type(detail.text) == 'string' and detail.text or nil
@@ -85,17 +72,22 @@ function M.render(request, width)
   if type(request.path) == 'string' and request.path ~= '' and request.path ~= shown then
     lines[#lines + 1] = ' !! it really lands on:'
     alerts[#alerts + 1] = #lines
-    for _, line in ipairs(wrapped(request.path, body_width)) do
+    for _, line in ipairs(text.wrap_exact(request.path, body_width)) do
       lines[#lines + 1] = INDENT .. line
     end
     lines[#lines + 1] = ''
   end
 
   lines[#lines + 1] = ' y  allow once      n  deny'
+  -- The two keys are the only thing on this surface the reader must find fast.
+  marks[#marks + 1] = { row = #lines - 1, col = 1, end_col = 2, hl = 'NvimeKey' }
+  marks[#marks + 1] = { row = #lines - 1, col = 19, end_col = 20, hl = 'NvimeKey' }
   if shown == nil or shown == '' then
-    return lines, alerts
+    return lines, alerts, marks
   end
-  local body = wrapped(shown, body_width)
+  -- Every byte, wrapped by characters: a word wrap drops the space it broke
+  -- at, and a command is not something to show approximately.
+  local body = text.wrap_exact(shown, body_width)
   lines[#lines + 1] = string.format(
     ' the exact %s — %d line%s, %d byte%s:',
     detail.kind or 'value',
@@ -104,25 +96,39 @@ function M.render(request, width)
     detail.bytes or #shown,
     (detail.bytes or #shown) == 1 and '' or 's'
   )
+  marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #lines[#lines], hl = 'NvimeLabel' }
   if detail.truncated then
     lines[#lines + 1] = string.format(' !! TRUNCATED — nvime can only show you %d of %d bytes', #shown, detail.bytes)
     alerts[#alerts + 1] = #lines
   end
+  local first_body = #lines
   for _, line in ipairs(body) do
     lines[#lines + 1] = INDENT .. line
   end
-  return lines, alerts
+  -- A line highlight, so the payload reads as one block to the border rather
+  -- than as a ragged column that stops at each line's last character.
+  for row = first_body, #lines - 1 do
+    marks[#marks + 1] = { row = row, hl = 'NvimeCode' }
+  end
+  return lines, alerts, marks
 end
 
 --- Opens the float for `ask` and wires the approval keys to `answer`.
 local function show(ask, answer)
   local width = math.min(WIDTH, math.max(vim.o.columns - 4, 20))
-  local lines, alerts = M.render(ask.request, width)
+  local lines, alerts, marks = M.render(ask.request, width)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  local ns = vim.api.nvim_create_namespace('nvime.approval')
+  for _, mark in ipairs(marks) do
+    vim.api.nvim_buf_set_extmark(buf, NS, mark.row, mark.col or 0, {
+      end_col = mark.col ~= nil and mark.end_col or nil,
+      hl_group = mark.col ~= nil and mark.hl or nil,
+      line_hl_group = mark.col == nil and mark.hl or nil,
+      strict = false,
+    })
+  end
   for _, row in ipairs(alerts) do
-    vim.api.nvim_buf_set_extmark(buf, ns, row - 1, 0, { line_hl_group = 'NvimeError' })
+    vim.api.nvim_buf_set_extmark(buf, NS, row - 1, 0, { line_hl_group = 'NvimeError' })
   end
   vim.bo[buf].modifiable = false
   vim.bo[buf].bufhidden = 'wipe'
@@ -141,6 +147,9 @@ local function show(ask, answer)
     title_pos = 'center',
   })
   vim.wo[win].wrap = true
+  -- Prose is not pre-wrapped; the payload is, so this only ever catches the
+  -- summary and the reason, and it catches them at a space.
+  vim.wo[win].linebreak = true
   active = { win = win, buf = buf, request = ask.request, on_answer = ask.on_answer }
 
   for _, key in ipairs(keymaps.APPROVAL) do

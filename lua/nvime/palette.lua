@@ -1,21 +1,56 @@
 --- Colours come from the active colorscheme, so nvime always looks native.
---- The fallback table below is the only hardcoded colour in the plugin.
+---
+--- Only foregrounds are read. Every background nvime paints — chrome, badges,
+--- code blocks, hunk bands — is that foreground blended into the editor's own
+--- Normal background at a low alpha, so a tint is legible in a light scheme and
+--- a dark one alike, and a colorscheme that leaves `DiffAdd`'s background grey
+--- (nvim's own default does) still gets a green band for an added hunk.
 local M = {}
 
 --- Used only when a colorscheme defines none of the groups we read.
 local FALLBACK = {
   fg = '#d5d9e4',
+  bg = '#12141b',
   dim = '#8b91a5',
   accent = '#e8b45a',
   agent = '#7aa7d9',
   session = '#b294c9',
   error = '#de7681',
-  code_bg = nil,
-  add_bg = '#1f3326',
-  change_bg = '#26303f',
-  delete_bg = '#3a2226',
-  fade_bg = '#22242b',
+  ok = '#86c78c',
 }
+
+--- How far each painted background travels from Normal's toward its colour.
+local ALPHA = {
+  surface = 0.07,
+  badge = 0.20,
+  code = 0.05,
+  hunk = 0.16,
+  fade = 0.05,
+}
+
+--- @param hex string '#rrggbb'
+--- @return integer, integer, integer
+local function channels(hex)
+  local value = tonumber(hex:sub(2), 16)
+  return math.floor(value / 65536) % 256, math.floor(value / 256) % 256, value % 256
+end
+
+--- `colour` mixed `amount` of the way into `onto`.
+--- @param colour string '#rrggbb'
+--- @param onto string '#rrggbb'
+--- @param amount number 0..1
+--- @return string '#rrggbb'
+function M.blend(colour, onto, amount)
+  assert(type(colour) == 'string' and #colour == 7, 'blend needs a #rrggbb colour')
+  assert(type(onto) == 'string' and #onto == 7, 'blend needs a #rrggbb base')
+  assert(type(amount) == 'number' and amount >= 0 and amount <= 1, 'blend amount must be 0..1')
+  local cr, cg, cb = channels(colour)
+  local br, bg, bb = channels(onto)
+  local function mix(a, b)
+    return math.floor(b + (a - b) * amount + 0.5)
+  end
+  return string.format('#%02x%02x%02x', mix(cr, br), mix(cg, bg), mix(cb, bb))
+end
 
 --- First group in `names` that defines `attr`, as a "#rrggbb" string.
 local function pick(names, attr)
@@ -29,34 +64,47 @@ local function pick(names, attr)
 end
 
 --- Resolves the palette from the current colorscheme.
---- @return table<string,string|nil>
+--- @return table<string,string>
 function M.resolve()
-  return {
-    fg = pick({ 'Normal' }, 'fg') or FALLBACK.fg,
+  local fg = pick({ 'Normal' }, 'fg') or FALLBACK.fg
+  local bg = pick({ 'Normal' }, 'bg') or FALLBACK.bg
+  local p = {
+    fg = fg,
+    bg = bg,
     dim = pick({ 'Comment', 'NonText' }, 'fg') or FALLBACK.dim,
     accent = pick({ 'DiagnosticWarn', 'Title', 'Special' }, 'fg') or FALLBACK.accent,
     agent = pick({ 'DiagnosticInfo', 'Function', 'DiffChange' }, 'fg') or FALLBACK.agent,
     session = pick({ 'DiagnosticHint', 'Identifier', 'DiffAdd' }, 'fg') or FALLBACK.session,
-    error = pick({ 'DiagnosticError', 'ErrorMsg', 'DiffDelete' }, 'fg') or FALLBACK.error,
-    code = pick({ 'String', 'Constant' }, 'fg') or FALLBACK.fg,
-    code_bg = pick({ 'CursorLine', 'ColorColumn' }, 'bg') or FALLBACK.code_bg,
-    -- Hunk backgrounds come from the colorscheme's own diff groups, so a live
-    -- edit reads the same as `:diffthis` does in that theme.
-    add_bg = pick({ 'DiffAdd', 'DiffAdded' }, 'bg') or FALLBACK.add_bg,
-    change_bg = pick({ 'DiffChange', 'DiffText' }, 'bg') or FALLBACK.change_bg,
-    delete_bg = pick({ 'DiffDelete', 'DiffRemoved' }, 'bg') or FALLBACK.delete_bg,
-    fade_bg = pick({ 'CursorLine', 'ColorColumn' }, 'bg') or FALLBACK.fade_bg,
+    error = pick({ 'DiagnosticError', 'ErrorMsg' }, 'fg') or FALLBACK.error,
+    -- Diff foregrounds, not backgrounds: many schemes (nvim's default among
+    -- them) give the diff groups a neutral grey background that says nothing.
+    added = pick({ 'Added', 'diffAdded', 'DiagnosticOk', 'String' }, 'fg') or FALLBACK.ok,
+    changed = pick({ 'Changed', 'diffChanged', 'DiagnosticInfo', 'Function' }, 'fg') or FALLBACK.agent,
+    removed = pick({ 'Removed', 'diffRemoved', 'DiagnosticError', 'ErrorMsg' }, 'fg') or FALLBACK.error,
+    code = pick({ 'String', 'Constant' }, 'fg') or fg,
   }
+  p.surface = M.blend(p.fg, bg, ALPHA.surface)
+  p.code_bg = M.blend(p.fg, bg, ALPHA.code)
+  p.fade_bg = M.blend(p.fg, bg, ALPHA.fade)
+  p.add_bg = M.blend(p.added, bg, ALPHA.hunk)
+  p.change_bg = M.blend(p.changed, bg, ALPHA.hunk)
+  p.delete_bg = M.blend(p.removed, bg, ALPHA.hunk)
+  return p
 end
 
 --- nvime's own highlight groups, defined from the resolved palette.
-local function groups(p)
+--- @param p table a resolved palette
+--- @return table<string, table>
+function M.groups(p)
+  local badge = function(colour)
+    return { fg = colour, bg = M.blend(colour, p.bg, ALPHA.badge), bold = true }
+  end
   return {
     NvimeUser = { fg = p.accent, bold = true },
     NvimeAgent = { fg = p.agent, bold = true },
     NvimeHeading = { fg = p.accent, bold = true },
     NvimeCode = { fg = p.code, bg = p.code_bg },
-    NvimeFence = { fg = p.dim },
+    NvimeFence = { fg = p.dim, bg = p.code_bg },
     NvimeInlineCode = { fg = p.code },
     NvimeBold = { bold = true },
     NvimeItalic = { italic = true },
@@ -65,11 +113,26 @@ local function groups(p)
     NvimeError = { fg = p.error },
     NvimeSession = { fg = p.session },
     NvimeSelected = { fg = p.accent, bold = true },
+    -- Chrome: a winbar reads as a bar, not as another line of scrollback.
+    NvimeBar = { fg = p.session, bg = p.surface, bold = true },
+    NvimeBarDim = { fg = p.dim, bg = p.surface },
+    NvimeBarKey = { fg = p.accent, bg = p.surface, bold = true },
+    NvimeCursorLine = { bg = p.surface },
+    -- Labels sit left of the value they name and must not compete with it.
+    NvimeLabel = { fg = p.dim },
+    NvimeKey = { fg = p.accent, bold = true },
+    NvimeOk = { fg = p.added, bold = true },
+    NvimeWarn = { fg = p.accent, bold = true },
+    -- Changeset rows: the file, then what changed in it.
+    NvimeFile = { fg = p.fg, bold = true },
+    NvimeAdded = { fg = p.added },
+    NvimeChanged = { fg = p.changed },
+    NvimeRemoved = { fg = p.removed },
     -- Big change review: the chip a thread carries in the list.
-    NvimeThreadDefend = { fg = p.error, bold = true },
-    NvimeThreadClear = { fg = p.session, bold = true },
-    NvimeThreadAuto = { fg = p.dim },
-    NvimeThreadOpen = { fg = p.accent, bold = true },
+    NvimeThreadDefend = badge(p.error),
+    NvimeThreadClear = badge(p.added),
+    NvimeThreadAuto = { fg = p.dim, bg = p.surface },
+    NvimeThreadOpen = badge(p.accent),
     -- Live edit: a fresh hunk, then the dimmer group it fades through.
     NvimeEditAdd = { bg = p.add_bg },
     NvimeEditChange = { bg = p.change_bg },
@@ -81,7 +144,7 @@ end
 --- (Re)defines nvime's highlight groups from the active colorscheme.
 function M.apply()
   local palette = M.resolve()
-  for name, spec in pairs(groups(palette)) do
+  for name, spec in pairs(M.groups(palette)) do
     vim.api.nvim_set_hl(0, name, spec)
   end
   return palette

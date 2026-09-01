@@ -4,9 +4,11 @@
 --- Deliberately not `vim.fn.input`: that blocks the editor and cannot be left
 --- half-written. This is an ordinary modifiable buffer in a float, so the user
 --- can edit, undo and abandon it like any other text.
+local shape = require('nvime.text')
+
 local M = {}
 
-local WIDTH = 72
+local WIDTH = 88
 local HEIGHT = 6
 
 --- A single change that adds more than this many CHARACTERS is a paste, not
@@ -226,6 +228,7 @@ function M.open(opts)
   vim.bo[buf].bufhidden = 'wipe'
   vim.bo[buf].filetype = 'markdown'
 
+  local keys = opts.no_paste and ' typed only · <CR> send · <Esc> cancel ' or ' <CR> send · <Esc> cancel '
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
     width = width,
@@ -234,11 +237,17 @@ function M.open(opts)
     col = math.max(math.floor((vim.o.columns - width) / 2), 0),
     style = 'minimal',
     border = 'rounded',
-    title = opts.title or ' nvime ',
+    title = shape.ellipsise(opts.title or ' nvime ', width - 2),
     title_pos = 'center',
+    footer = keys,
+    footer_pos = 'right',
   })
   vim.wo[win].wrap = true
-  vim.wo[win].winbar = '%#NvimeDim#' .. (opts.hint or '<CR> send · <Esc> cancel')
+  vim.wo[win].linebreak = true
+  -- Cut to the border: a longer hint makes nvim scroll the bar sideways, and
+  -- the reader sees the tail of the question with its start off screen.
+  local hint = shape.ellipsise(opts.hint or 'type your answer', math.max(width - 2, 8))
+  vim.wo[win].winbar = '%#NvimeBarDim# ' .. hint:gsub('%%', '%%%%') .. ' %=%#NvimeBarDim# '
   active = { win = win, buf = buf }
 
   local function submit()

@@ -283,9 +283,12 @@ function M.pick_session()
     end
     local items = {}
     for _, session in ipairs(result.sessions or {}) do
-      local marker = session.sessionId == result.current and '* ' or '  '
       items[#items + 1] = {
-        label = string.format('%s%-12s %s', marker, age(session.lastModified), session.title),
+        -- The age is metadata, the prompt is the thing being chosen: the
+        -- picker dims the first `lead` cells and leaves the title alone.
+        label = string.format('%-10s  %s', age(session.lastModified), session.title),
+        lead = 12,
+        current = session.sessionId == result.current,
         value = session.sessionId,
       }
     end

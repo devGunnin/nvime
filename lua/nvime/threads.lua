@@ -9,11 +9,15 @@
 --- the next answer has to address. There is no override, and `M` will not
 --- merge while anything is open.
 local agent = require('nvime.agent')
+local shape = require('nvime.text')
 
 local M = {}
 
 local NS = vim.api.nvim_create_namespace('nvime.threads')
 local TREE_WIDTH = 40
+
+--- Chip width, so the badge highlight and the title column agree.
+local CHIP_WIDTH = 6
 
 --- The chip a thread carries, its highlight, and what the reader does about it.
 local CHIPS = {
@@ -48,22 +52,31 @@ function M.chip(block)
   return block.state == 'open' and CHIPS.reopened or CHIPS.auto
 end
 
---- The thread list as it is drawn.
+--- The thread list as it is drawn. Titles are cut, never wrapped: a wrapped
+--- title would put the row a keystroke acts on out of step with the cursor.
 --- @param blocks table[]
+--- @param width integer|nil columns the list is drawn in
 --- @return string[] lines
---- @return table[] highlights, each { row = 0-based, hl = group }
-function M.tree_lines(blocks)
+--- @return table[] highlights, each { row = 0-based, col, end_col, hl }
+function M.tree_lines(blocks, width)
   assert(type(blocks) == 'table', 'threads.tree_lines needs a block list')
   local lines, highlights = {}, {}
   for index, block in ipairs(blocks) do
     local chip = M.chip(block)
     local files = #(block.files or {})
     local suffix = files > 1 and string.format(' (%d files)', files) or ''
-    lines[#lines + 1] = string.format('%s %s%s', chip.text, block.title, suffix)
-    highlights[#highlights + 1] = { row = index - 1, hl = chip.hl }
+    local room = (width or TREE_WIDTH) - CHIP_WIDTH - 1 - #suffix
+    local title = width == nil and block.title or shape.ellipsise(block.title, math.max(room, 8))
+    lines[#lines + 1] = string.format('%s %s%s', chip.text, title, suffix)
+    highlights[#highlights + 1] = { row = index - 1, col = 0, end_col = CHIP_WIDTH, hl = chip.hl }
+    if suffix ~= '' then
+      local at = #lines[#lines] - #suffix
+      highlights[#highlights + 1] = { row = index - 1, col = at, end_col = at + #suffix, hl = 'NvimeDim' }
+    end
   end
   if #lines == 0 then
     lines[1] = 'nothing changed in this build.'
+    highlights[1] = { row = 0, col = 0, end_col = #lines[1], hl = 'NvimeDim' }
   end
   return lines, highlights
 end
@@ -84,69 +97,129 @@ function M.followup(block)
   return question
 end
 
+--- The `you · ` prefix, and the indent its continuation lines align under.
+--- Cells, not bytes: the separator is multi-byte and a byte-count indent puts
+--- the continuation a column off from the text it belongs to.
+local SPEAKER = 'you · '
+local CONTINUE = string.rep(' ', vim.fn.strdisplaywidth(SPEAKER))
+
 --- The gate's record for one thread: every answer and what came back.
+---
+--- The speaker is named once per answer, not once per line — a six-line
+--- defense used to arrive as six `you ·` labels stacked down the margin.
 --- @param block table
---- @return string[]
+--- @return string[] lines
+--- @return table[] marks each { row = 0-based within these lines, col, end_col, hl }
 function M.gate_lines(block)
   local rounds = (block or {}).rounds or {}
   if #rounds == 0 then
-    return {}
+    return {}, {}
   end
-  local lines = { '', '── the gate ──' }
-  for _, round in ipairs(rounds) do
-    for _, line in ipairs(vim.split(round.answer or '', '\n', { plain = true })) do
-      lines[#lines + 1] = 'you · ' .. line
+  local cleared = (block or {}).state ~= 'open'
+  local lines, marks = { '', '── the gate ──' }, {}
+  local function mark(col, end_col, hl)
+    marks[#marks + 1] = { row = #lines - 1, col = col, end_col = end_col, hl = hl }
+  end
+  mark(0, #lines[2], 'NvimeDim')
+
+  for index, round in ipairs(rounds) do
+    for at, line in ipairs(vim.split(round.answer or '', '\n', { plain = true })) do
+      lines[#lines + 1] = (at == 1 and SPEAKER or CONTINUE) .. line
+      if at == 1 then
+        mark(0, #SPEAKER, 'NvimeUser')
+      end
     end
     if round.result == nil then
       lines[#lines + 1] = '  ! ' .. (round.ungraded or 'this answer was not graded')
+      mark(0, #lines[#lines], 'NvimeError')
       lines[#lines + 1] = '  the thread stays open — answer again'
+      mark(0, #lines[#lines], 'NvimeDim')
     else
-      lines[#lines + 1] = string.format('  %d · %s', round.result.grade or 0, round.result.verdict or '')
-      if round.result.hint ~= nil and round.result.hint ~= '' then
-        lines[#lines + 1] = '  hint: ' .. round.result.hint
-      end
-      if round.result.followup ~= nil and round.result.followup ~= '' then
-        lines[#lines + 1] = '  next: ' .. round.result.followup
+      local grade = string.format('  %d', round.result.grade or 0)
+      lines[#lines + 1] = string.format('%s · %s', grade, round.result.verdict or '')
+      -- Green only for the round that actually cleared the thread; every
+      -- other score is a score that was not enough.
+      mark(0, #grade, (cleared and index == #rounds) and 'NvimeOk' or 'NvimeWarn')
+      mark(#grade, #lines[#lines], 'NvimeDim')
+      for _, entry in ipairs({ { 'hint: ', round.result.hint }, { 'next: ', round.result.followup } }) do
+        if entry[2] ~= nil and entry[2] ~= '' then
+          lines[#lines + 1] = '  ' .. entry[1] .. entry[2]
+          mark(0, 2 + #entry[1], 'NvimeDim')
+        end
       end
     end
     lines[#lines + 1] = ''
   end
-  return lines
+  return lines, marks
+end
+
+--- The tinted band one raw diff line earns, or nil for context and headers.
+--- A `+++`/`---` header is not a changed line, and colouring it as one is how
+--- a diff view ends up with a red banner over every file it shows.
+--- @param line string
+--- @return string|nil highlight group
+function M.hunk_band(line)
+  local head, next_char = line:sub(1, 1), line:sub(2, 2)
+  if next_char == head then
+    return nil
+  end
+  if head == '+' then
+    return 'NvimeEditAdd'
+  end
+  if head == '-' then
+    return 'NvimeEditDelete'
+  end
+  return nil
 end
 
 --- The hunks of one thread, sliced out of the captured diff, then its gate.
 --- @param block table
---- @return string[]
+--- @return string[] lines
+--- @return table[] marks each { row = 0-based, col, end_col, hl }
 function M.pane_lines(block)
   if block == nil then
-    return { 'no thread selected.' }
+    return { 'no thread selected.' }, { { row = 0, col = 0, end_col = 19, hl = 'NvimeDim' } }
   end
   local lines = { block.title, '' }
+  local marks = { { row = 0, col = 0, end_col = #block.title, hl = 'NvimeHeading' } }
   if block.rationale ~= nil and block.rationale ~= '' then
     lines = { block.title, '# ' .. block.rationale, '' }
+    marks[#marks + 1] = { row = 1, col = 0, end_col = #lines[2], hl = 'NvimeDim' }
   end
   local shown_file = nil
   for _, id in ipairs(block.hunkIds or {}) do
     local hunk = view.hunks[id]
     if hunk == nil then
       lines[#lines + 1] = '(hunk ' .. id .. ' is not in the captured diff)'
+      marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #lines[#lines], hl = 'NvimeError' }
     else
       if hunk.file ~= shown_file then
         shown_file = hunk.file
         lines[#lines + 1] = '--- ' .. hunk.file
+        marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #lines[#lines], hl = 'NvimeFile' }
       end
       if hunk.note ~= nil then
         lines[#lines + 1] = hunk.note
       else
         for at = hunk.offset + 1, hunk.offset + hunk.lineCount do
-          lines[#lines + 1] = view.diff_lines[at] or ''
+          local line = view.diff_lines[at] or ''
+          lines[#lines + 1] = line
+          local band = M.hunk_band(line)
+          if band ~= nil then
+            marks[#marks + 1] = { row = #lines - 1, hl = band }
+          end
         end
       end
       lines[#lines + 1] = ''
     end
   end
-  vim.list_extend(lines, M.gate_lines(block))
-  return lines
+  local gate, gate_marks = M.gate_lines(block)
+  local offset = #lines
+  vim.list_extend(lines, gate)
+  for _, mark in ipairs(gate_marks) do
+    marks[#marks + 1] = { row = mark.row + offset, col = mark.col, end_col = mark.end_col, hl = mark.hl }
+  end
+  return lines, marks
 end
 
 local function blocks()
@@ -194,40 +267,72 @@ function M.gate_status(session)
   return string.format('%s · M merges into your branch', defended)
 end
 
+--- What the reader can press, given where the review is. A landed change
+--- offers none of the review keys — they would all refuse.
+--- @param session table|nil
+--- @return string
+function M.keys_hint(session)
+  if (session or {}).display == 'merged' then
+    return '<CR> open a file · q close'
+  end
+  -- `R rebase` is deliberately absent: it only applies once the base has
+  -- moved, and the merge refusal names it at exactly that moment.
+  return 'a answer · e explain · r changes · X re-open · ]t/[t · M merge'
+end
+
+local function paint(buf, marks)
+  if buf == nil or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
+  for _, mark in ipairs(marks or {}) do
+    -- No column pair means the whole rendered line, window width included —
+    -- what makes a diff band a band rather than a ragged stripe.
+    vim.api.nvim_buf_set_extmark(buf, NS, mark.row, mark.col or 0, {
+      end_col = mark.col ~= nil and mark.end_col or nil,
+      hl_group = mark.col ~= nil and mark.hl or nil,
+      line_hl_group = mark.col == nil and mark.hl or nil,
+      priority = mark.col == nil and 90 or nil,
+      strict = false,
+    })
+  end
+end
+
+--- The two bars. The gate's count goes on the narrow tree, where it always
+--- fits; the change's own name goes on the wide pane, where it does.
 local function status()
   if not win_valid(view.tree_win) then
     return
   end
-  local title = M.escape_winbar((view.session or {}).title or 'big change')
-  vim.wo[view.tree_win].winbar =
-    string.format('%%#NvimeSession#%s · %s', title, M.escape_winbar(M.gate_status(view.session)))
-  if win_valid(view.pane_win) then
-    vim.wo[view.pane_win].winbar =
-      '%#NvimeDim#a answer · e explain · r request changes · X re-open · R rebase · ]t/[t · M merge'
+  local gate = shape.ellipsise(M.gate_status(view.session), TREE_WIDTH - 2)
+  vim.wo[view.tree_win].winbar = '%#NvimeBar# ' .. M.escape_winbar(gate) .. ' %=%#NvimeBar# '
+  if not win_valid(view.pane_win) then
+    return
   end
+  local keys = M.keys_hint(view.session)
+  local room = vim.api.nvim_win_get_width(view.pane_win) - vim.fn.strdisplaywidth(keys) - 3
+  local title = shape.ellipsise((view.session or {}).title or 'big change', math.max(room, 12))
+  vim.wo[view.pane_win].winbar = '%#NvimeBar# '
+    .. M.escape_winbar(title)
+    .. ' %=%#NvimeBarDim#'
+    .. M.escape_winbar(keys)
+    .. ' '
 end
 
 local function draw_pane()
-  write(view.pane_buf, M.pane_lines(current_block()))
+  local lines, marks = M.pane_lines(current_block())
+  write(view.pane_buf, lines)
+  paint(view.pane_buf, marks)
   if win_valid(view.pane_win) then
     pcall(vim.api.nvim_win_set_cursor, view.pane_win, { 1, 0 })
   end
 end
 
 local function draw_tree()
-  local lines, highlights = M.tree_lines(blocks())
+  local width = win_valid(view.tree_win) and vim.api.nvim_win_get_width(view.tree_win) or TREE_WIDTH
+  local lines, highlights = M.tree_lines(blocks(), width)
   write(view.tree_buf, lines)
-  if view.tree_buf == nil or not vim.api.nvim_buf_is_valid(view.tree_buf) then
-    return
-  end
-  vim.api.nvim_buf_clear_namespace(view.tree_buf, NS, 0, -1)
-  for _, span in ipairs(highlights) do
-    vim.api.nvim_buf_set_extmark(view.tree_buf, NS, span.row, 0, {
-      end_col = 6,
-      hl_group = span.hl,
-      strict = false,
-    })
-  end
+  paint(view.tree_buf, highlights)
 end
 
 --- Redraws both panes and the status. Selection is clamped, never dangling.
@@ -310,7 +415,7 @@ local function request_changes()
   end
   require('nvime.compose').open({
     title = ' request changes · ' .. block.title .. ' ',
-    hint = '<CR> send (i_<C-s>) · <Esc> cancel',
+    hint = 'what should change, and why?',
     on_submit = function(comment)
       notify('revising the change — this runs for as long as it takes')
       agent.request('big.revise', {
@@ -351,7 +456,7 @@ local function answer()
   local followup = M.followup(block)
   require('nvime.compose').open({
     title = ' defend · ' .. block.title .. ' ',
-    hint = followup ~= nil and ('follow-up: ' .. followup) or 'what does this change do, and why? · paste is blocked',
+    hint = followup ~= nil and ('follow-up: ' .. followup) or 'what does this change do, and why?',
     no_paste = true,
     height = 10,
     on_submit = function(text)
@@ -632,8 +737,10 @@ end
 local function build_tab()
   vim.cmd('tabnew')
   view.tab = vim.api.nvim_get_current_tabpage()
-  view.tree_buf = make_buffer('nvime://threads', 'nvimethreads')
-  view.pane_buf = make_buffer('nvime://threads-diff', 'diff')
+  -- Plain names, no `scheme://`: this pair is the whole tabpage, and the
+  -- default tabline renders their name as the tab's label.
+  view.tree_buf = make_buffer('nvime-review', 'nvimethreads')
+  view.pane_buf = make_buffer('nvime-review-diff', 'diff')
 
   view.tree_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(view.tree_win, view.tree_buf)
@@ -645,14 +752,29 @@ local function build_tab()
     vim.wo[win].number = false
     vim.wo[win].relativenumber = false
     vim.wo[win].signcolumn = 'no'
+    vim.wo[win].statuscolumn = ' '
+    vim.wo[win].fillchars = 'eob: '
+    vim.wo[win].winhighlight = 'CursorLine:NvimeCursorLine'
   end
   vim.wo[view.tree_win].cursorline = true
 
+  local group = vim.api.nvim_create_augroup('NvimeThreads', { clear = true })
   vim.api.nvim_create_autocmd('CursorMoved', {
-    group = vim.api.nvim_create_augroup('NvimeThreads', { clear = true }),
+    group = group,
     buffer = view.tree_buf,
     desc = 'nvime: show the thread under the cursor',
     callback = on_cursor,
+  })
+  -- Both bars are cut to the window they sit in, so a resize has to re-cut
+  -- them; otherwise a widened pane keeps an ellipsis it no longer needs.
+  vim.api.nvim_create_autocmd('WinResized', {
+    group = group,
+    desc = 'nvime: refit the review bars to the new widths',
+    callback = function()
+      if win_valid(view.tree_win) then
+        draw()
+      end
+    end,
   })
   vim.api.nvim_set_current_win(view.tree_win)
 end

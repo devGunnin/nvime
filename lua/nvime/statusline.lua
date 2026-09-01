@@ -10,8 +10,9 @@ local M = {}
 --- Empty when nothing is worth reporting.
 --- @return string
 function M.get()
+  local icons = require('nvime.icons').get()
   if require('nvime.chat').is_running() then
-    return 'nvime: chat●'
+    return 'nvime: chat' .. icons.dot
   end
   local edit = require('nvime.edit')
   if edit.is_running() then
@@ -19,11 +20,16 @@ function M.get()
     return string.format('nvime: edit %d hunk%s', hunks, hunks == 1 and '' or 's')
   end
   local session = (require('nvime.big').state() or {}).session
-  if session ~= nil and session.counts ~= nil and session.display ~= 'merged' then
-    local counts = session.counts
-    return string.format('nvime: big %d/%d defended', counts.defended or 0, counts.substantial or 0)
+  if session == nil or session.counts == nil or session.display == 'merged' then
+    return ''
   end
-  return ''
+  -- A build has nothing defended yet; saying "0/2 defended" would read as a
+  -- review that is going badly rather than one that has not started.
+  if session.display == 'building' or session.display == 'triaging' or session.display == 'drafting' then
+    return 'nvime: big ' .. session.display
+  end
+  local counts = session.counts
+  return string.format('nvime: big %d/%d defended', counts.defended or 0, counts.substantial or 0)
 end
 
 --- Neovim re-evaluates a `%{%...%}` winbar item on its own redraws — this is

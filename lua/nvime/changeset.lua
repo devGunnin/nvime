@@ -67,44 +67,59 @@ local function texts(change)
   return before.text, after.text, nil
 end
 
+--- One hunk as a line, plus the highlight group its sign earns.
+--- @return string, string
 local function describe_hunk(hunk)
+  local icons = require('nvime.icons').get()
   local start_b, count_b = hunk[3], hunk[4]
   if count_b == 0 then
-    return string.format('- removed %d line%s after %d', hunk[2], hunk[2] == 1 and '' or 's', start_b)
+    return string.format('%s removed %d line%s after %d', icons.removed, hunk[2], hunk[2] == 1 and '' or 's', start_b),
+      'NvimeRemoved'
   end
   local last = start_b + count_b - 1
-  local sign = hunk[2] == 0 and '+' or '~'
+  local added = hunk[2] == 0
+  local sign = added and icons.added or icons.changed
+  local hl = added and 'NvimeAdded' or 'NvimeChanged'
   if start_b == last then
-    return string.format('%s line %d', sign, start_b)
+    return string.format('%s line %d', sign, start_b), hl
   end
-  return string.format('%s lines %d-%d', sign, start_b, last)
+  return string.format('%s lines %d-%d', sign, start_b, last), hl
 end
 
 local function render_list()
-  local lines, rows = {}, {}
+  local lines, rows, marks = {}, {}, {}
   for index, change in ipairs(view.changes) do
     local before, after, reason = texts(change)
     lines[#lines + 1] = relative(change.path)
+    marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #lines[#lines], hl = 'NvimeFile' }
     rows[#lines] = { change = index }
     if before == nil then
       lines[#lines + 1] = '    ' .. reason
+      marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #lines[#lines], hl = 'NvimeDim' }
       rows[#lines] = { change = index }
     else
       for hunk_index, hunk in ipairs(diffs.hunks(before, after)) do
         local done = view.reverted[hunk_key(change, hunk_index)] == true
-        lines[#lines + 1] = '    ' .. describe_hunk(hunk) .. (done and '  · reverted' or '')
+        local body, hl = describe_hunk(hunk)
+        lines[#lines + 1] = '    ' .. body .. (done and '  · reverted' or '')
+        marks[#marks + 1] = { row = #lines - 1, col = 4, end_col = 4 + #body, hl = done and 'NvimeDim' or hl }
+        if done then
+          marks[#marks + 1] = { row = #lines - 1, col = 4 + #body, end_col = #lines[#lines], hl = 'NvimeDim' }
+        end
         rows[#lines] = { change = index, hunk = hunk_index }
       end
     end
     lines[#lines + 1] = ''
     rows[#lines] = nil
   end
-  return lines, rows
+  return lines, rows, marks
 end
 
 --- Each rendered row carries the hunk it belongs to, so `r` works here too —
 --- the status line advertises revert in both views, and used to refuse in this
 --- one with the cursor unambiguously on a hunk.
+--- The unified view leans on the `diff` filetype for its colours, so it needs
+--- no marks of its own.
 local function render_unified()
   local lines, rows = {}, {}
   for index, change in ipairs(view.changes) do
@@ -132,24 +147,24 @@ local function draw()
   end
   if #view.changes == 0 then
     view.rows = {}
-    self:replace({ 'nothing changed in this project yet.', '', 'run an edit with <leader>ne.' })
-    self:status('changeset · empty')
+    self:replace({ 'nothing changed in this project yet.', '', 'run an edit with <leader>ne.' }, {
+      { row = 0, hl = 'NvimeDim' },
+      { row = 2, hl = 'NvimeDim' },
+    })
+    self:status('changeset · empty', 'q close')
     return
   end
-  local lines, rows
+  local lines, rows, marks
   if view.unified then
     lines, rows = render_unified()
   else
-    lines, rows = render_list()
+    lines, rows, marks = render_list()
   end
   view.rows = rows
-  self:replace(lines)
+  self:replace(lines, marks)
   self:status(
-    string.format(
-      'changeset · %d change%s · r revert · d diff · <CR> open',
-      #view.changes,
-      #view.changes == 1 and '' or 's'
-    )
+    string.format('changeset · %d change%s', #view.changes, #view.changes == 1 and '' or 's'),
+    'r revert · d diff · <CR> open · q close'
   )
 end
 

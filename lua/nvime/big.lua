@@ -466,6 +466,7 @@ function M.pick_session()
     for _, session in ipairs(result.sessions or {}) do
       items[#items + 1] = {
         label = string.format('%-14s %s', M.describe(session):sub(1, 14), session.title),
+        lead = 15,
         value = session.id,
       }
     end

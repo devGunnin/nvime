@@ -12,8 +12,12 @@ local markdown = require('nvime.markdown')
 local M = {}
 
 local NS = vim.api.nvim_create_namespace('nvime.panel')
-local SPINNER = { '·', '‥', '…', '‥' }
-local SPINNER_MS = 140
+local SPINNER_MS = 90
+
+--- A line highlight has to sit UNDER the fence grammar (priority 120) and
+--- under the span highlights, so a code block gets its background without
+--- flattening the syntax colours painted on top of it.
+local LINE_PRIORITY = 90
 
 local Panel = {}
 Panel.__index = Panel
@@ -35,6 +39,18 @@ local function apply_spans(buf, row, spans)
       strict = false,
     })
   end
+end
+
+--- Paints `hl` across the whole rendered row, window width included.
+local function apply_line_hl(buf, row, hl)
+  if hl == nil then
+    return
+  end
+  vim.api.nvim_buf_set_extmark(buf, NS, row, 0, {
+    line_hl_group = hl,
+    priority = LINE_PRIORITY,
+    strict = false,
+  })
 end
 
 local function line_count(buf)
@@ -109,19 +125,41 @@ end
 --- Appends one already-classified line and returns the row it landed on.
 local function commit(self, text, info)
   local row = append_row(self, text)
+  apply_line_hl(self.buf, row, info.line_hl)
   apply_spans(self.buf, row, info.spans)
   return row
+end
+
+--- A winbar evaluates `%{expr}` as vimscript on every redraw, and the status
+--- text carries a session title the user typed or pasted.
+--- @param text string
+--- @return string
+function M.escape_winbar(text)
+  return (tostring(text):gsub('%%', '%%%%'))
 end
 
 local function set_winbar(self)
   if not win_valid(self.win) then
     return
   end
-  local left = self.spinner == nil and '' or (SPINNER[self.spinner_frame] .. ' ')
-  -- Escaped: a winbar evaluates `%{expr}` as vimscript every redraw, and the
-  -- status text carries a session title the user typed or pasted.
-  local text = tostring(self.status_text or self.title):gsub('%%', '%%%%')
-  vim.wo[self.win].winbar = '%#NvimeSession#' .. left .. text
+  local spinner = ''
+  if self.spinner ~= nil then
+    -- Wrapped, not indexed: the icon set can change under a running spinner.
+    local frames = require('nvime.icons').get().spinner
+    spinner = frames[(self.spinner_frame - 1) % #frames + 1] .. ' '
+  end
+  local shape = require('nvime.text')
+  local hint = self.status_hint or ''
+  -- Where the surface is goes left, what to press goes right, and the title is
+  -- cut rather than allowed to push the keys off the bar.
+  local room = vim.api.nvim_win_get_width(self.win) - vim.fn.strdisplaywidth(hint) - 4
+  local title = shape.ellipsise(self.status_text or self.title, math.max(room, 10))
+  vim.wo[self.win].winbar = '%#NvimeBar# '
+    .. spinner
+    .. M.escape_winbar(title)
+    .. ' %=%#NvimeBarDim#'
+    .. M.escape_winbar(hint)
+    .. ' '
 end
 
 --- Reclaims a leftover buffer of the same name (the user wiped half a panel);
@@ -157,12 +195,19 @@ local function take_prompt(self)
   return text
 end
 
+--- One space of left gutter, and a wrapped line that keeps its own indent —
+--- the difference between a wall of text and something laid out.
 local function tune_window(win)
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
   vim.wo[win].signcolumn = 'no'
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
+  vim.wo[win].breakindent = true
+  vim.wo[win].breakindentopt = 'shift:2'
+  vim.wo[win].statuscolumn = ' '
+  vim.wo[win].fillchars = 'eob: '
+  vim.wo[win].winhighlight = 'CursorLine:NvimeCursorLine'
 end
 
 local function open_windows(self)
@@ -180,7 +225,7 @@ local function open_windows(self)
   vim.api.nvim_win_set_buf(self.prompt_win, self.prompt_buf)
   vim.api.nvim_win_set_height(self.prompt_win, self.prompt_height)
   tune_window(self.prompt_win)
-  vim.wo[self.prompt_win].winbar = '%#NvimeDim#' .. self.prompt_hint
+  vim.wo[self.prompt_win].winbar = '%#NvimeBarDim# ' .. M.escape_winbar(self.prompt_hint) .. ' %=%#NvimeBarDim# '
 end
 
 --- Rebuilds the layout when the user closed one split with `:q`. Both windows
@@ -234,9 +279,11 @@ function M.open(opts)
     position = opts.position or 'right',
     prompt_height = opts.prompt_height or 3,
     prompt_hint = opts.prompt_hint or DEFAULT_PROMPT_HINT,
-    buf = make_buffer('nvime://' .. opts.name, opts.filetype or 'markdown'),
+    -- No `scheme://`: this name is what the tabline and the statusline show.
+    buf = make_buffer('nvime-' .. opts.name, opts.filetype or 'markdown'),
     prompt_buf = nil,
     status_text = nil,
+    status_hint = opts.status_hint,
     written = false,
     spinner = nil,
     spinner_frame = 1,
@@ -244,7 +291,7 @@ function M.open(opts)
     on_close = opts.on_close,
   }, Panel)
   if wants_prompt then
-    self.prompt_buf = make_buffer('nvime://' .. opts.name .. '-prompt', 'markdown')
+    self.prompt_buf = make_buffer('nvime-' .. opts.name .. '-prompt', 'markdown')
     -- `@file`/`@dir` completion, scoped to the root THIS panel captured — never
     -- re-derived from the prompt buffer's own (fake) path.
     if type(opts.root) == 'string' then
@@ -382,11 +429,20 @@ end
 --- Replaces the whole scrollback. Used by surfaces that re-render a list
 --- rather than stream (the changeset view), never mid-stream.
 --- @param lines string[]
-function Panel:replace(lines)
+--- @param marks table[]|nil each { row = 0-based, hl = group } for a whole-line
+---   highlight, plus `col`/`end_col` for a span within that row
+function Panel:replace(lines, marks)
   assert(self.stream == nil, 'panel:replace cannot run while a stream is open')
   vim.api.nvim_buf_clear_namespace(self.buf, NS, 0, -1)
   write_lines(self.buf, 0, -1, #lines == 0 and { '' } or lines)
   self.written = #lines > 0
+  for _, mark in ipairs(marks or {}) do
+    if mark.col == nil then
+      apply_line_hl(self.buf, mark.row, mark.hl)
+    else
+      apply_spans(self.buf, mark.row, { { mark.col, mark.end_col, mark.hl } })
+    end
+  end
 end
 
 --- @param row integer 0-based scrollback row
@@ -454,7 +510,9 @@ local function draw_tail(self, text)
   vim.api.nvim_buf_clear_namespace(self.buf, NS, row, row + 1)
   -- The tail is not final, so classify it against a copy of the fence state.
   local probe = vim.deepcopy(self.stream.ctx.md)
-  apply_spans(self.buf, row, markdown.scan(text, probe).spans)
+  local info = markdown.scan(text, probe)
+  apply_line_hl(self.buf, row, info.line_hl)
+  apply_spans(self.buf, row, info.spans)
 end
 
 --- Drops the volatile tail line so the next write commits a final one.
@@ -520,8 +578,13 @@ function Panel:interject(text, hl)
   self:append(text, hl)
 end
 
-function Panel:status(text)
+--- @param text string where this surface is
+--- @param hint string|nil the keys, right-aligned on the same bar
+function Panel:status(text, hint)
   self.status_text = text
+  if hint ~= nil then
+    self.status_hint = hint
+  end
   set_winbar(self)
 end
 
@@ -535,7 +598,7 @@ function Panel:start_activity()
       if panels[self.name] ~= self or self.spinner == nil then
         return
       end
-      self.spinner_frame = self.spinner_frame % #SPINNER + 1
+      self.spinner_frame = self.spinner_frame % #require('nvime.icons').get().spinner + 1
       set_winbar(self)
     end)
   end)

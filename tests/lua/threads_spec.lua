@@ -568,3 +568,63 @@ describe('the merge key', function()
     )
   end)
 end)
+
+describe('the review’s own typography', function()
+  it('names the speaker once per answer, not once per line', function()
+    local lines = threads.gate_lines(block({
+      rounds = { round(90, { answer = 'first line\nsecond line\nthird line' }) },
+    }))
+    local speakers = 0
+    for _, line in ipairs(lines) do
+      if line:match('^you · ') ~= nil then
+        speakers = speakers + 1
+      end
+    end
+    eq(1, speakers, vim.inspect(lines))
+    local first = lines[3]
+    local continuation = lines[4]
+    eq(
+      vim.fn.strdisplaywidth(first:sub(1, first:find('first') - 1)),
+      vim.fn.strdisplaywidth(continuation:sub(1, continuation:find('second') - 1)),
+      'a continuation aligns under the first line: ' .. vim.inspect(lines)
+    )
+  end)
+
+  it('marks the score green only on the round that actually cleared the thread', function()
+    local _, cleared = threads.gate_lines(block({ state = 'resolved', rounds = { round(40), round(90) } }))
+    local _, still_open = threads.gate_lines(block({ state = 'open', rounds = { round(40) } }))
+    local function grade_groups(marks)
+      local out = {}
+      for _, mark in ipairs(marks) do
+        if mark.hl == 'NvimeOk' or mark.hl == 'NvimeWarn' then
+          out[#out + 1] = mark.hl
+        end
+      end
+      return out
+    end
+    eq({ 'NvimeWarn', 'NvimeOk' }, grade_groups(cleared))
+    eq({ 'NvimeWarn' }, grade_groups(still_open))
+  end)
+
+  it('bands a changed diff line and leaves the file headers alone', function()
+    eq('NvimeEditAdd', threads.hunk_band('+    added'))
+    eq('NvimeEditDelete', threads.hunk_band('-    removed'))
+    eq(nil, threads.hunk_band('+++ b/pool.py'))
+    eq(nil, threads.hunk_band('--- a/pool.py'))
+    eq(nil, threads.hunk_band(' context'))
+    eq(nil, threads.hunk_band('@@ -1,2 +1,3 @@'))
+  end)
+
+  it('cuts a long thread title to the list width instead of wrapping it', function()
+    local lines = threads.tree_lines({ block({ title = string.rep('long ', 40) }) }, 40)
+    eq(1, #lines, 'one thread is one row, whatever its title')
+    ok(vim.fn.strchars(lines[1]) <= 40, lines[1])
+  end)
+
+  it('offers only the keys that still do something once the change has landed', function()
+    local landed = threads.keys_hint({ display = 'merged' })
+    ok(landed:find('answer') == nil, landed)
+    ok(landed:find('M merge') == nil, landed)
+    ok(threads.keys_hint({ display = 'reviewing' }):find('a answer') ~= nil)
+  end)
+end)

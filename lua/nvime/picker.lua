@@ -4,6 +4,7 @@
 local M = {}
 
 local MAX_HEIGHT = 12
+local NS = vim.api.nvim_create_namespace('nvime.picker')
 
 local function close(win, buf)
   if vim.api.nvim_win_is_valid(win) then
@@ -14,7 +15,9 @@ local function close(win, buf)
   end
 end
 
---- @param items table[] each with `label` (string) and `value` (any)
+--- @param items table[] each with `label` (string) and `value` (any); an
+---   optional `lead` (integer) is how many cells of the label are the dim
+---   metadata column ahead of the name.
 --- @param opts table title, on_choice(value)
 function M.open(items, opts)
   assert(type(items) == 'table', 'picker.open needs an items list')
@@ -25,7 +28,7 @@ function M.open(items, opts)
   end
 
   local labels = vim.tbl_map(function(item)
-    return item.label
+    return ' ' .. item.label
   end, items)
   local width = 0
   for _, label in ipairs(labels) do
@@ -38,6 +41,23 @@ function M.open(items, opts)
 
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, labels)
+  for row, item in ipairs(items) do
+    local lead = math.min((item.lead or 0) + 1, #labels[row])
+    if lead > 1 then
+      vim.api.nvim_buf_set_extmark(buf, NS, row - 1, 0, {
+        end_col = lead,
+        hl_group = 'NvimeDim',
+        strict = false,
+      })
+    end
+    if item.current then
+      vim.api.nvim_buf_set_extmark(buf, NS, row - 1, lead, {
+        end_col = #labels[row],
+        hl_group = 'NvimeSelected',
+        strict = false,
+      })
+    end
+  end
   vim.bo[buf].modifiable = false
   vim.bo[buf].bufhidden = 'wipe'
 
@@ -51,8 +71,11 @@ function M.open(items, opts)
     border = 'rounded',
     title = opts.title or 'nvime',
     title_pos = 'center',
+    footer = ' <CR> open · q close ',
+    footer_pos = 'right',
   })
   vim.wo[win].cursorline = true
+  vim.wo[win].winhighlight = 'CursorLine:NvimeCursorLine'
 
   local function dismiss()
     close(win, buf)
