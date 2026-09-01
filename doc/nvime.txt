@@ -83,6 +83,13 @@ require('nvime').setup({opts})
 :Nvime cancel           Stop whichever run is going — chat, edit or a big
                         change — and say so if none is.
 
+:Nvime model            Pick a lane (chat, edit, big_build, big_intake,
+                        big_grade, explain), then type/choose its model and
+                        reasoning effort — a session-scoped override on top of
+                        `models.*` from `setup()`. Its effort step's `reset`
+                        entry clears the override back to the configured
+                        default. See |nvime-configuration|.
+
 :Nvime doctor           Run every preflight check and render the result as one
                         pass/warn/fail list, with the fix named under each
                         failure. |nvime-health|
@@ -301,8 +308,15 @@ Defaults: >
       agent = {
         node = 'node',
         claude = nil,
-        model = nil,
         request_timeout_ms = 15000,
+      },
+      models = {
+        chat = { model = nil, effort = nil },
+        edit = { model = nil, effort = nil },
+        big_build = { model = nil, effort = nil },
+        big_intake = { model = nil, effort = nil },
+        big_grade = { model = nil, effort = nil },
+        explain = { model = nil, effort = nil },
       },
       context = {
         max_file_bytes = 200 * 1024,
@@ -344,12 +358,23 @@ big.cleanup_on_merge   boolean. Throw the build clone away once the change
 agent.node             string. The node binary.
 agent.claude           string or nil. Absolute path to `claude`; nil resolves
                        it from PATH.
-agent.model            string or nil. Model id passed to the SDK; nil uses the
-                       CLI default.
 agent.request_timeout_ms
                        number >= 1000. Deadline for control requests. A
                        streaming turn is exempt: it is bounded by your stop
                        key, not a timer.
+
+models.{lane}.model    string or nil, for each of `chat`, `edit`, `big_build`,
+                       `big_intake`, `big_grade`, `explain`. A model id or
+                       alias (e.g. `claude-opus-5`, `haiku`); nil uses the
+                       CLI's own default. Not whitelisted: any string passes
+                       through to the SDK unchanged.
+models.{lane}.effort   'low' | 'medium' | 'high' | nil. Reasoning effort for
+                       that lane; nil uses the CLI default. `models.big_grade
+                       .effort` may not be 'low' — grading is the comprehension
+                       gate itself, and refuses to run at the shallowest
+                       effort; `setup()` raises if it is configured that way.
+                       `:Nvime model` sets a session-scoped override on top of
+                       these, per lane — see |nvime-commands|.
 
 context.max_file_bytes number >= 1024. Ceiling on one `@file` attachment.
 context.max_dir_entries
@@ -414,9 +439,11 @@ require('nvime').statusline()
     A compact string for your own 'statusline': `nvime: chat ●` while a chat
     turn streams, `nvime: edit N hunks` while a run applies them, `nvime: big
     X/Y defended` for the selected big change (or `nvime: big building` while
-    one is still being built). Empty when there is nothing to report. Reads
-    only what each surface already keeps live — never a fresh request, never a
-    timer. >
+    one is still being built). Appended with `  <lane>:<model>/<effort>` for
+    every lane whose model dial is off the CLI default (config or a `:Nvime
+    model` override) — e.g. `nvime: big_build:opus/high`. Empty when there is
+    nothing to report and every lane is at its default. Reads only what each
+    surface already keeps live — never a fresh request, never a timer. >
 
         vim.o.statusline = "%f %m %= %{v:lua.require('nvime.statusline').get()}"
 <
@@ -436,6 +463,7 @@ windows that have no winbar of their own.
     - no API key or provider override is in the environment
     - a claude credentials file exists (best effort)
     - this repository has a git identity, which a local merge needs
+    - which lanes, if any, run a non-default model/effort dial
 
 `:Nvime doctor` renders them as one pass/warn/fail list with the fix named
 under each failure; `q` or `<Esc>` closes it.

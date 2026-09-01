@@ -326,6 +326,7 @@ big change in this project with its review progress. `<CR>` opens one.
 | `:Nvime big` | start or resume a big change |
 | `:Nvime diff` | review the changeset |
 | `:Nvime cancel` | stop whichever run is going |
+| `:Nvime model` | pick a lane and its model/effort override |
 | `:Nvime doctor` | the preflight, as one pass/warn/fail list |
 | `:Nvime health` | the same checks in `:checkhealth` |
 | `:Nvime statusline` | toggle the built-in winbar status |
@@ -393,8 +394,17 @@ require('nvime').setup({
   agent = {
     node = 'node',              -- node binary
     claude = nil,               -- absolute path; nil resolves from PATH
-    model = nil,                -- nil uses the CLI default
     request_timeout_ms = 15000, -- control requests; a chat turn has no deadline
+  },
+  models = {
+    -- Per-lane model + reasoning-effort overrides; nil uses the CLI default.
+    -- `:Nvime model` layers a session-scoped override on top of these.
+    chat = { model = nil, effort = nil },
+    edit = { model = nil, effort = nil },
+    big_build = { model = nil, effort = nil },
+    big_intake = { model = nil, effort = nil },
+    big_grade = { model = nil, effort = nil }, -- effort may not be 'low': grading is the gate
+    explain = { model = nil, effort = nil },
   },
   context = {
     max_file_bytes = 200 * 1024,
@@ -651,6 +661,7 @@ plugin/nvime.lua      :Nvime
 lua/nvime/
   init.lua            setup(), dashboard
   config.lua          defaults + validation
+  models.lua          the per-lane model/effort dial + :Nvime model picker
   chat.lua            the chat capability
   edit.lua            the edit capability
   apply.lua           live buffer application, undo grouping, hunk highlights

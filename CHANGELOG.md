@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Per-mode model + reasoning-effort dial.** A new `models` config table
+  (`chat`, `edit`, `big_build`, `big_intake`, `big_grade`, `explain`) sets the
+  model and effort each lane's agent turns run at; nil keeps the CLI default.
+  `:Nvime model` layers a session-scoped override on top, visible in `:Nvime
+  doctor` and appended to `statusline()`. The grader lane refuses effort
+  `low` — grading is the comprehension gate itself. Replaces the old, single
+  global `agent.model` setting.
+
 ## 2.0.0
 
 A ground-up rewrite. v1's 32k lines of Lua, 30 commands, 8 internal lanes and
