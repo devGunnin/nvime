@@ -131,6 +131,30 @@ local function append_payload(page, detail, shown)
   page:indented(body, 'NvimeCode')
 end
 
+--- The y/n decision row. Wrapped like everything else `render` builds, rather
+--- than appended as a raw literal — a raw line is what let this row need a
+--- second screen row on a narrow float while `#lines` still counted it as
+--- one, hiding the payload below it with no visual cue anything was cut.
+--- @param page table
+local function append_keys(page)
+  local first = #page.lines
+  for _, line in ipairs(text.wrap('y allow once n deny', page.width - 2)) do
+    page.lines[#page.lines + 1] = ' ' .. line
+  end
+  -- `text.wrap` collapses whitespace runs to one space, so the keys are
+  -- found by a whole-word match rather than by a fixed column: either key
+  -- can land as the last word on its wrapped line, with nothing after it.
+  for row = first, #page.lines - 1 do
+    local line = page.lines[row + 1]
+    for _, key in ipairs({ 'y', 'n' }) do
+      local col = line:find('%f[%a]' .. key .. '%f[%A]')
+      if col ~= nil then
+        page.marks[#page.marks + 1] = { row = row, col = col - 1, end_col = col, hl = 'NvimeKey' }
+      end
+    end
+  end
+end
+
 --- The float's contents.
 ---
 --- The decision and its keys sit at the top, where they stay visible however
@@ -158,10 +182,7 @@ function M.render(request, width)
     page.lines[#page.lines + 1] = ''
   end
 
-  page.lines[#page.lines + 1] = ' y  allow once      n  deny'
-  -- The two keys are the only thing on this surface the reader must find fast.
-  page.marks[#page.marks + 1] = { row = #page.lines - 1, col = 1, end_col = 2, hl = 'NvimeKey' }
-  page.marks[#page.marks + 1] = { row = #page.lines - 1, col = 19, end_col = 20, hl = 'NvimeKey' }
+  append_keys(page)
 
   if shown ~= nil and shown ~= '' then
     append_payload(page, detail, shown)
@@ -189,8 +210,9 @@ local function show(ask, answer)
   vim.bo[buf].modifiable = false
   vim.bo[buf].bufhidden = 'wipe'
 
-  -- One row per line: `render` wraps every line to the border itself, so the
-  -- buffer's height is the height on screen.
+  -- One row per line: every line `render` builds — including the y/n row
+  -- now — is wrapped to the border on the way in, so the buffer's height is
+  -- the height on screen.
   local height = #lines
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',

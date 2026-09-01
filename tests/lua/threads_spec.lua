@@ -225,6 +225,30 @@ describe('review thread list', function()
   end)
 end)
 
+describe('review window resize', function()
+  --- `WinResized` used to run a full `draw()`, which re-cuts the pane and
+  --- always ends by putting its cursor back at line 1 — throwing a reader
+  --- 200 lines into a hunk back to the top on every resize.
+  it('keeps the reader’s place in the pane', function()
+    open_review({ block({ hunkIds = { 'h1.1', 'h2.1' }, files = { 'pool.py', 'notes.md' } }) })
+    local view = threads.view()
+    vim.api.nvim_win_set_cursor(view.pane_win, { 3, 0 })
+    vim.api.nvim_exec_autocmds('WinResized', {})
+    eq({ 3, 0 }, vim.api.nvim_win_get_cursor(view.pane_win), 'the resize handler must not reset the cursor')
+    threads.close()
+  end)
+
+  it('does not raise when the tree window is resized narrower than its bar chrome', function()
+    open_review({ block() })
+    local view = threads.view()
+    vim.api.nvim_win_set_width(view.tree_win, 3)
+    vim.v.errmsg = ''
+    vim.api.nvim_exec_autocmds('WinResized', {})
+    eq('', vim.v.errmsg, 'a narrow tree window must not raise from the resize handler')
+    threads.close()
+  end)
+end)
+
 describe('review thread actions', function()
   it('re-opens an auto-resolved thread with X', function()
     open_review({ block({ substantial = false, state = 'resolved' }) })
@@ -613,6 +637,15 @@ describe('the review’s own typography', function()
     eq(nil, threads.hunk_band('--- a/pool.py'))
     eq(nil, threads.hunk_band(' context'))
     eq(nil, threads.hunk_band('@@ -1,2 +1,3 @@'))
+  end)
+
+  --- The header check used to be "two equal characters at the start", which
+  --- also matched a removed line that itself starts with a repeated marker —
+  --- a comment or a bulleted list item, both common in this very repo.
+  it('still bands a removed comment or bullet, which also starts with a repeated marker', function()
+    eq('NvimeEditDelete', threads.hunk_band('-- a Lua comment being removed'))
+    eq('NvimeEditAdd', threads.hunk_band('++nested added'))
+    eq('NvimeEditDelete', threads.hunk_band('-  -- indented Lua comment removed'))
   end)
 
   it('cuts a long thread title to the list width instead of wrapping it', function()

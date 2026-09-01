@@ -128,6 +128,10 @@ waits. The float carries the **whole** command or path, wrapped over as many
 lines as it takes; the one-line summary in the panel is clipped, the thing you
 are authorizing is not. Past 8 KB it says `!! TRUNCATED` and how many bytes it
 could not show. An unanswered ask is denied, as is one whose run you cancelled.
+The wrap counts display cells, not characters or bytes, so a wide-character
+summary or a tab-laden command cannot push the command itself off the float —
+it is sized to what it actually shows, not to a line count that assumed one
+character is one column.
 
 Paths are resolved one component at a time, the way the kernel resolves them, so
 a `..` that follows a symlink out of the project climbs out of the link's target
@@ -416,6 +420,12 @@ colorscheme whose `DiffAdd` background is a neutral grey (Neovim's own default
 is), and why the same palette works on a light background:
 
 ![The same review on a light background](assets/review-light.png)
+
+A transparent terminal — `Normal` with no background of its own — is the one
+case a colorscheme gives nvime no signal at all. The fallback follows your
+terminal's own declared `background` rather than a fixed dark colour, so the
+chips and code blocks stay legible on a light, transparent terminal instead of
+painting near-black chrome under a light scheme.
 
 `ui.icons` picks the glyph set. The default is plain Unicode — box drawing,
 arrows, a check mark, quarter-circle spinner frames — never a private-use Nerd

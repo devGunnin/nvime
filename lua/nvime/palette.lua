@@ -11,6 +11,7 @@ local M = {}
 local FALLBACK = {
   fg = '#d5d9e4',
   bg = '#12141b',
+  bg_light = '#f4f4f2',
   dim = '#8b91a5',
   accent = '#e8b45a',
   agent = '#7aa7d9',
@@ -67,7 +68,11 @@ end
 --- @return table<string,string>
 function M.resolve()
   local fg = pick({ 'Normal' }, 'fg') or FALLBACK.fg
-  local bg = pick({ 'Normal' }, 'bg') or FALLBACK.bg
+  -- A cleared Normal bg is the common transparent-terminal setup. With no
+  -- signal from the colorscheme itself, `&background` is the only honest
+  -- guess at the terminal's polarity — a fixed dark fallback paints a light
+  -- terminal's chrome near-black.
+  local bg = pick({ 'Normal' }, 'bg') or (vim.o.background == 'light' and FALLBACK.bg_light or FALLBACK.bg)
   local p = {
     fg = fg,
     bg = bg,

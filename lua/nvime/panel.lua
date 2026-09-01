@@ -188,9 +188,12 @@ end
 
 --- Reclaims a leftover buffer of the same name (the user wiped half a panel);
 --- `nvim_buf_set_name` refuses a duplicate, which would brick every reopen.
+--- The name has no `scheme://`, so it resolves as a real relative path —
+--- `buftype == 'nofile'` is what tells nvime's own scratch buffer apart from
+--- a real file a user happens to have open under the same name.
 local function drop_stale(name)
   local existing = vim.fn.bufnr('^' .. name .. '$')
-  if existing ~= -1 and vim.api.nvim_buf_is_valid(existing) then
+  if existing ~= -1 and vim.api.nvim_buf_is_valid(existing) and vim.bo[existing].buftype == 'nofile' then
     pcall(vim.api.nvim_buf_delete, existing, { force = true })
   end
 end
@@ -198,7 +201,13 @@ end
 local function make_buffer(name, filetype)
   drop_stale(name)
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(buf, name)
+  -- `drop_stale` now leaves a real file's buffer alone, so the plain name can
+  -- still be taken — nvim then refuses the duplicate (E95). Falling back to
+  -- the `nvime://` scheme, which can never collide with a real path, keeps
+  -- the panel opening instead of raising mid-open.
+  if not pcall(vim.api.nvim_buf_set_name, buf, name) then
+    vim.api.nvim_buf_set_name(buf, 'nvime://' .. name)
+  end
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].swapfile = false

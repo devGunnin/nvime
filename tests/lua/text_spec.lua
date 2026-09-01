@@ -45,6 +45,17 @@ describe('text.wrap', function()
     eq(string.rep('x', 25), table.concat(lines, ''))
   end)
 
+  --- The chunker used to hard-break by characters
+  --- (`strcharpart(current, 0, width)`), so a `width`-character chunk of a
+  --- wide script could be up to twice `width` cells.
+  it('hard-breaks a wide-character token by cells, not characters', function()
+    local lines = shape.wrap(string.rep('删', 30), 10)
+    for i, line in ipairs(lines) do
+      ok(vim.fn.strdisplaywidth(line) <= 10, i .. ': ' .. vim.fn.strdisplaywidth(line) .. ' cells: ' .. line)
+    end
+    eq(string.rep('删', 30), table.concat(lines, ''))
+  end)
+
   it('keeps the newlines it was given', function()
     eq({ 'a', 'b' }, shape.wrap('a\nb', 20))
   end)
@@ -60,6 +71,28 @@ describe('text.wrap_exact', function()
     local lines = shape.wrap_exact(string.rep('é', 10), 4)
     eq(3, #lines)
     eq(string.rep('é', 10), table.concat(lines, ''))
+  end)
+
+  --- The chunker used to cut by characters (`strcharpart(line, at, width)`),
+  --- so a `width`-character chunk of CJK text could be twice `width` cells —
+  --- exactly the defect that let a wide payload push past the approval
+  --- float's border.
+  it('cuts by display cells, so a CJK payload never overflows the width it was given', function()
+    local payload = string.rep('删', 30)
+    local lines = shape.wrap_exact(payload, 10)
+    for i, line in ipairs(lines) do
+      ok(vim.fn.strdisplaywidth(line) <= 10, i .. ': ' .. vim.fn.strdisplaywidth(line) .. ' cells: ' .. line)
+    end
+    eq(payload, table.concat(lines, ''), 'every character still comes back, just re-cut')
+  end)
+
+  --- A raw tab can cost up to 8 cells; treating it as one is how a
+  --- tab-laden command overflowed a float sized by character count.
+  it('expands a tab so it cannot cost more than its display width', function()
+    local lines = shape.wrap_exact('a\tb\tc\td\te\tf\tg\th\ti\tj', 10)
+    for i, line in ipairs(lines) do
+      ok(vim.fn.strdisplaywidth(line) <= 10, i .. ': ' .. vim.fn.strdisplaywidth(line) .. ' cells: ' .. line)
+    end
   end)
 end)
 

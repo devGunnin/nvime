@@ -50,6 +50,39 @@ describe('panel', function()
     ok(not vim.api.nvim_buf_is_valid(self.buf), 'buffers are cleaned up')
   end)
 
+  --- The panel names its buffer `nvime-<name>` with no `scheme://`, so the
+  --- name resolves as a real relative path. If the user happens to have a
+  --- file open under that exact name (e.g. `nvime-chat` in the project
+  --- root), opening the panel used to force-delete their buffer — discarding
+  --- unsaved edits — because the old reclaim logic could not tell nvime's
+  --- own scratch buffer apart from a real one sharing its name.
+  it('never force-deletes a real file the user has open under the panel’s own name', function()
+    panel.close(NAME)
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local before_cwd = vim.fn.getcwd()
+    vim.fn.writefile({ 'the user is editing this real file' }, dir .. '/nvime-' .. NAME)
+    vim.cmd.cd(dir)
+    vim.cmd.edit('nvime-' .. NAME)
+    local user_buf = vim.api.nvim_get_current_buf()
+    vim.bo[user_buf].modifiable = true
+    vim.api.nvim_buf_set_lines(user_buf, -1, -1, false, { 'UNSAVED WORK the user just typed' })
+    ok(vim.bo[user_buf].modified, 'the probe needs a genuinely unsaved buffer')
+
+    config.setup({})
+    palette.apply()
+    panel.open(panel_opts())
+
+    ok(vim.api.nvim_buf_is_valid(user_buf), "the user's buffer must survive opening the panel")
+    eq(
+      { 'the user is editing this real file', 'UNSAVED WORK the user just typed' },
+      vim.api.nvim_buf_get_lines(user_buf, 0, -1, false)
+    )
+
+    panel.close(NAME)
+    vim.cmd.cd(before_cwd)
+  end)
+
   it('reuses the panel instead of stacking splits', function()
     local first = open()
     local windows = #vim.api.nvim_list_wins()

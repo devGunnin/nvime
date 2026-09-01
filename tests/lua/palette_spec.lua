@@ -25,6 +25,24 @@ local function with_scheme(scheme, background, fn)
   end
 end
 
+--- WCAG relative luminance and contrast ratio, for the fallback-polarity test.
+local function luminance(hex)
+  local r, g, b = channels(hex)
+  local function linear(c)
+    c = c / 255
+    return c <= 0.03928 and c / 12.92 or ((c + 0.055) / 1.055) ^ 2.4
+  end
+  return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+end
+
+local function contrast(a, b)
+  local la, lb = luminance(a), luminance(b)
+  if la < lb then
+    la, lb = lb, la
+  end
+  return (la + 0.05) / (lb + 0.05)
+end
+
 describe('palette.blend', function()
   it('returns each end of the mix untouched', function()
     eq('#ff0000', palette.blend('#ff0000', '#0000ff', 1))
@@ -67,6 +85,30 @@ describe('palette.resolve', function()
         local dr, dg, db = channels(p.delete_bg)
         ok(ag - ar > 0 and ag - ab > 0, background .. ': an added hunk must read green, got ' .. p.add_bg)
         ok(dr - dg > 0 and dr - db > 0, background .. ': a removed hunk must read red, got ' .. p.delete_bg)
+      end)
+    end
+  end)
+
+  --- A cleared Normal bg (a transparent terminal) used to fall back to a
+  --- fixed dark colour regardless of `&background` — a light scheme's dark
+  --- foregrounds then landed on a near-black surface, unreadable. The
+  --- fallback must follow the terminal's own declared polarity.
+  it('keeps every painted surface readable when Normal clears its own background', function()
+    for _, background in ipairs({ 'dark', 'light' }) do
+      with_scheme('default', background, function()
+        local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
+        vim.api.nvim_set_hl(0, 'Normal', { fg = normal.fg })
+        local p = palette.resolve()
+        local groups = palette.groups(p)
+        for _, key in ipairs({ 'surface', 'code_bg', 'fade_bg', 'add_bg', 'change_bg', 'delete_bg' }) do
+          local c = contrast(p.fg, p[key])
+          ok(c >= 3.0, background .. ' ' .. key .. ': text on it must clear 3.0, got ' .. c)
+        end
+        for _, name in ipairs({ 'NvimeThreadDefend', 'NvimeThreadClear', 'NvimeThreadOpen' }) do
+          local chip = groups[name]
+          local c = contrast(chip.fg, chip.bg)
+          ok(c >= 4.5, background .. ' ' .. name .. ': chip text must clear 4.5, got ' .. c)
+        end
       end)
     end
   end)

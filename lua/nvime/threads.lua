@@ -162,10 +162,13 @@ end
 --- @param line string
 --- @return string|nil highlight group
 function M.hunk_band(line)
-  local head, next_char = line:sub(1, 1), line:sub(2, 2)
-  if next_char == head then
+  -- The full header shape, marker repeated three times and a space — not
+  -- "the first two characters match", which also skips a real removed line
+  -- that happens to start `--` (a comment) or `-- item` (a bullet).
+  if line:match('^%-%-%- ') or line:match('^%+%+%+ ') then
     return nil
   end
+  local head = line:sub(1, 1)
   if head == '+' then
     return 'NvimeEditAdd'
   end
@@ -309,7 +312,7 @@ local function status()
   end
   -- Well inside the border: a bar that exactly fills its window makes nvim
   -- scroll it and show a `<` instead.
-  local gate = shape.ellipsise(M.gate_status(view.session), vim.api.nvim_win_get_width(view.tree_win) - 4)
+  local gate = shape.ellipsise(M.gate_status(view.session), math.max(vim.api.nvim_win_get_width(view.tree_win) - 4, 8))
   vim.wo[view.tree_win].winbar = '%#NvimeBar# ' .. M.escape_winbar(gate) .. ' %=%#NvimeBar# '
   if not win_valid(view.pane_win) then
     return
@@ -732,13 +735,23 @@ local KEYS = {
   },
 }
 
+--- Reclaims a leftover buffer of the same name. The name has no `scheme://`,
+--- so it resolves as a real relative path — `buftype == 'nofile'` is what
+--- tells nvime's own scratch buffer apart from a real file a user happens to
+--- have open under the same name.
 local function make_buffer(name, filetype)
   local existing = vim.fn.bufnr('^' .. name .. '$')
-  if existing ~= -1 and vim.api.nvim_buf_is_valid(existing) then
+  if existing ~= -1 and vim.api.nvim_buf_is_valid(existing) and vim.bo[existing].buftype == 'nofile' then
     pcall(vim.api.nvim_buf_delete, existing, { force = true })
   end
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(buf, name)
+  -- The reclaim above now leaves a real file's buffer alone, so the plain
+  -- name can still be taken — nvim then refuses the duplicate (E95). Falling
+  -- back to the `nvime://` scheme, which can never collide with a real path,
+  -- keeps the review opening instead of raising mid-open.
+  if not pcall(vim.api.nvim_buf_set_name, buf, name) then
+    vim.api.nvim_buf_set_name(buf, 'nvime://' .. name)
+  end
   vim.bo[buf].buftype = 'nofile'
   vim.bo[buf].bufhidden = 'wipe'
   vim.bo[buf].swapfile = false
@@ -793,8 +806,11 @@ local function build_tab()
     group = group,
     desc = 'nvime: refit the review bars to the new widths',
     callback = function()
+      -- Only the bars are cut to the window width; a full `draw()` would
+      -- also re-cut the pane and reset its cursor to the top, throwing the
+      -- reader back to line 1 of a hunk they had scrolled into.
       if win_valid(view.tree_win) then
-        draw()
+        status()
       end
     end,
   })

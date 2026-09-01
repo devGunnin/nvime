@@ -40,10 +40,72 @@ function M.ellipsise(text, width)
   return out .. mark
 end
 
+--- `line` with every tab expanded to spaces at an 8-column stop, so a chunk
+--- budgeted in display cells never has one character silently cost up to 8.
+--- Tab stops reset at each newline, so this only makes sense per line — the
+--- callers below always pass one.
+--- @param line string a single line, no embedded newline
+--- @return string
+local function expand_tabs(line)
+  if not line:find('\t', 1, true) then
+    return line
+  end
+  local TABSTOP = 8
+  local out, col = {}, 0
+  for index = 0, vim.fn.strchars(line) - 1 do
+    local ch = vim.fn.strcharpart(line, index, 1)
+    if ch == '\t' then
+      local spaces = TABSTOP - (col % TABSTOP)
+      out[#out + 1] = string.rep(' ', spaces)
+      col = col + spaces
+    else
+      out[#out + 1] = ch
+      col = col + width_of(ch)
+    end
+  end
+  return table.concat(out)
+end
+
+--- `text` cut into pieces that each measure at most `width` display cells.
+---
+--- Built by accumulating characters and re-measuring the whole candidate
+--- string, never by summing per-character widths: display width is not
+--- additive across a concatenation (combining marks, wide-char boundaries),
+--- so only the accumulated string's own measurement can be trusted. The
+--- first character of a chunk is always kept even if it alone exceeds
+--- `width` (a CJK character in a 1-cell budget), so every chunk makes
+--- progress and the loop always terminates.
+--- @param text string
+--- @param width integer
+--- @return string[]
+local function cell_chunks(text, width)
+  local total = vim.fn.strchars(text)
+  if total == 0 then
+    return { '' }
+  end
+  local out = {}
+  local index = 0
+  while index < total do
+    local chunk = vim.fn.strcharpart(text, index, 1)
+    local chunk_chars = 1
+    while index + chunk_chars < total do
+      local candidate = chunk .. vim.fn.strcharpart(text, index + chunk_chars, 1)
+      if width_of(candidate) > width then
+        break
+      end
+      chunk = candidate
+      chunk_chars = chunk_chars + 1
+    end
+    out[#out + 1] = chunk
+    index = index + chunk_chars
+  end
+  return out
+end
+
 --- `text` broken to `width` cells, its own newlines kept.
 ---
 --- Breaks at spaces where it can; a single token wider than the line is broken
---- by characters rather than allowed to overflow. Nothing is ever dropped
+--- by display cells rather than allowed to overflow. Nothing is ever dropped
 --- except the space a line was broken at.
 --- @param text string
 --- @param width integer
@@ -52,7 +114,8 @@ function M.wrap(text, width)
   assert(type(text) == 'string', 'wrap needs text')
   assert(type(width) == 'number' and width > 0, 'wrap needs a positive width')
   local out = {}
-  for _, line in ipairs(vim.split(text, '\n', { plain = true })) do
+  for _, raw_line in ipairs(vim.split(text, '\n', { plain = true })) do
+    local line = expand_tabs(raw_line)
     local current = ''
     for word in line:gmatch('%S+') do
       if current == '' then
@@ -63,9 +126,12 @@ function M.wrap(text, width)
         out[#out + 1] = current
         current = word
       end
-      while width_of(current) > width do
-        out[#out + 1] = vim.fn.strcharpart(current, 0, width)
-        current = vim.fn.strcharpart(current, width)
+      if width_of(current) > width then
+        local chunks = cell_chunks(current, width)
+        for i = 1, #chunks - 1 do
+          out[#out + 1] = chunks[i]
+        end
+        current = chunks[#chunks]
       end
     end
     out[#out + 1] = current
@@ -73,9 +139,12 @@ function M.wrap(text, width)
   return out
 end
 
---- `text` broken to `width` cells with every byte preserved, spaces included.
---- Used where the exact payload is the point (a command awaiting approval),
---- and a word wrap's dropped break-space would be a lie about what runs.
+--- `text` broken to `width` cells with every character preserved. Used where
+--- the exact payload is the point (a command awaiting approval), and a word
+--- wrap's dropped break-space would be a lie about what runs. A tab is still
+--- expanded to spaces — the alternative is trusting whichever buffer's
+--- `tabstop` happens to be active when this runs, which the caller does not
+--- control.
 --- @param text string
 --- @param width integer
 --- @return string[]
@@ -83,16 +152,8 @@ function M.wrap_exact(text, width)
   assert(type(text) == 'string', 'wrap_exact needs text')
   assert(type(width) == 'number' and width > 0, 'wrap_exact needs a positive width')
   local out = {}
-  for _, line in ipairs(vim.split(text, '\n', { plain = true })) do
-    local total = vim.fn.strchars(line)
-    if total == 0 then
-      out[#out + 1] = ''
-    end
-    local at = 0
-    while at < total do
-      out[#out + 1] = vim.fn.strcharpart(line, at, width)
-      at = at + width
-    end
+  for _, raw_line in ipairs(vim.split(text, '\n', { plain = true })) do
+    vim.list_extend(out, cell_chunks(expand_tabs(raw_line), width))
   end
   return out
 end
