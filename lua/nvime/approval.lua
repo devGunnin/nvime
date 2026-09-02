@@ -193,10 +193,6 @@ function M.render(request, width)
   return page.lines, page.alerts, page.marks
 end
 
---- The shortest payload that may be treated as "already shown". Below it, a
---- payload can appear inside ordinary prose by accident (`rm`, `.`).
-local MIN_SUMMARISED = 8
-
 --- Whether the summary at the top already shows the whole payload VERBATIM, so
 --- repeating it below would only say the same short command twice.
 ---
@@ -212,14 +208,21 @@ function M.summarised(summary, detail)
     return false
   end
   local payload = detail.text
-  if detail.truncated or #payload < MIN_SUMMARISED then
+  if detail.truncated then
+    return false
+  end
+  -- A bare word is what ordinary prose can carry by accident (`make`, `rm`);
+  -- a space or a path separator is what makes a payload unmistakable. Length
+  -- is not the test — `ls -la` is short and shown in full.
+  if payload:find('[%s/]') == nil then
     return false
   end
   if payload ~= payload:gsub('%s+', ' ') then
     return false
   end
-  -- The whole payload, and the summary is that payload plus a lead-in — not
-  -- some prefix of it that happens to match.
+  -- The whole payload, at the END of the summary: today the only
+  -- payload-bearing summary is `describeTool`'s Bash arm, whose lead-in is the
+  -- fixed literal `running ` (pinned by a test in stream.test.ts).
   return vim.endswith(summary, payload)
 end
 

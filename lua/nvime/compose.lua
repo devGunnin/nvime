@@ -274,13 +274,26 @@ function M.open(opts)
   --- paste-blocked and wiped on close, so a gate answer cancelled by reflex is
   --- otherwise gone for good and cannot even be pasted back.
   local function cancel()
-    local held = vim.trim(table.concat(lines_of(buf), '\n'))
+    -- The insert <Esc> is <expr>: it schedules this, so two fast presses queue
+    -- two cancels against a buffer the first one wipes.
+    if active == nil or not vim.api.nvim_buf_is_valid(buf) then
+      return
+    end
+    local lines = lines_of(buf)
+    local held = vim.trim(table.concat(lines, '\n'))
     close()
     if held == '' then
       return
     end
+    if #lines > 1 then
+      -- Linewise: a charwise put would splice a multi-line answer into
+      -- whatever line the cursor happens to be on.
+      vim.fn.setreg('"', lines, 'l')
+      vim.notify('nvime: draft discarded — "p pastes it back below the cursor', vim.log.levels.INFO)
+      return
+    end
     vim.fn.setreg('"', held)
-    vim.notify('nvime: draft discarded — "p" pastes it back', vim.log.levels.INFO)
+    vim.notify('nvime: draft discarded — "p pastes it back', vim.log.levels.INFO)
   end
   bind('n', 'q', cancel)
   bind('n', '<Esc>', cancel)

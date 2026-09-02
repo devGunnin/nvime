@@ -532,6 +532,8 @@ local function running_detached(overrides)
     display = 'building',
     heldElsewhere = true,
     runnerLive = true,
+    -- What the sidecar reports for a runner behind a live control socket.
+    steerable = true,
     runner = { pid = 4242, socket = '/run/x.sock', log = '/store/events.ndjson', what = 'build' },
   }, overrides or {}))
 end
@@ -676,7 +678,11 @@ describe('a build that outlives the editor', function()
   it('opens the steer box on a live build, and sends what was typed', function()
     local _, path = sandbox()
     open_on(path)
-    big.state().session = running_detached()
+    -- Selected the way the panel really selects it: a live runner is attached
+    -- to, and it is that attach which makes this editor a follower.
+    fake.replies['big.open'] = { result = { session = running_detached() } }
+    big.select('abc123')
+    ok(big.state().attach_id ~= nil, 'the panel is following the detached build')
     big.open_steer()
     local float = require('nvime.compose').current()
     ok(float ~= nil, 'the compose float is open')
@@ -708,48 +714,82 @@ describe('a build that outlives the editor', function()
     cleanup()
   end)
 
-  it('steers the build this editor started, not only one running outside it', function()
-    -- `state.session` is the snapshot adopted BEFORE the runner started, so
-    -- its `runnerLive` is still false while this editor's own build streams.
+  --- The real path an owner's build takes: `approve` replies with a BUILDING
+  --- view that has no runner (the runner does not exist yet — `approve`
+  --- returns before `big.build` is even sent), `M.build` goes out and stays in
+  --- flight, and the sidecar hands the editor a fresh view over `big.view`
+  --- once the runner is really behind its control socket.
+  --- @param steerable boolean|nil what that later view says; nil sends none
+  local function owner_building(steerable)
     local _, path = sandbox()
     open_on(path)
-    big.state().session = session({ display = 'building', runner = { pid = 4242 } })
-    big.state().request_id = 7
-    ok(big.steerable(), 'a build this editor is following is steerable')
+    big.state().session = session({ display = 'drafting' })
+    fake.replies['big.approve'] = {
+      result = { session = session({ state = 'building', display = 'building' }), worktree = {}, base = {} },
+    }
+    big.approve()
+    ok(sent('big.build') ~= nil, 'the build request is out')
+    ok(big.state().request_id ~= nil, 'and this editor is following it')
+    if steerable ~= nil then
+      fake.subscriber('big.view', {
+        id = big.state().request_id,
+        session = session({ state = 'building', display = 'building', steerable = steerable }),
+      })
+    end
+    return path
+  end
+
+  it('steers the build this editor started, through the flow that starts one', function()
+    owner_building(true)
+    ok(big.steerable(), 'the sidecar said the runner is behind its socket')
+    ok(big.next_step(big.state().session):find('type to steer it', 1, true) ~= nil, 'and the hint says so')
+    big.send('prefer the existing helper')
+    local steer = sent('big.steer')
+    ok(steer ~= nil, 'typing at a streaming build steers it rather than being refused')
+    eq('prefer the existing helper', steer.params.text)
+    ok(not has_line('the build is running'), 'and it is not answered with a hint')
     big.open_steer()
-    ok(require('nvime.compose').current() ~= nil, 'the steer box opens on your own build')
+    ok(require('nvime.compose').current() ~= nil, '`s` opens the steer box on your own build')
     require('nvime.compose').dismiss()
+    cleanup()
+  end)
+
+  it('will not offer to steer a build running inside the sidecar', function()
+    -- The fallback build has no runner and no control socket, so every steer
+    -- would be refused: `s`, the prompt and the hint decline together.
+    owner_building(false)
+    eq(false, big.steerable(), 'the sidecar said there is nothing to steer')
+    eq(nil, big.next_step(big.state().session):find('steer', 1, true), 'and the hint agrees')
+    big.send('prefer the existing helper')
+    eq(nil, sent('big.steer'), 'the prompt does not send a steer that would always be refused')
+    ok(not has_line('type to steer it'), 'nor is the reader told to do what was just refused')
+    big.open_steer()
+    eq(nil, require('nvime.compose').current(), 'and `s` refuses')
+    cleanup()
+  end)
+
+  it('does not promise steering on the pre-runner snapshot alone', function()
+    -- The view `approve` returns cannot know: the runner starts afterwards.
+    owner_building(nil)
+    eq(false, big.steerable(), 'no word from the sidecar yet')
+    big.send('prefer the existing helper')
+    eq(nil, sent('big.steer'))
+    ok(not has_line('type to steer it'), 'the refusal must not advertise what it just refused')
     cleanup()
   end)
 
   it('refuses to steer a session another editor is driving', function()
     local _, path = sandbox()
     open_on(path)
-    big.state().session = session({ display = 'building', heldElsewhere = true })
-    eq(false, big.steerable())
+    big.state().session = session({ display = 'building', heldElsewhere = true, steerable = true })
+    eq(false, big.steerable(), 'a steerable runner is still not ours to drive from here')
     big.open_steer()
     eq(nil, require('nvime.compose').current())
     cleanup()
   end)
 
-  it('sends what is typed in the prompt to the running build as a steer', function()
-    local _, path = sandbox()
-    open_on(path)
-    big.state().session = session({ display = 'building', runner = { pid = 4242 } })
-    big.state().request_id = 7
-    big.send('prefer the existing helper')
-    local steer = sent('big.steer')
-    ok(steer ~= nil, 'typing at a streaming build steers it rather than being refused')
-    eq('prefer the existing helper', steer.params.text)
-    ok(not has_line('the build is running'), 'and it is not answered with a hint')
-    cleanup()
-  end)
-
   it('hands the words back when the sidecar refuses the steer', function()
-    local _, path = sandbox()
-    open_on(path)
-    big.state().session = session({ display = 'building', runner = { pid = 4242 } })
-    big.state().request_id = 7
+    owner_building(true)
     fake.replies['big.steer'] = { err = { message = 'there is no running build to steer' } }
     local before = #scrollback()
     big.send('prefer the existing helper')
@@ -764,27 +804,22 @@ describe('a build that outlives the editor', function()
     cleanup()
   end)
 
-  it('will not offer to steer a build running inside the sidecar', function()
-    -- The in-sidecar fallback records no runner (there is no control socket),
-    -- so `is_running()` alone must not make the panel promise steering.
-    local _, path = sandbox()
-    open_on(path)
-    big.state().session = session({ display = 'building' })
-    big.state().request_id = 7
-    eq(false, big.steerable(), 'no runner, nothing to steer')
-    eq(nil, big.next_step(session({ display = 'building' })):find('steer', 1, true), 'and the hint agrees')
+  it('keeps a refused steer the box cannot take back in the unnamed register', function()
+    owner_building(true)
+    fake.replies['big.steer'] = { err = { message = 'there is no running build to steer' } }
+    vim.fn.setreg('"', 'something else')
+    -- The reader has typed again since: `restore_prompt` must not overwrite
+    -- that, so the words have to survive somewhere they can be read.
+    local prompt = panel.get('big').prompt_buf
     big.send('prefer the existing helper')
-    eq(nil, sent('big.steer'), 'the prompt does not send a steer that would always be refused')
-    cleanup()
-  end)
-
-  it('steers once the runner has recorded itself, before the view says it is live', function()
-    local _, path = sandbox()
-    open_on(path)
-    big.state().session = session({ display = 'building', runner = { pid = 4242 } })
-    big.state().request_id = 7
-    ok(big.steerable())
-    ok(big.next_step(session({ display = 'building', runner = { pid = 4242 } })):find('steer', 1, true) ~= nil)
+    vim.api.nvim_buf_set_lines(prompt, 0, -1, false, { 'a new thought' })
+    big.steer('a second refused steer')
+    eq('a second refused steer', vim.fn.getreg('"'), 'a notify is one transient line; the register is not')
+    eq(
+      'a new thought',
+      table.concat(vim.api.nvim_buf_get_lines(prompt, 0, -1, false), '\n'),
+      'and what they typed stands'
+    )
     cleanup()
   end)
 

@@ -202,6 +202,9 @@ export function commitMessageFor(session: { title: string; spec: BigSpec | null 
   // Never empty: `git commit-tree -m ''` writes a commit with no message at
   // all, and it lands on the operator's branch.
   const subject = clipSubject(goal) || clipSubject(title) || 'big change';
+  // `git commit-tree -m ''` writes a commit with no message at all, onto the
+  // operator's branch: the fallback chain above must never come back empty.
+  if (subject === '') throw new Error('a commit message needs a subject');
   const approach = oneLine(session.spec?.approach ?? '');
   const body = approach === '' ? title : approach;
   if (body === '' || body === subject) return subject;
@@ -212,23 +215,30 @@ function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
 /**
  * Trailing punctuation off, then cut to fit the byte budget at the last space
- * that fits — a hard cut only when the subject has no space at all. Built up
- * code point by code point, so an astral character is never halved.
+ * that fits — a hard cut only when the subject has no space at all.
+ *
+ * Grapheme by grapheme, not code point: a family emoji is four people joined
+ * by three ZWJs, and a cut inside it leaves an invisible joiner as the last
+ * character of a commit subject.
  */
 function clipSubject(text: string): string {
   const trimmed = text.replace(/[.\s]+$/, '');
   if (Buffer.byteLength(trimmed) <= MAX_SUBJECT_BYTES) return trimmed;
   let fits = '';
   let lastSpace: number | null = null;
-  for (const char of trimmed) {
-    if (Buffer.byteLength(fits + char) > MAX_SUBJECT_BYTES) break;
-    fits += char;
-    if (char === ' ') lastSpace = fits.length - 1;
+  for (const { segment } of GRAPHEMES.segment(trimmed)) {
+    if (Buffer.byteLength(fits + segment) > MAX_SUBJECT_BYTES) break;
+    fits += segment;
+    if (segment === ' ') lastSpace = fits.length - 1;
   }
   const cut = lastSpace === null ? fits : fits.slice(0, lastSpace);
-  return cut.replace(/[.,;:\s]+$/, '');
+  // A joiner or a combining mark left at the end renders as nothing, or as a
+  // different letter than the one that was cut off.
+  return cut.replace(/[.,;:\s]+$/, '').replace(/[\p{M}\p{Default_Ignorable_Code_Point}]+$/u, '');
 }
 
 /**

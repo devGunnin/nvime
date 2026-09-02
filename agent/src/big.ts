@@ -245,6 +245,14 @@ export interface SessionView extends BigSession {
    * runner is something to attach to and steer, another editor is not.
    */
   runnerLive: boolean;
+  /**
+   * A steer has somewhere to go: a live runner whose control socket can be
+   * dialled. The editor cannot work this out for itself — the view it holds
+   * during its own build is the one `approve` returned, taken before the
+   * runner existed — so the sidecar says it, and says it again on `big.view`
+   * once the runner is really behind the socket.
+   */
+  steerable: boolean;
   worktreeExists: boolean;
   hasDiff: boolean;
   counts: TriageCounts;
@@ -1422,12 +1430,16 @@ export class BigService {
     if (result.changed) this.#store.save(session);
     const counts = countBlocks(session.blocks);
     const mergeable = session.state === 'reviewing' && counts.open === 0 && counts.total > 0;
+    const live = this.#store.liveRunner(session);
     return {
       ...session,
       display: mergeable ? 'mergeable' : session.state,
       detached: result.detached,
       heldElsewhere: result.heldElsewhere,
-      runnerLive: this.#store.liveRunner(session) !== null,
+      runnerLive: live !== null,
+      // A record an older sidecar wrote has a runner with no token, and
+      // nothing may reach that socket — `DetachedService.#dial` refuses it.
+      steerable: live !== null && typeof live.token === 'string' && live.token !== '',
       worktreeExists: this.#store.hasWorktree(session),
       hasDiff: this.#store.hasDiff(session),
       counts,

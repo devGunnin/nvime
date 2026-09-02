@@ -504,11 +504,10 @@ Off until `keymaps.enabled = true`.
 | `<leader>nB` | normal | open a big change |
 | `<CR>` | prompt, normal | send |
 | `<C-s>` | prompt, insert | send (so `<CR>` still inserts a newline) |
-| `<C-c>` | chat panel, both modes | stop the running turn |
-| `<C-r>` | chat panel | list past conversations — in insert only while the box is empty, so `i_CTRL-R` stays the register paste |
+| `<C-c>` | chat / edit / big prompt, both modes | stop the running turn (in insert it acts without leaving insert) |
+| `<C-r>` | chat / big prompt | list past conversations or changes — in insert only while the box is empty, so `i_CTRL-R` stays the register paste |
 | `<C-n>` | chat panel, normal | new conversation (insert keeps `i_CTRL-N` for the `@`-path popup) |
 | `<CR>` / `d` / `q` | session picker | open · delete (y/n confirm) · close |
-| `<C-c>` | panel | stop the running turn |
 | `]o` | chat/big panel | jump to the pending choice |
 | `q` | scrollback | close |
 | `y` / `n` / `<Esc>` | approval float | allow once / deny / deny |

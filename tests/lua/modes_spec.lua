@@ -317,7 +317,63 @@ describe('the compose float cancels on one <Esc>', function()
     end
     eq(nil, compose.current(), 'one <Esc> from insert closes it')
     eq(answer, vim.fn.getreg('"'), 'a paste-blocked answer must be recoverable after a cancel')
-    ok(table.concat(said, ' '):find('"p" pastes it back', 1, true) ~= nil, table.concat(said, ' '))
+    ok(table.concat(said, ' '):find('"p pastes it back', 1, true) ~= nil, table.concat(said, ' '))
+  end)
+
+  it('survives a second cancel scheduled before the first one ran', function()
+    -- The insert mapping is <expr>: it returns and schedules, so a fast double
+    -- <Esc> queues two cancels against a buffer the first one wipes. Both are
+    -- run here, in order, exactly as the loop would run them.
+    compose.dismiss()
+    compose.open({ title = ' defend ', no_paste = true, on_submit = function() end })
+    local buf = compose.current().buf
+    local real_schedule, real_notify = vim.schedule, vim.notify
+    local queued = {}
+    vim.schedule = function(fn)
+      queued[#queued + 1] = fn
+    end
+    vim.notify = function() end
+    eq('', esc_expr(buf, false))
+    eq('', esc_expr(buf, false), 'the float is still open when the second press lands')
+    vim.schedule, vim.notify = real_schedule, real_notify
+    eq(2, #queued, 'two presses, two queued cancels')
+    for index, fn in ipairs(queued) do
+      local ran, err = pcall(fn)
+      ok(ran, 'cancel ' .. index .. ' raised: ' .. tostring(err))
+    end
+    eq(nil, compose.current())
+  end)
+
+  it('stashes a multi-line draft linewise, so "p puts the lines back', function()
+    compose.dismiss()
+    compose.open({ title = ' defend ', on_submit = function() end })
+    local float = compose.current()
+    vim.api.nvim_buf_set_lines(float.buf, 0, -1, false, { 'line one', 'line two' })
+    local said = {}
+    local real_notify = vim.notify
+    vim.notify = function(message)
+      said[#said + 1] = message
+    end
+    vim.api.nvim_set_current_win(float.win)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('q', true, false, true), 'x', false)
+    vim.notify = real_notify
+    eq({ 'line one', 'line two' }, vim.fn.getreg('"', 1, true))
+    eq('V', vim.fn.getregtype('"'), 'charwise would splice two lines into the cursor’s line')
+    ok(table.concat(said, ' '):find('below the cursor', 1, true) ~= nil, table.concat(said, ' '))
+  end)
+
+  it('stashes a one-line draft charwise', function()
+    compose.dismiss()
+    compose.open({ title = ' defend ', on_submit = function() end })
+    local float = compose.current()
+    vim.api.nvim_buf_set_lines(float.buf, 0, -1, false, { 'one line only' })
+    local real_notify = vim.notify
+    vim.notify = function() end
+    vim.api.nvim_set_current_win(float.win)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('q', true, false, true), 'x', false)
+    vim.notify = real_notify
+    eq('one line only', vim.fn.getreg('"'))
+    eq('v', vim.fn.getregtype('"'))
   end)
 
   it('stashes the draft on the normal-mode cancels too', function()
@@ -360,3 +416,76 @@ describe('the compose float’s advertised keys', function()
     compose.dismiss()
   end)
 end)
+
+--- The three panels that open a prompt box, wired by their own modules — not
+--- by a key table this test writes. `edit` is the one the fix round forgot.
+local real_agent = require('nvime.agent')
+package.loaded['nvime.agent'] = {
+  request = function(_, _, _, opts)
+    if opts ~= nil and opts.on_sent ~= nil then
+      opts.on_sent(1)
+    end
+  end,
+  on_event = function()
+    return function() end
+  end,
+  is_running = function()
+    return true
+  end,
+}
+for _, name in ipairs({ 'nvime.chat', 'nvime.big', 'nvime.edit' }) do
+  package.loaded[name] = nil
+end
+
+describe('every prompt panel keeps the promises its hint makes', function()
+  --- The control chords a hint advertises, split by the mode it claims them
+  --- for: `n_<C-x>`/`i_<C-x>` name one mode, a bare chord claims both. Only
+  --- chords — they are the keys whose meaning depends on the mode; a
+  --- `<leader>` pointer in a hint names a global normal-mode mapping.
+  local function advertised(hint)
+    local claims = {}
+    for prefix, key in hint:gmatch('([ni]?_?)(<[Cc]%-[^>]+>)') do
+      claims[key] = prefix == 'n_' and 'n' or (prefix == 'i_' and 'i' or 'both')
+    end
+    return claims
+  end
+
+  it('splits a hint into the modes it claims', function()
+    eq(
+      { ['<C-s>'] = 'i', ['<C-c>'] = 'both', ['<C-n>'] = 'n' },
+      advertised('prompt · <CR> send (i_<C-s>) · <C-c> stop · n_<C-n> new · <leader>nd changes')
+    )
+  end)
+
+  for _, panel_under_test in ipairs({
+    { name = 'chat', open = 'nvime.chat' },
+    { name = 'big', open = 'nvime.big' },
+    { name = 'edit', open = 'nvime.edit' },
+  }) do
+    it('binds what the ' .. panel_under_test.name .. ' hint advertises for insert mode', function()
+      setup()
+      panel.close(panel_under_test.name)
+      local dir = vim.fs.normalize(vim.fn.tempname())
+      vim.fn.mkdir(dir .. '/.git', 'p')
+      vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/tool.py'))
+      require(panel_under_test.open).open()
+      local view = panel.get(panel_under_test.name)
+      ok(view ~= nil and view.prompt_buf ~= nil, 'the panel opened with a prompt box')
+      local insert = keys_in(view.prompt_buf, 'i')
+      for key, mode in pairs(advertised(view.prompt_hint)) do
+        if mode ~= 'n' then
+          ok(insert[key:upper()], key .. ' is advertised for insert on the ' .. panel_under_test.name .. ' prompt')
+        end
+      end
+      ok(insert['<C-C>'], 'stop must be reachable from the mode every send leaves you in')
+      panel.close(panel_under_test.name)
+      vim.fn.delete(dir, 'rf')
+    end)
+  end
+end)
+
+-- Every later spec gets the real module back.
+package.loaded['nvime.agent'] = real_agent
+for _, name in ipairs({ 'nvime.chat', 'nvime.big', 'nvime.edit' }) do
+  package.loaded[name] = nil
+end

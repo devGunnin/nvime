@@ -120,6 +120,10 @@ export class DetachedService {
       this.#refuseIfTakenElsewhere(params);
       return this.#fallback(requestId, kind, params, this.#runnerStderr(params, spawned.errFrom));
     }
+    // The editor's snapshot of this session is the one `approve` returned,
+    // taken before the runner existed: it is told again now that there is a
+    // runner behind a control socket, so it knows the build can be steered.
+    this.#announceView(requestId, params);
     const followed = await this.#follow(requestId, params, from);
     // Only a run that reached a terminal event is still shutting down its
     // claim; a killed runner's is deliberately left stale for later.
@@ -209,7 +213,23 @@ export class DetachedService {
       id: requestId,
       text: `the detached build runner could not start (${reason}) — building in this editor instead, so it will stop if you close Neovim`,
     });
+    // No runner, so no socket to steer through. Said explicitly rather than
+    // left to a snapshot that cannot tell "not yet" from "never".
+    this.#announceView(requestId, params);
     return this.#inSidecar(requestId, kind, params);
+  }
+
+  /**
+   * Hands the editor the session as the sidecar sees it NOW — the one fact it
+   * cannot derive from the view it holds. Never fatal: a build must not fail
+   * because its bookkeeping could not be read.
+   */
+  #announceView(requestId: number, params: { root: string; id: string }): void {
+    try {
+      this.#emit('big.view', { id: requestId, session: this.#big.open(params.root, params.id) });
+    } catch (cause) {
+      process.stderr.write(`nvime: could not report the running build's view: ${messageOf(cause)}\n`);
+    }
   }
 
   /**

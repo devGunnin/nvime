@@ -20,14 +20,19 @@
 - **One `<Esc>` cancels a compose float**, from insert too — it opens there, so
   a normal-only mapping needed two presses while the footer promised one. With
   a completion popup up, `<Esc>` closes the popup and nothing else. A cancelled
-  draft is never lost: it goes to the unnamed register, and the message says
-  `"p` pastes it back — which matters most in the paste-blocked gate answer.
+  draft is never lost: it goes to the unnamed register — linewise when it has
+  more than one line, so `"p` puts the lines back rather than splicing them —
+  and the message says so, which matters most in the paste-blocked gate answer.
 
-- **Steer the build you started.** `s` and the panel prompt both steer any
-  build this editor is following, not only one running outside it — the gate
-  used a session snapshot taken before the runner started. Typing into the
-  prompt while a build runs sends it as a steer instead of being answered with
-  a hint; `resume`, `retriage` and `discard` keep their meaning.
+- **Steer the build you started.** Typing into the prompt while a build runs
+  sends it as a steer instead of being answered with a hint, and `s` steers the
+  same build; `resume`, `retriage` and `discard` keep their meaning. Whether a
+  steer has anywhere to go is the sidecar's call — a `steerable` flag on the
+  session view, re-sent on `big.view` the moment a runner is behind its control
+  socket, because the view the editor holds during its own build was taken
+  before that runner existed. A build that fell back to running inside the
+  sidecar has no runner to reach, and `s`, the prompt and the hint all say so
+  together instead of offering a steer that would be refused.
 
 - **The merge commit says what the change was for.** Its subject is the spec's
   one-line goal, not the first prompt clipped to 80 characters mid-clause; the
@@ -44,7 +49,8 @@
   approval nobody answered now shows `× denied (timed out)` — or
   `(duplicate request)`, which is not an abort — rather than staying pending
   forever, and the approval float prints a short command once instead of as
-  both summary and payload, unless collapsing its whitespace would change it.
+  both summary and payload — unless collapsing its whitespace would change it,
+  or the payload is a bare word that prose could carry by accident.
   A third-party write to the same file is still reported every time.
 
 - **The review pane is the file.** Selecting a thread now opens the build

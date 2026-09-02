@@ -168,14 +168,15 @@ function M.next_step(session)
     return nil
   end
   if session.runnerLive then
-    return 'building outside the editor — type to steer it, <C-c> stops it, closing Neovim does not'
+    local how = session.steerable and 'type to steer it, ' or ''
+    return 'building outside the editor — ' .. how .. '<C-c> stops it, closing Neovim does not'
   end
   if session.heldElsewhere then
     return 'another editor is driving this — watch it there, or <C-r> to pick a different change'
   end
-  -- No runner, no control socket, no steer: an in-sidecar build is stopped,
-  -- not nudged, and the hint must not promise otherwise.
-  local building = session.runner ~= nil and 'building — type to steer it, <C-c> stops it'
+  -- The sidecar's word, never a guess: a build with no runner behind a live
+  -- socket (the in-sidecar fallback) is stopped, not nudged.
+  local building = session.steerable and 'building — type to steer it, <C-c> stops it'
     or 'building — <C-c> stops it'
   if session.detached then
     building = session.runner ~= nil and 'the build died part-way — type `resume` to pick it back up, or `discard`'
@@ -249,6 +250,12 @@ local function on_event(name, params)
     surface():interject('  → build finished', 'NvimeSession')
   elseif name == 'big.failed' then
     show_error({ message = params.message or 'the detached build failed', detail = params.detail })
+  elseif name == 'big.view' then
+    -- The sidecar's own read of this session, sent once the build is really
+    -- running: the view this panel adopted at `approve` predates the runner.
+    if type(params.session) == 'table' then
+      adopt(params.session)
+    end
   elseif name == 'big.started' then
     surface():interject(string.format('  %s · %s', params.phase, params.model or '?'), 'NvimeDim')
   elseif name == 'big.delta' then
@@ -620,7 +627,7 @@ end
 --- @param word string the prompt, trimmed and lowercased
 function M.resume_or_discard(word)
   local session = state.session
-  local hint = M.next_step(session) or 'the build is running — type to steer it, <C-c> stops it'
+  local hint = M.next_step(session) or 'the build is running — <C-c> stops it'
   if session ~= nil and session.heldElsewhere then
     surface():append('  ' .. hint, 'NvimeActivity')
     surface():blank()
@@ -637,7 +644,7 @@ function M.resume_or_discard(word)
     surface():append('  ' .. hint, 'NvimeActivity')
     surface():blank()
   else
-    surface():append('  the build is running — type to steer it, <C-c> stops it', 'NvimeActivity')
+    surface():append('  ' .. hint, 'NvimeActivity')
     surface():blank()
   end
 end
@@ -720,7 +727,10 @@ function M.steer(text)
     -- so a refusal would otherwise take the words with it.
     local live = panel.get(PANEL)
     if live == nil or not live:restore_prompt(text) then
-      vim.notify('nvime: the steer was refused, and your text was: ' .. text, vim.log.levels.WARN)
+      -- The box has moved on (closed, or typed into since). A notify is one
+      -- transient line, so the words go where they can still be read.
+      vim.fn.setreg('"', text)
+      vim.notify('nvime: the steer was refused — "p pastes your text back: ' .. text, vim.log.levels.WARN)
     end
     M.refresh()
   end)
@@ -728,26 +738,15 @@ end
 
 --- Whether what the reader types now is a nudge for a build in flight.
 ---
---- A steer travels to a RUNNER over its control socket, so a recorded runner
---- is the precondition: a build that fell back to running inside the sidecar
---- has none, and every steer to it would be refused. `runnerLive` alone is not
---- enough either — it comes from a snapshot taken before this editor's own
---- runner recorded itself.
+--- The sidecar decides whether a steer has anywhere to go (`steerable`): only
+--- it knows whether a runner is behind a live control socket, and it says so
+--- again on `big.view` once that runner exists — the view this panel adopted
+--- at `approve` was taken before it. This editor adds the half it owns: that
+--- it is following the run at all.
 --- @return boolean
 function M.steerable()
   local session = state.session
-  if session == nil then
-    return false
-  end
-  -- Same order as `describe`: a live runner first, because from the lock alone
-  -- it looks exactly like another editor holding the session.
-  if session.runnerLive then
-    return true
-  end
-  if session.heldElsewhere then
-    return false
-  end
-  return session.runner ~= nil and M.is_running()
+  return session ~= nil and session.steerable == true and M.is_running()
 end
 
 --- `s`: the compose float for one steer.

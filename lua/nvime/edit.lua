@@ -259,7 +259,16 @@ function M.open()
     on_submit = M.send,
     on_close = on_panel_close,
     keys = {
-      { mode = 'n', lhs = '<C-c>', fn = M.cancel, desc = 'nvime: stop the edit run', where = 'both' },
+      -- `insert = true`, like every other prompt panel: the box is left in
+      -- insert after each send, which is exactly when a run needs stopping.
+      {
+        mode = 'n',
+        lhs = '<C-c>',
+        fn = M.cancel,
+        desc = 'nvime: stop the edit run',
+        where = 'both',
+        insert = true,
+      },
     },
   })
   refresh_status(nil)

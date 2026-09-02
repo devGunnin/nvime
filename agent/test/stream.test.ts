@@ -76,3 +76,12 @@ describe('shortPath: where a status line says a file is', () => {
     assert.equal(shortPath('/work/proj', '/work/proj'), '/work/proj');
   });
 });
+
+describe('describeTool and the approval float', () => {
+  it('ends a Bash summary with the raw command', () => {
+    // The editor suppresses the verbatim payload block only when the summary
+    // ENDS WITH the payload; a lead-in that trails the command re-opens that.
+    const command = 'grep -rn needle src';
+    assert.ok(describeTool('Bash', { command }, '/repo').endsWith(command));
+  });
+});

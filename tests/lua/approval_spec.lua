@@ -447,18 +447,32 @@ describe('the approval float is tall enough for what it shows', function()
     ok(body:find('the exact command', 1, true) ~= nil, 'the aligned command is shown verbatim')
   end)
 
-  it('never suppresses a payload short enough to appear in prose by accident', function()
+  it('never suppresses a bare word, which prose can carry by accident', function()
     local body = table.concat(
       approval.render({
         approvalId = 'a1',
         tool = 'Bash',
-        summary = 'running the release script',
+        summary = 'running make',
         reason = 'runs a shell command',
-        detail = { kind = 'command', text = 'rm', bytes = 2 },
+        detail = { kind = 'command', text = 'make', bytes = 4 },
       }, 72),
       '\n'
     )
-    ok(body:find('the exact command', 1, true) ~= nil, 'a two-character payload is not "already shown"')
+    ok(body:find('the exact command', 1, true) ~= nil, 'one word is not proof the reader saw the command')
+  end)
+
+  it('prints a short flagged command once — length is not what makes it ambiguous', function()
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Bash',
+        summary = 'running ls -la',
+        reason = 'runs a shell command',
+        detail = { kind = 'command', text = 'ls -la', bytes = 6 },
+      }, 72),
+      '\n'
+    )
+    eq(nil, body:find('the exact command', 1, true), 'the summary already showed all six characters of it')
   end)
 
   it('suppresses only when the summary carries the payload as a whole', function()

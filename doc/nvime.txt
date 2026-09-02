@@ -125,9 +125,12 @@ Global ~
 Prompt buffer ~
     <CR>            normal      send the prompt
     <C-s>           insert      send the prompt (<CR> still inserts a newline)
-    <C-c>           both        stop the running turn
-    <C-r>           both        session / change picker — in insert only while
-                                 the box is EMPTY; with anything typed it is
+    <C-c>           both        stop the running turn (chat, edit, big). In
+                                 insert it acts without leaving insert — it no
+                                 longer drops the box into normal mode
+    <C-r>           both        session / change picker (chat, big; the edit
+                                 panel has none) — in insert only while the box
+                                 is EMPTY; with anything typed it is
                                  |i_CTRL-R|, the register paste, as always
     <C-n>           normal      start a new conversation / big change
     <C-t>           normal      open the review threads (big panel)
@@ -163,8 +166,12 @@ Big-change panel ~
     <C-n>                       start a new big change
     <C-r>                       pick a big change
     <C-t>                       open the review threads
-    s                           steer the running build (scrollback; typing
-                                 in the prompt while it builds steers it too)
+    s                           steer the running build (scrollback; typing in
+                                 the prompt while it builds steers it too).
+                                 Offered only while the sidecar reports the
+                                 build steerable — a build that fell back to
+                                 running inside the sidecar has no runner to
+                                 reach, and says so instead
     <C-c>                       stop the run
     ]o                          jump to the pending choice
     q                           close

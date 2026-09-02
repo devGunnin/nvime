@@ -211,6 +211,20 @@ describe('commitMessageFor', () => {
     assert.ok(!subject.includes('\uFFFD'));
   });
 
+  it('never ends a subject with half a ZWJ sequence', () => {
+    // A joiner left as the last code point is an invisible control character
+    // in `git log`, and the family emoji is four people joined by three of them.
+    for (const pad of [63, 64, 65, 66]) {
+      // No space to cut at: the cut lands inside the joined sequence itself.
+      const goal = `${'w'.repeat(pad)}👨‍👩‍👧‍👦`;
+      const subject = commitMessageFor({ title: 't', spec: { ...spec, goal } }).split('\n')[0] ?? '';
+      assert.ok(Buffer.byteLength(subject) <= 72, `${pad}: ${Buffer.byteLength(subject)} bytes`);
+      assert.ok(!/\u200d$/.test(subject), `${pad}: trailing ZWJ in ${JSON.stringify(subject)}`);
+      assert.ok(!/\p{M}$/u.test(subject), `${pad}: dangling combining mark`);
+      assert.ok(goal.startsWith(subject), `${pad}: ${subject}`);
+    }
+  });
+
   it('cuts a spaceless goal rather than emitting nothing', () => {
     const goal = 'a'.repeat(200);
     const subject = commitMessageFor({ title: 't', spec: { ...spec, goal } }).split('\n')[0] ?? '';
