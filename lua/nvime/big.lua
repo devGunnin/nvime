@@ -751,7 +751,7 @@ function M.pick_session()
       show_error(err)
       return
     end
-    local items = { { label = 'start a new change', value = NEW_CHANGE } }
+    local items = { { label = 'start a new change', value = NEW_CHANGE, deletable = false } }
     for _, session in ipairs(result.sessions or {}) do
       items[#items + 1] = {
         label = string.format('%-14s %s', M.describe(session):sub(1, 14), session.title),

@@ -54,9 +54,26 @@ local function confirm(prompt, on_answer)
   end
   for _, entry in ipairs({ { 'y', true }, { 'n', false }, { 'q', false }, { '<Esc>', false } }) do
     vim.keymap.set('n', entry[1], function()
+      -- `nowait` cannot consume a count, so `3y` would otherwise reach here
+      -- and confirm. A count means the key was not meant as this answer.
+      if entry[2] and vim.v.count > 0 then
+        return
+      end
       finish(entry[2])
     end, { buffer = buf, nowait = true, silent = true })
   end
+  -- Walking out of the float with an unmapped window command must not leave a
+  -- stuck-looking modal over the editor; leaving is declining.
+  vim.api.nvim_create_autocmd({ 'WinLeave', 'BufLeave' }, {
+    buffer = buf,
+    callback = function()
+      -- Not inline: closing a window from inside WinLeave hits textlock. The
+      -- `answered` latch makes the deferred call a no-op after a real answer.
+      vim.schedule(function()
+        finish(false)
+      end)
+    end,
+  })
 end
 
 --- @param items table[] each with `label` (string) and `value` (any); an
@@ -129,12 +146,20 @@ function M.open(items, opts)
   vim.wo[win].wrap = false
   vim.wo[win].breakindent = false
 
+  -- Items whose deletion the sidecar has not answered yet, keyed by identity:
+  -- rows move as earlier deletes land, so a row number would not survive.
+  local deleting = {}
+
   local function dismiss()
     close(win, buf)
   end
   local function choose()
     local row = vim.api.nvim_win_get_cursor(win)[1]
     local item = items[row]
+    if item ~= nil and deleting[item] then
+      vim.notify('nvime: that one is being deleted', vim.log.levels.WARN)
+      return
+    end
     dismiss()
     if item ~= nil then
       opts.on_choice(item.value)
@@ -154,22 +179,60 @@ function M.open(items, opts)
     vim.bo[buf].modifiable = false
   end
 
-  local function delete_current()
-    if opts.on_delete == nil then
+  --- Where `item` sits now, or nil if an earlier delete already took it out.
+  local function row_of(item)
+    for row, entry in ipairs(items) do
+      if entry == item then
+        return row
+      end
+    end
+    return nil
+  end
+
+  --- Dims a row for as long as its delete is outstanding. The extmark rides
+  --- the line, so it stays on the right row when rows above it disappear.
+  local function mark_deleting(item)
+    local row = row_of(item)
+    if row == nil then
+      deleting[item] = true
       return
     end
+    deleting[item] = vim.api.nvim_buf_set_extmark(buf, NS, row - 1, 0, {
+      end_col = #(' ' .. item.label),
+      hl_group = 'NvimeDim',
+      strict = false,
+    })
+  end
+
+  local function unmark_deleting(item)
+    local mark = deleting[item]
+    deleting[item] = nil
+    if type(mark) == 'number' and vim.api.nvim_buf_is_valid(buf) then
+      pcall(vim.api.nvim_buf_del_extmark, buf, NS, mark)
+    end
+  end
+
+  local function delete_current()
     local row = vim.api.nvim_win_get_cursor(win)[1]
     local item = items[row]
-    if item == nil or item.deletable == false then
+    if item == nil or item.deletable == false or deleting[item] then
       return
     end
     confirm('delete ' .. vim.trim(item.label) .. '?', function(yes)
       if not yes or not vim.api.nvim_buf_is_valid(buf) then
         return
       end
+      mark_deleting(item)
       opts.on_delete(item.value, function(ok)
-        if ok and vim.api.nvim_buf_is_valid(buf) then
-          remove_row(row)
+        unmark_deleting(item)
+        if not ok or not vim.api.nvim_buf_is_valid(buf) then
+          return
+        end
+        -- By identity, not the captured row: a delete that landed first may
+        -- already have shifted this item up the list.
+        local now = row_of(item)
+        if now ~= nil then
+          remove_row(now)
         end
       end)
     end)
@@ -179,7 +242,9 @@ function M.open(items, opts)
     vim.keymap.set('n', lhs, fn, { buffer = buf, nowait = true, silent = true })
   end
   map('<CR>', choose)
-  map('d', delete_current)
+  if opts.on_delete ~= nil then
+    map('d', delete_current)
+  end
   map('q', dismiss)
   map('<Esc>', dismiss)
   return win

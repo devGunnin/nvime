@@ -156,7 +156,128 @@ describe('picker.open: deleting a row', function()
     vim.api.nvim_win_set_cursor(win, { 1, 0 })
     feed('d')
     ok(vim.api.nvim_win_is_valid(win), 'd is inert without on_delete, not an error')
+    eq(nil, vim.fn.maparg('d', 'n', false, true).buffer, 'd is not bound at all, so dd still behaves like dd')
     vim.api.nvim_win_close(win, true)
+  end)
+
+  it('drops the row the deletion actually finished, not the row the cursor was on', function()
+    local pending = {}
+    local win = picker.open(items(4), {
+      on_choice = function() end,
+      on_delete = function(value, done)
+        pending[#pending + 1] = { value = value, done = done }
+      end,
+    })
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { 4, 0 })
+    feed('dy')
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { 2, 0 })
+    feed('dy')
+    eq(2, #pending, 'both deletes are in flight')
+
+    -- Out of order, the way two RPC round trips can land.
+    pending[2].done(true)
+    pending[1].done(true)
+    local left = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false)
+    eq(2, #left)
+    for _, line in ipairs(left) do
+      ok(line:find('session 04', 1, true) == nil, 'a session deleted on the server is still offered: ' .. line)
+      ok(line:find('session 02', 1, true) == nil, 'wrong row removed: ' .. line)
+    end
+    vim.api.nvim_win_close(win, true)
+  end)
+
+  it('refuses <CR> and a second d on a row whose delete has not come back', function()
+    local chosen, pending = {}, {}
+    local win = picker.open(items(2), {
+      on_choice = function(value)
+        chosen[#chosen + 1] = value
+      end,
+      on_delete = function(value, done)
+        pending[#pending + 1] = { value = value, done = done }
+      end,
+    })
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    feed('dy')
+    vim.api.nvim_set_current_win(win)
+    feed('<CR>')
+    eq({}, chosen, 'resuming a conversation being deleted would resume a ghost')
+    ok(vim.api.nvim_win_is_valid(win), 'and the picker stays open rather than closing on the refusal')
+    vim.api.nvim_set_current_win(win)
+    feed('dy')
+    eq(1, #pending, 'a second delete of the same row must not be sent')
+    pending[1].done(true)
+    vim.api.nvim_win_close(win, true)
+  end)
+
+  it('dims a row while its delete is outstanding, and undims it when the delete fails', function()
+    local ns = vim.api.nvim_create_namespace('nvime.picker')
+    local pending = nil
+    local win = picker.open(items(2), {
+      on_choice = function() end,
+      on_delete = function(_, done)
+        pending = done
+      end,
+    })
+    local buf = vim.api.nvim_win_get_buf(win)
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    feed('dy')
+    eq(1, #vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, {}), 'the row in flight is marked')
+    pending(false)
+    eq(0, #vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, {}), 'a failed delete gives the row back, undimmed')
+    vim.api.nvim_win_close(win, true)
+  end)
+end)
+
+describe('picker.open: the confirm float', function()
+  local function feed(keys)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, true, true), 'x', false)
+  end
+
+  it('closes itself when abandoned, instead of floating over the editor unanswered', function()
+    local deleted = {}
+    local win = picker.open(items(2), {
+      on_choice = function() end,
+      on_delete = function(value, done)
+        deleted[#deleted + 1] = value
+        done(true)
+      end,
+    })
+    local before = #vim.api.nvim_list_wins()
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    feed('d')
+    eq(before + 1, #vim.api.nvim_list_wins(), 'the confirm float is up')
+    feed('<C-w>w')
+    vim.wait(200, function()
+      return #vim.api.nvim_list_wins() == before
+    end)
+    eq(before, #vim.api.nvim_list_wins(), 'walking out of the confirm answers it "no" and closes it')
+    eq({}, deleted, 'leaving without answering must never delete')
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end)
+
+  it('ignores a count on y, which nowait cannot consume', function()
+    local deleted = {}
+    local win = picker.open(items(2), {
+      on_choice = function() end,
+      on_delete = function(value, done)
+        deleted[#deleted + 1] = value
+        done(true)
+      end,
+    })
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    feed('d')
+    feed('3y')
+    eq({}, deleted, '3y is not the answer "yes"')
+    feed('y')
+    eq(1, #deleted, 'a bare y still confirms')
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
   end)
 end)
 
