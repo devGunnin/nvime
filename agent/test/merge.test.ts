@@ -108,6 +108,7 @@ function session(overrides: Partial<BigSession> = {}): BigSession {
     state: 'reviewing',
     difficulty: DEFAULT_DIFFICULTY,
     threshold: 70,
+    policyId: null,
     createdAt: now,
     updatedAt: now,
     transitions: [],

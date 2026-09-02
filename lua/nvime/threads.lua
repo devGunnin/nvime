@@ -154,30 +154,38 @@ function M.gate_lines(block)
   local function mark(col, end_col, hl)
     marks[#marks + 1] = { row = #lines - 1, col = col, end_col = end_col, hl = hl }
   end
+  local function band(hl)
+    marks[#marks + 1] = { row = #lines - 1, hl = hl }
+  end
   mark(0, #lines[2], 'NvimeDim')
 
   for index, round in ipairs(rounds) do
     for at, line in ipairs(vim.split(round.answer or '', '\n', { plain = true })) do
       lines[#lines + 1] = (at == 1 and SPEAKER or CONTINUE) .. line
+      band('NvimeUserBody')
       if at == 1 then
         mark(0, #SPEAKER, 'NvimeUser')
       end
     end
     if round.result == nil then
       lines[#lines + 1] = '  ! ' .. (round.ungraded or 'this answer was not graded')
+      band('NvimeAgentBody')
       mark(0, #lines[#lines], 'NvimeError')
       lines[#lines + 1] = '  the thread stays open — answer again'
+      band('NvimeAgentBody')
       mark(0, #lines[#lines], 'NvimeDim')
     else
       local grade = string.format('  %d', round.result.grade or 0)
       lines[#lines + 1] = string.format('%s · %s', grade, round.result.verdict or '')
+      band('NvimeAgentBody')
       -- Green only for the round that actually cleared the thread; every
       -- other score is a score that was not enough.
       mark(0, #grade, (cleared and index == #rounds) and 'NvimeOk' or 'NvimeWarn')
-      mark(#grade, #lines[#lines], 'NvimeDim')
+      mark(#grade, #lines[#lines], 'NvimeAgent')
       for _, entry in ipairs({ { 'hint: ', round.result.hint }, { 'next: ', round.result.followup } }) do
         if entry[2] ~= nil and entry[2] ~= '' then
           lines[#lines + 1] = '  ' .. entry[1] .. entry[2]
+          band('NvimeAgentBody')
           mark(0, 2 + #entry[1], 'NvimeDim')
         end
       end
@@ -953,6 +961,7 @@ local function merge()
       return
     end
     refresh_after_merge(result.session)
+    require('nvime.organization').attest(view.root, result.session.id)
   end)
 end
 

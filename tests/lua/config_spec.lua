@@ -9,6 +9,27 @@ describe('config.setup', function()
     eq(80, opts.panel.width)
     eq(false, opts.keymaps.enabled)
     eq('node', opts.agent.node)
+    eq(nil, opts.organization.control_plane_url)
+    eq('gh', opts.organization.github)
+  end)
+
+  it('requires a secure, complete organization configuration', function()
+    local managed = config.setup({
+      organization = {
+        control_plane_url = 'https://control.nvime.dev',
+        trust_core = '/opt/nvime/bin/nvime-trust',
+        github = '/usr/bin/gh',
+      },
+    })
+    eq('https://control.nvime.dev', managed.organization.control_plane_url)
+    eq('/opt/nvime/bin/nvime-trust', managed.organization.trust_core)
+    t.throws(function()
+      config.setup({ organization = { control_plane_url = 'http://control.example.com', trust_core = '/bin/true' } })
+    end, 'HTTPS')
+    t.throws(function()
+      config.setup({ organization = { control_plane_url = 'https://control.example.com' } })
+    end, 'configured together')
+    config.setup(nil)
   end)
 
   it('merges nested tables rather than replacing them', function()

@@ -89,6 +89,13 @@ local defaults = {
     -- an explicit, marked-untrusted block. Off disables reading the file at all.
     enabled = true,
   },
+  organization = {
+    -- Paid enforcement stays opt-in for the community plugin. A managed
+    -- deployment supplies both the service and its native signing binary.
+    control_plane_url = nil,
+    trust_core = nil,
+    github = 'gh',
+  },
 }
 
 local options = vim.deepcopy(defaults)
@@ -100,6 +107,32 @@ end
 local function check_type(value, expected, path)
   if type(value) ~= expected then
     fail(string.format('%s must be a %s, got %s', path, expected, type(value)))
+  end
+end
+
+local function validate_organization(opts)
+  check_type(opts.organization, 'table', 'organization')
+  local endpoint = opts.organization.control_plane_url
+  local trust = opts.organization.trust_core
+  if endpoint == nil and trust == nil then
+    check_type(opts.organization.github, 'string', 'organization.github')
+    return
+  end
+  if endpoint == nil or trust == nil then
+    fail('organization.control_plane_url and organization.trust_core must be configured together')
+  end
+  check_type(endpoint, 'string', 'organization.control_plane_url')
+  check_type(trust, 'string', 'organization.trust_core')
+  check_type(opts.organization.github, 'string', 'organization.github')
+  if endpoint == '' or trust == '' or opts.organization.github == '' then
+    fail('organization settings must not be empty')
+  end
+  if
+    not endpoint:match('^https://')
+    and not endpoint:match('^http://localhost[:/]')
+    and not endpoint:match('^http://127%.0%.0%.1[:/]')
+  then
+    fail('organization.control_plane_url must use HTTPS or loopback HTTP')
   end
 end
 
@@ -183,6 +216,7 @@ local function validate(opts)
     fail('context.max_dir_entries must be at least 1')
   end
   check_type(opts.project_instructions.enabled, 'boolean', 'project_instructions.enabled')
+  validate_organization(opts)
   return opts
 end
 

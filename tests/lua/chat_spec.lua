@@ -70,24 +70,7 @@ local function open_on(dir)
   fake.replies = { ['chat.list'] = { err = nil, result = { current = nil, sessions = {} } } }
   local live = chat.state()
   live.request_id, live.session_id, live.root, live.pending_send = nil, nil, nil, nil
-  config.setup({})
-  palette.apply()
-  vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/a.lua'))
-  chat.open()
-end
-
---- Like `open_on`, but `chat.list`/`chat.history` answer only when the test
---- calls `fake.answer` — the race `M.send` racing `M.open`'s restore needs.
-local function open_on_deferred(dir)
-  panel.close('chat')
-  fake.requests = {}
-  fake.deferred = {}
-  fake.replies = {
-    ['chat.list'] = { defer = true },
-    ['chat.history'] = { defer = true },
-  }
-  local live = chat.state()
-  live.request_id, live.session_id, live.root, live.pending_send = nil, nil, nil, nil
+  live.restored = false
   config.setup({})
   palette.apply()
   vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/a.lua'))
@@ -124,7 +107,8 @@ describe('chat.open', function()
     from_elsewhere(function()
       open_on(dir)
       eq(dir, chat.state().root)
-      eq(dir, sent('chat.list').params.root, 'and sends that root, not the cwd')
+      eq(nil, sent('chat.list'), 'opening starts fresh instead of silently resuming history')
+      ok(table.concat(scrollback(), '\n'):find('new conversation', 1, true) ~= nil, 'the fresh state is explicit')
     end)
     panel.close('chat')
     vim.fn.delete(dir, 'rf')
@@ -141,7 +125,7 @@ describe('chat.open', function()
       local lists = vim.tbl_filter(function(request)
         return request.method == 'chat.list'
       end, fake.requests)
-      eq(1, #lists, 'and the session is not restored a second time')
+      eq(0, #lists, 'and reopening does not implicitly restore a session')
     end)
     panel.close('chat')
     vim.fn.delete(dir, 'rf')
@@ -219,18 +203,24 @@ describe('chat.send', function()
   end)
 end)
 
-describe('sending before restore lands', function()
-  it('defers a send until the resumed transcript is fully written', function()
+describe('resuming conversations', function()
+  it('defers a send until explicitly selected history is fully written', function()
     local dir = sandbox()
     from_elsewhere(function()
-      open_on_deferred(dir)
-      -- Same tick as M.open(), the way M.send_selection fires it: chat.list
-      -- has not answered yet, so this must not jump the queue.
+      open_on(dir)
+      fake.replies['chat.list'] = {
+        err = nil,
+        result = {
+          current = 'sess-1',
+          sessions = { { sessionId = 'sess-1', title = 'earlier question', lastModified = 0 } },
+        },
+      }
+      fake.replies['chat.history'] = { defer = true }
+      chat.pick_session()
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, true, true), 'x', false)
+
       chat.send('explain this')
       eq(nil, sent('chat.send'), 'the send must wait for restore, not race it')
-
-      fake.answer('chat.list', nil, { current = 'sess-1', sessions = {} })
-      eq(nil, sent('chat.send'), 'chat.list resolving is not enough: history is still loading')
 
       fake.answer('chat.history', nil, { turns = { { role = 'user', text = 'earlier question' } } })
       local request = sent('chat.send')
@@ -256,11 +246,31 @@ describe('sending before restore lands', function()
     vim.fn.delete(dir, 'rf')
   end)
 
-  it('sends immediately once restore has already landed', function()
+  it('starts a clean conversation without deleting resumable history', function()
     local dir = sandbox()
-    open_on(dir) -- fake.replies resolves chat.list synchronously
+    open_on(dir)
+    local live = chat.state()
+    live.session_id = 'sess-old'
+    panel.get('chat'):append('old transcript')
+    chat.new_session()
+    eq(nil, live.session_id)
+    ok(table.concat(scrollback(), '\n'):find('old transcript', 1, true) == nil, 'the old transcript leaves the surface')
+    eq(nil, sent('chat.list'), 'history is retained server-side and remains available through resume')
     chat.send('hello')
-    ok(sent('chat.send') ~= nil, 'a normal send is not held up once restored')
+    eq(nil, sent('chat.send').params.sessionId, 'the next turn creates a new sidecar session')
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('does not abandon a running turn to start another conversation', function()
+    local dir = sandbox()
+    open_on(dir)
+    chat.send('keep working')
+    local live = chat.state()
+    live.session_id = 'sess-live'
+    chat.new_session()
+    eq('sess-live', live.session_id)
+    ok(live.request_id ~= nil, 'the active request remains owned and cancellable')
     panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)

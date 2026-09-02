@@ -128,6 +128,9 @@ describe('palette.groups', function()
       'NvimeBar',
       'NvimeBarDim',
       'NvimeCursorLine',
+      'NvimeUserBody',
+      'NvimeAgentBody',
+      'NvimeTool',
       'NvimeKey',
       'NvimeLabel',
       'NvimeOk',
@@ -141,6 +144,14 @@ describe('palette.groups', function()
     }) do
       ok(groups[name] ~= nil, name .. ' is used by a surface but never defined')
     end
+  end)
+
+  it('gives the two speakers subtle but distinct theme-derived surfaces', function()
+    local resolved = palette.resolve()
+    local groups = palette.groups(resolved)
+    ok(groups.NvimeUserBody.bg ~= resolved.bg, 'the user message must be visible against Normal')
+    ok(groups.NvimeAgentBody.bg ~= resolved.bg, 'the agent message must be visible against Normal')
+    ok(groups.NvimeUserBody.bg ~= groups.NvimeAgentBody.bg, 'speaker boundaries must remain distinguishable')
   end)
 end)
 

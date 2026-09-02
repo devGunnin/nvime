@@ -263,6 +263,32 @@ describe('panel', function()
     panel.close(NAME)
   end)
 
+  it('keeps a message surface behind prose without flattening code blocks', function()
+    open()
+    current():append_markdown('plain\n```lua\nlocal x = 1\n```', 'NvimeAgentBody')
+    local prose, code = 0, 0
+    for _, mark in ipairs(marks()) do
+      prose = prose + (mark[4].line_hl_group == 'NvimeAgentBody' and 1 or 0)
+      code = code + (mark[4].line_hl_group == 'NvimeCode' and 1 or 0)
+    end
+    eq(1, prose, 'ordinary prose has the agent surface')
+    eq(1, code, 'the fenced body keeps the stronger code surface')
+    panel.close(NAME)
+  end)
+
+  it('extends a streaming message surface across every completed line', function()
+    open()
+    current():begin_stream('claude', 'NvimeAgentBody')
+    current():push_delta('first\nsecond')
+    current():finish_stream()
+    local surfaced = vim.tbl_filter(function(mark)
+      return mark[4].line_hl_group == 'NvimeAgentBody'
+    end, marks())
+    eq(2, #surfaced)
+    eq({ 'first', 'second' }, { lines()[2], lines()[3] })
+    panel.close(NAME)
+  end)
+
   it('shows status and runs the activity indicator without blocking', function()
     local self = open()
     current():status('session abcd1234')

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import {
   BigStore,
   clearCapture,
+  diffIdOf,
   LOCK_HEARTBEAT_MS,
   LOCK_STALE_MS,
   MAX_CONVERSATION_TURNS,
@@ -75,13 +76,22 @@ describe('BigStore', () => {
   });
 
   it('records custom managed thresholds without weakening validation', () => {
-    const session = store.create(repo, 'managed review', 'medium', 82);
+    const session = store.create(repo, 'managed review', 'medium', 82, 'org:42:policy:7');
     assert.equal(session.difficulty, 'medium');
     assert.equal(session.threshold, 82);
+    assert.equal(session.policyId, 'org:42:policy:7');
     assert.throws(() => store.create(repo, 'too low', 'medium', 0), ProtocolError);
     assert.throws(() => store.create(repo, 'too high', 'medium', 101), ProtocolError);
     assert.throws(() => store.create(repo, 'not whole', 'medium', 70.5), ProtocolError);
     assert.throws(() => store.create(repo, 'vibe threshold', 'vibe', 40), ProtocolError);
+    assert.throws(() => store.create(repo, 'bad policy', 'medium', 70, 'latest'), ProtocolError);
+  });
+
+  it('uses the complete SHA-256 digest as the portable diff identity', () => {
+    const first = diffIdOf('diff --git a/a b/a\n');
+    const second = diffIdOf('diff --git a/b b/b\n');
+    assert.match(first, /^[a-f0-9]{64}$/);
+    assert.notEqual(first, second);
   });
 
   it('reads back what it saved, and lists most recently touched first', async () => {

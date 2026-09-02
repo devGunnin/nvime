@@ -324,8 +324,8 @@ export class BigService {
     return this.#running.size;
   }
 
-  create(root: string, title: string, difficulty: Difficulty, threshold?: number): SessionView {
-    return this.#view(this.#store.create(root, title, difficulty, threshold ?? thresholdFor(difficulty)));
+  create(root: string, title: string, difficulty: Difficulty, threshold?: number, policyId: string | null = null): SessionView {
+    return this.#view(this.#store.create(root, title, difficulty, threshold ?? thresholdFor(difficulty), policyId));
   }
 
   /**
@@ -337,6 +337,9 @@ export class BigService {
     const session = this.#store.require(root, id);
     if (session.state !== 'drafting') {
       throw new ProtocolError('bad_request', 'the difficulty is fixed once the spec is approved');
+    }
+    if (session.policyId !== null) {
+      throw new ProtocolError('bad_request', 'the comprehension gate is locked by organization policy');
     }
     session.difficulty = difficulty;
     session.threshold = thresholdFor(difficulty);

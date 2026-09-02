@@ -166,6 +166,33 @@ describe('big change intake', function()
     cleanup()
   end)
 
+  it('locks a new change to the live organization policy revision', function()
+    local _, path = sandbox()
+    open_on(path)
+    config.setup({
+      organization = {
+        control_plane_url = 'http://127.0.0.1:4817',
+        trust_core = '/bin/true',
+        github = '/bin/true',
+      },
+    })
+    fake.replies['organization.policy'] =
+      { result = {
+        policyId = 'org:42:policy:7',
+        gateMode = 'manual',
+        threshold = 82,
+      } }
+    fake.replies['big.create'] = { result = { session = session({ policyId = 'org:42:policy:7', threshold = 82 }) } }
+    fake.replies['big.intake'] = { result = { session = session({ spec = SPEC }) } }
+    big.send('change the retry policy')
+    local created = sent('big.create')
+    eq('org:42:policy:7', created.params.policyId)
+    eq(82, created.params.threshold)
+    eq('medium', created.params.difficulty)
+    config.setup({})
+    cleanup()
+  end)
+
   it("threads the big_intake lane's model dial into big.intake", function()
     local _, path = sandbox()
     local models = require('nvime.models')
@@ -343,6 +370,32 @@ describe('big change session states', function()
     ok(lines[1]:match('building') ~= nil, 'the picker leads with the state: ' .. lines[1])
     ok(lines[2]:match('mergeable') ~= nil, lines[2])
     vim.api.nvim_win_close(win, true)
+    cleanup()
+  end)
+
+  it('starts a clean change without discarding the resumable session', function()
+    local _, path = sandbox()
+    open_on(path)
+    local live = big.state()
+    live.session = session({ id = 'kept', conversation = { { role = 'user', text = 'old request' } } })
+    panel.get('big'):append('old request')
+    big.new_change()
+    eq(nil, live.session)
+    ok(table.concat(scrollback(), '\n'):find('old request', 1, true) == nil, 'the old intake leaves the surface')
+    eq(nil, sent('big.discard'), 'starting fresh never destroys the existing worktree or session')
+    ok(has_line('new big change'), 'the next action is explicit')
+    cleanup()
+  end)
+
+  it('keeps ownership of a running change when a fresh start is requested', function()
+    local _, path = sandbox()
+    open_on(path)
+    local live = big.state()
+    live.session = session({ id = 'running', display = 'building' })
+    live.request_id = 41
+    big.new_change()
+    eq('running', live.session.id)
+    eq(41, live.request_id, 'the request remains reachable through stop and detach controls')
     cleanup()
   end)
 

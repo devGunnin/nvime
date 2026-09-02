@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Managed GitHub assurance.** Licensed deployments can lock every Big Change
+  to a live, immutable organization policy and exact comprehension threshold.
+  `:Nvime enroll` exposes only the repository-scoped public workstation record;
+  after a reviewed merge the sidecar binds numeric GitHub user/repository IDs,
+  the full SHA-256 diff identity, policy revision, gates and exact commit into
+  canonical evidence signed by the native Ed25519 trust core. There is no
+  shared submission token in the open plugin. Missing entitlement, policy,
+  signer, enrollment, GitHub identity, or current `HEAD` fails closed, and the
+  eventual PR webhook is what binds stored evidence to the pushed head.
+
+- **Fresh means fresh (#11).** Chat now opens a new conversation instead of
+  silently restoring the last project session. `<C-n>` starts clean in Chat or
+  Big Change without deleting resumable history; `<C-r>` is the explicit
+  resume path. Both refuse to switch while work is running, preserving the
+  stream and cancellation handle.
+- **Speaker surfaces that survive light and dark themes (#9).** User prose,
+  agent prose and tool activity now occupy distinct, subtle full-width bands
+  blended from the active colorscheme. The same visual grammar reaches the
+  comprehension gate, while fenced code keeps its stronger code background
+  and syntax colours.
+
 - **The review tab says what it is doing.** `R`, `M`, `a`, `r`, `e` and `X` all
   run through one indicator: past ~300ms the left bar spins with what is
   running and the right bar carries the run's latest line, cleared the moment

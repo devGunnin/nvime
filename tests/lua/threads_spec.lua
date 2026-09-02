@@ -1,5 +1,6 @@
 local t = require('harness')
 local compose = require('nvime.compose')
+local config = require('nvime.config')
 local palette = require('nvime.palette')
 
 local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
@@ -52,6 +53,8 @@ package.loaded['nvime.agent'] = {
     return true
   end,
 }
+package.loaded['nvime.organization'] = nil
+require('nvime.organization')
 package.loaded['nvime.threads'] = nil
 local threads = require('nvime.threads')
 
@@ -737,6 +740,40 @@ describe('the merge key', function()
     threads.close()
   end)
 
+  it('automatically submits managed evidence after the reviewed commit lands', function()
+    config.setup({
+      organization = {
+        control_plane_url = 'http://127.0.0.1:4817',
+        trust_core = '/bin/true',
+        github = '/bin/true',
+      },
+    })
+    open_review({ block({ state = 'resolved' }) })
+    fake.replies['big.merge'] = {
+      result = {
+        merged = true,
+        refusals = {},
+        session = session({ block({ state = 'resolved' }) }, {
+          display = 'merged',
+          state = 'merged',
+          merge = { branch = 'nvime/big/backoff', commit = 'deadbeefcafe', baseBranch = 'main' },
+        }),
+      },
+    }
+    fake.replies['organization.attest'] = { result = { commitSha = 'deadbeefcafe' } }
+    with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    local attestation = vim.iter(fake.requests):find(function(request)
+      return request.method == 'organization.attest'
+    end)
+    ok(attestation ~= nil, 'a managed merge must submit its evidence')
+    eq('abc123', attestation.params.sessionId)
+    eq('/tmp/project', attestation.params.root)
+    config.setup({})
+    threads.close()
+  end)
+
   it('shows both the message and the detail on a failed merge', function()
     open_review({ block({ state = 'resolved' }) })
     fake.replies['big.merge'] = { err = { message = 'the merge failed', detail = 'the base has moved' } }
@@ -864,6 +901,30 @@ describe('the review’s own typography', function()
     end
     eq({ 'NvimeWarn', 'NvimeOk' }, grade_groups(cleared))
     eq({ 'NvimeWarn' }, grade_groups(still_open))
+  end)
+
+  it('bands human answers separately from grader feedback', function()
+    local _, marks = threads.gate_lines(block({
+      rounds = {
+        round(41, { answer = 'it retries', result = { grade = 41, verdict = 'too generic', hint = 'why?' } }),
+      },
+    }))
+    local bands = vim
+      .iter(marks)
+      :filter(function(mark)
+        return mark.col == nil
+      end)
+      :map(function(mark)
+        return mark.hl
+      end)
+      :totable()
+    eq({ 'NvimeUserBody', 'NvimeAgentBody', 'NvimeAgentBody' }, bands)
+    ok(
+      vim.iter(marks):any(function(mark)
+        return mark.hl == 'NvimeAgent' and mark.col ~= nil
+      end),
+      'the verdict uses the agent foreground instead of disappearing into grey metadata'
+    )
   end)
 
   it('bands a changed diff line, ignores context and the hunk marker', function()

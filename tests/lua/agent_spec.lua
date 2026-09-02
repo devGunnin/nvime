@@ -70,6 +70,23 @@ describe('agent.sidecar_env', function()
     eq(nil, env.NVIME_CLAUDE_PATH)
   end)
 
+  it('passes only public managed endpoints and local executable paths', function()
+    config.setup({
+      organization = {
+        control_plane_url = 'http://127.0.0.1:4817',
+        trust_core = '/bin/true',
+        github = '/bin/true',
+      },
+    })
+    local env = agent.sidecar_env()
+    eq('http://127.0.0.1:4817', env.NVIME_CONTROL_PLANE_URL)
+    eq('/bin/true', env.NVIME_TRUST_PATH)
+    eq('/bin/true', env.NVIME_GITHUB_PATH)
+    ok(env.NVIME_IDENTITY_DIR:match('/nvime/identity$') ~= nil, env.NVIME_IDENTITY_DIR)
+    eq(nil, env.NVIME_SUBMIT_TOKEN, 'no shared attestation secret enters the editor process')
+    config.setup({})
+  end)
+
   it('reaches the spawned sidecar', function()
     config.setup({ agent = { claude = '/opt/homebrew/bin/claude' } })
     with_build(function()

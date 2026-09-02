@@ -9,6 +9,7 @@ local agent = require('nvime.agent')
 local config = require('nvime.config')
 local context = require('nvime.context')
 local models = require('nvime.models')
+local organization = require('nvime.organization')
 local panel = require('nvime.panel')
 local picker = require('nvime.picker')
 local threads = require('nvime.threads')
@@ -218,7 +219,7 @@ local function on_event(name, params)
   elseif name == 'big.delta' then
     surface():push_delta(params.text)
   elseif name == 'big.tool' then
-    surface():interject('  ' .. (params.summary or params.tool), 'NvimeDim')
+    surface():interject('  ↳ ' .. (params.summary or params.tool), 'NvimeTool')
   elseif name == 'big.denied' then
     surface():interject(string.format('  ! %s refused — %s', params.tool, params.reason or ''), 'NvimeError')
   elseif name == 'big.notice' then
@@ -261,7 +262,7 @@ local function stream(method, params, done)
     vim.notify('nvime: this big change is already running (<C-c> to stop it)', vim.log.levels.WARN)
     return
   end
-  surface():begin_stream('claude')
+  surface():begin_stream('claude', 'NvimeAgentBody')
   surface():start_activity()
   agent.request(method, params, function(err, result)
     state.request_id = nil
@@ -301,11 +302,13 @@ local function title_from(text)
   return vim.trim(first):sub(1, 80)
 end
 
-local function start_new(text)
+local function create_new(text, policy)
   local params = {
     root = state.root,
     title = title_from(text),
-    difficulty = config.get().big.difficulty,
+    difficulty = policy ~= nil and organization.difficulty(policy) or config.get().big.difficulty,
+    threshold = policy ~= nil and policy.threshold or nil,
+    policyId = policy ~= nil and policy.policyId or nil,
   }
   agent.request('big.create', params, function(err, result)
     if err ~= nil then
@@ -314,8 +317,24 @@ local function start_new(text)
     end
     adopt(result.session)
     surface():append('— ' .. result.session.title .. ' —', 'NvimeSession')
+    if policy ~= nil then
+      surface():append(
+        string.format('  managed policy %s · pass mark %d', policy.policyId, policy.threshold),
+        'NvimeSession'
+      )
+    end
     surface():blank()
     M.ask(text)
+  end)
+end
+
+local function start_new(text)
+  organization.policy(function(err, policy)
+    if err ~= nil then
+      show_error(err)
+      return
+    end
+    create_new(text, policy)
   end)
 end
 
@@ -335,7 +354,7 @@ function M.ask(text)
     local last = session.conversation[#session.conversation]
     if last ~= nil and last.role == 'agent' then
       surface():append('claude', 'NvimeAgent')
-      surface():append_markdown(last.text)
+      surface():append_markdown(last.text, 'NvimeAgentBody')
       surface():blank()
     end
     render_spec(session.spec)
@@ -440,7 +459,7 @@ function M.send(text)
   assert(type(text) == 'string', 'big.send needs prompt text')
   assert(type(state.root) == 'string', 'big.send needs an open panel with a captured root')
   surface():append('you', 'NvimeUser')
-  surface():append_markdown(text)
+  surface():append_markdown(text, 'NvimeUserBody')
   surface():blank()
 
   if state.session == nil then
@@ -453,7 +472,12 @@ function M.send(text)
     if word == 'approve' then
       M.approve()
     elseif vim.tbl_contains(config.DIFFICULTIES, word) then
-      M.set_difficulty(word)
+      if organization.managed() then
+        surface():append('  the comprehension gate is locked by organization policy', 'NvimeActivity')
+        surface():blank()
+      else
+        M.set_difficulty(word)
+      end
     else
       M.ask(text)
     end
@@ -661,7 +685,7 @@ function M.select(id)
     self:append('— ' .. result.session.title .. ' —', 'NvimeSession')
     for _, turn in ipairs(result.session.conversation or {}) do
       self:append(turn.role == 'user' and 'you' or 'claude', turn.role == 'user' and 'NvimeUser' or 'NvimeAgent')
-      self:append_markdown(turn.text)
+      self:append_markdown(turn.text, turn.role == 'user' and 'NvimeUserBody' or 'NvimeAgentBody')
       self:blank()
     end
     render_spec(result.session.spec)
@@ -670,6 +694,28 @@ function M.select(id)
     -- where this editor left it, which is what makes a restart continuous.
     M.attach()
   end)
+end
+
+local function render_fresh_start()
+  surface():append('new big change', 'NvimeSession')
+  surface():append('Describe the outcome. Claude asks until the spec is precise enough to approve.', 'NvimeDim')
+  surface():append('Choose vibe/easy/medium/extreme, then `approve` to build in an isolated clone.', 'NvimeDim')
+  surface():append('<C-r> resumes an earlier change. <C-n> always starts clean.', 'NvimeDim')
+  surface():blank()
+end
+
+--- Starts a clean big change without deleting any existing session or build.
+function M.new_change()
+  assert(type(state.root) == 'string', 'big.new_change needs an open panel')
+  if M.is_running() then
+    vim.notify('nvime: stop or detach from the running change before starting another', vim.log.levels.WARN)
+    return
+  end
+  surface():replace({}, {})
+  state.session = nil
+  state.seq = 0
+  refresh_status()
+  render_fresh_start()
 end
 
 --- Opens (or focuses) the big-change panel. The root is captured once per
@@ -688,10 +734,11 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'describe it · <CR> send · <C-r> sessions · <C-t> threads · s steer · <C-c> stop',
+    prompt_hint = 'describe · <CR> send · <C-n> new · <C-r> resume · <C-t> review · <C-c> stop',
     on_submit = M.send,
     on_close = on_panel_close,
     keys = {
+      { mode = 'n', lhs = '<C-n>', fn = M.new_change, desc = 'nvime: start a new big change', where = 'both' },
       { mode = 'n', lhs = '<C-r>', fn = M.pick_session, desc = 'nvime: pick a big change', where = 'both' },
       { mode = 'n', lhs = '<C-t>', fn = M.open_threads, desc = 'nvime: open the review threads', where = 'both' },
       { mode = 'n', lhs = '<C-c>', fn = M.cancel, desc = 'nvime: stop the big change', where = 'both' },
@@ -702,14 +749,7 @@ function M.open()
   })
   if not existed then
     refresh_status()
-    surface():append('describe the change you want. claude will ask until the spec is real.', 'NvimeDim')
-    surface():append('`approve` builds it. type a difficulty to move the gate: vibe/easy/medium/extreme.', 'NvimeDim')
-    surface():append('<C-r> lists the big changes already going in this project.', 'NvimeDim')
-    surface():append(
-      'a build keeps running when you close Neovim — reopen it here to pick the stream back up.',
-      'NvimeDim'
-    )
-    surface():blank()
+    render_fresh_start()
   end
 end
 

@@ -1,8 +1,11 @@
+import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
 import { getSessionMessages, listSessions, query } from '@anthropic-ai/claude-agent-sdk';
 import { BigService } from './big.js';
 import { BigStore, defaultBigRoot } from './bigstore.js';
+import { CertificationService } from './certification.js';
 import { ChatService } from './chat.js';
 import { parseContextBlocks, parseProjectInstructions } from './context.js';
 import { DetachedService } from './detached.js';
@@ -19,13 +22,14 @@ import {
   requireString,
 } from './params.js';
 import { LineSplitter, ProtocolError, encodeFrame, type OutgoingFrame } from './protocol.js';
+import { ManagedPolicyClient } from './managed-policy.js';
 import { Dispatcher } from './rpc.js';
 import { SessionStore, defaultStorePath } from './sessions.js';
 import { CLAUDE_VERSION_PROBE_TIMEOUT_MS, DRAIN_TIMEOUT_MS } from './timeouts.js';
 
 export { CLAUDE_VERSION_PROBE_TIMEOUT_MS, DRAIN_TIMEOUT_MS } from './timeouts.js';
 
-export const AGENT_VERSION = '2.0.0';
+export const AGENT_VERSION = '3.0.0';
 
 const run = promisify(execFile);
 
@@ -91,8 +95,10 @@ function main(): void {
           emit: (event, params) => write({ event, params }),
         });
 
+  const organization = createCertificationService(process.env);
+
   const dispatcher = new Dispatcher(write);
-  registerHandlers(dispatcher, { chat, edit, big, detached }, claudePath, store.path);
+  registerHandlers(dispatcher, { chat, edit, big, detached, organization }, claudePath, store.path);
   readStdin(dispatcher);
 }
 
@@ -101,6 +107,21 @@ interface Services {
   edit: EditService | null;
   big: BigService | null;
   detached: DetachedService | null;
+  organization: CertificationService | null;
+}
+
+function createCertificationService(environment: NodeJS.ProcessEnv): CertificationService | null {
+  const endpoint = environment.NVIME_CONTROL_PLANE_URL?.trim();
+  if (!endpoint) return null;
+  const trust = environment.NVIME_TRUST_PATH?.trim();
+  const identity = environment.NVIME_IDENTITY_DIR?.trim();
+  const github = environment.NVIME_GITHUB_PATH?.trim() || 'gh';
+  if (!trust || !identity) throw new Error('managed nvime requires NVIME_TRUST_PATH and NVIME_IDENTITY_DIR');
+  if (!isAbsolute(trust) || !isAbsolute(identity)) throw new Error('managed nvime trust paths must be absolute');
+  const service = new CertificationService(new ManagedPolicyClient(endpoint), trust, identity, github);
+  assert(endpoint.length > 0, 'managed control-plane endpoint must not be empty');
+  assert(github.length > 0, 'managed GitHub executable must not be empty');
+  return service;
 }
 
 /**
@@ -124,6 +145,13 @@ function present<T>(service: T | null): T {
       'claude_not_found',
       'the claude CLI was not found on PATH — install Claude Code and sign in',
     );
+  }
+  return service;
+}
+
+function managed(service: CertificationService | null): CertificationService {
+  if (service === null) {
+    throw new ProtocolError('bad_request', 'organization control plane is not configured');
   }
   return service;
 }
@@ -157,9 +185,22 @@ function registerHandlers(
   claudePath: string | null,
   storePath: string,
 ): void {
-  const { chat, edit, big, detached } = services;
-  let claudeVersion: string | null = null;
+  const { chat, edit, big, detached, organization } = services;
+  registerCoreHandlers(dispatcher, services, claudePath, storePath);
+  registerOrganizationHandlers(dispatcher, big, organization);
+  registerChatHandlers(dispatcher, chat);
+  registerEditHandlers(dispatcher, edit);
+  registerBigHandlers(dispatcher, big, detached);
+}
 
+function registerCoreHandlers(
+  dispatcher: Dispatcher,
+  services: Services,
+  claudePath: string | null,
+  storePath: string,
+): void {
+  const { chat, edit, big } = services;
+  let claudeVersion: string | null = null;
   dispatcher.register('ping', async () => {
     if (claudeVersion === null && claudePath !== null) {
       claudeVersion = await readClaudeVersion(claudePath);
@@ -181,7 +222,27 @@ function registerHandlers(
     setTimeout(() => void drainThenExit(dispatcher), 10).unref();
     return { ok: true };
   });
+}
 
+function registerOrganizationHandlers(
+  dispatcher: Dispatcher,
+  big: BigService | null,
+  organization: CertificationService | null,
+): void {
+  dispatcher.register('organization.policy', async () => managed(organization).policy());
+  dispatcher.register('organization.enrollment', async (_id, params) =>
+    managed(organization).enrollment(requireAbsolutePath(params, 'root')),
+  );
+  dispatcher.register('organization.attest', async (_id, params) => {
+    const session = present(big).open(
+      requireAbsolutePath(params, 'root'),
+      requireString(params, 'sessionId'),
+    );
+    return managed(organization).attest(session);
+  });
+}
+
+function registerChatHandlers(dispatcher: Dispatcher, chat: ChatService | null): void {
   dispatcher.register('chat.send', async (id, params) =>
     present(chat).send(id, {
       root: requireAbsolutePath(params, 'root'),
@@ -211,7 +272,9 @@ function registerHandlers(
   dispatcher.register('chat.cancel', async (_id, params) => ({
     cancelled: present(chat).cancel(requireTarget(params)),
   }));
+}
 
+function registerEditHandlers(dispatcher: Dispatcher, edit: EditService | null): void {
   dispatcher.register('edit.start', async (id, params) =>
     present(edit).start(id, {
       root: requireAbsolutePath(params, 'root'),
@@ -238,8 +301,6 @@ function registerHandlers(
       optionalPositiveInt(params, 'limit', 500),
     ),
   }));
-
-  registerBigHandlers(dispatcher, big, detached);
 }
 
 /**
@@ -258,6 +319,7 @@ function registerBigHandlers(
       requireString(params, 'title'),
       requireDifficulty(params),
       optionalPositiveInt(params, 'threshold', 100),
+      optionalString(params, 'policyId') ?? null,
     ),
   }));
 

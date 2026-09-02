@@ -162,7 +162,7 @@ local function on_event(name, params)
   elseif name == 'edit.delta' then
     surface():push_delta(params.text)
   elseif name == 'edit.tool' then
-    surface():interject('  ' .. (params.summary or params.tool), 'NvimeDim')
+    surface():interject('  ↳ ' .. (params.summary or params.tool), 'NvimeTool')
   elseif name == 'edit.applied' then
     on_applied(params)
   elseif name == 'edit.external_change' then
@@ -298,9 +298,9 @@ function M.send(text)
   state.tally = { files = {}, hunks = 0, conflicts = 0 }
 
   surface():append('you', 'NvimeUser')
-  surface():append_markdown(text)
+  surface():append_markdown(text, 'NvimeUserBody')
   surface():blank()
-  surface():begin_stream('claude')
+  surface():begin_stream('claude', 'NvimeAgentBody')
   surface():start_activity()
 
   local dial = models.dial('edit')

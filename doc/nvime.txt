@@ -1,7 +1,7 @@
 *nvime.txt*  No vibe coding in my editor — a Claude-native Neovim plugin
 
 Author:  devGunnin
-Version: 2.0.0
+Version: 3.0.0
 License: private
 
 ==============================================================================
@@ -93,6 +93,10 @@ require('nvime').setup({opts})
                         Its effort step's `reset` entry clears the whole
                         override back to the configured default.
 
+:Nvime enroll           Show and copy this workstation's public, repository-
+                        scoped enrollment record. Available only when a
+                        licensed organization control plane is configured.
+
 :Nvime doctor           Run every preflight check and render the result as one
                         pass/warn/fail list, with the fix named under each
                         failure. |nvime-health|
@@ -121,6 +125,7 @@ Global ~
 Prompt buffer ~
     <CR>            normal      send the prompt
     <C-s>           insert      send the prompt (<CR> still inserts a newline)
+    <C-n>           normal      start a new conversation / big change
     <C-r>           normal      session / change picker
     <C-c>           normal      stop the running turn
 
@@ -138,6 +143,7 @@ Changeset ~
     q                           close
 
 Big-change panel ~
+    <C-n>                       start a new big change
     <C-r>                       pick a big change
     <C-t>                       open the review threads
     s                           steer the running build
@@ -184,10 +190,12 @@ Context ~
     dropped. `@` completion is gitignore-aware.
 
 Sessions ~
-    The session for a project root is remembered, so reopening chat replays
-    the earlier turns. <C-r> lists nvime's own past sessions for that root by
-    title and age. Resume survives Neovim restarts, and several Neovim
-    instances share the session file without overwriting each other.
+    Opening chat starts a fresh conversation. <C-r> lists nvime's past
+    sessions for that project root by title and age; <C-n> starts another
+    clean conversation without deleting history. Resume survives Neovim
+    restarts, and several Neovim instances share the session file without
+    overwriting each other. Switching is refused while a turn is running, so
+    its stream and cancellation handle cannot be orphaned.
 
 Chat can never touch your code: it gets Read, Glob, Grep, WebFetch and
 WebSearch, and file mutation and shell are denied through SDK options rather
@@ -356,6 +364,11 @@ Defaults: >
       project_instructions = {
         enabled = true,
       },
+      organization = {
+        control_plane_url = nil,
+        trust_core = nil,
+        github = 'gh',
+      },
     })
 <
 panel.width            number, 20..400. Columns the panel occupies.
@@ -432,6 +445,18 @@ project_instructions.enabled
                        marked-untrusted block. Off disables reading the file
                        at all.
 
+organization.control_plane_url
+                       string or nil. Licensed organization policy and
+                       attestation endpoint. Must use HTTPS, except loopback
+                       HTTP for local development.
+organization.trust_core
+                       string or nil. Absolute path to the native licensed
+                       nvime-trust signer. It must be configured together with
+                       control_plane_url.
+organization.github    string. Authenticated GitHub CLI executable; `gh` by
+                       default. Managed certification resolves live numeric
+                       user and repository IDs through it.
+
 ==============================================================================
 10. HIGHLIGHT GROUPS                                         *nvime-highlights*
 
@@ -445,6 +470,9 @@ Override any of them after `setup()` with |nvim_set_hl()|.
 
     NvimeUser           your own turns
     NvimeAgent          the agent's turns
+    NvimeUserBody       your prose's full-line surface
+    NvimeAgentBody      the agent prose's full-line surface
+    NvimeTool           tool activity between streamed prose
     NvimeHeading        markdown headings, page titles
     NvimeCode           a fenced code block's background
     NvimeFence          the fence lines around it
@@ -526,6 +554,15 @@ Subscription only ~
     SDK sees, and `:checkhealth` says which of them were set. Proxy and TLS
     variables are deliberately left alone, which means a configured
     man-in-the-middle still sees the traffic.
+
+Managed assurance ~
+    A managed Big Change is pinned to the live immutable organization policy
+    and exact gate threshold. After merge, the sidecar verifies HEAD, resolves
+    numeric GitHub identity, and asks the native Ed25519 trust core to sign
+    canonical evidence. The private key never enters Lua or Node. There is no
+    shared submission token in the plugin; the server requires a paid
+    entitlement and an enrolled repository-scoped public key, then the PR
+    webhook binds stored evidence to the exact pushed head.
 
 No project settings ~
     Chat and edit load no `.claude/settings.json` — not the repo's, not

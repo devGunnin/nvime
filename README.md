@@ -45,6 +45,7 @@ sidecar to `agent/dist/index.js`; the plugin runs that file with `node`.
 
 ```
 :Nvime doctor      -- everything wired up?
+:Nvime enroll      -- public workstation record for an administrator
 :Nvime chat        -- ask something about the repo
 :Nvime edit        -- change the file you are in
 :Nvime big         -- describe a change worth reviewing
@@ -58,7 +59,7 @@ and nvime binds no global key until `keymaps.enabled = true`.
 
 ## Chat
 
-`<leader>nc` — a persistent, read-only conversation with full session history.
+`<leader>nc` — a fresh, read-only conversation with resumable session history.
 
 ![Chat mid-stream, with a resumed transcript above it](assets/chat-dark.png)
 
@@ -72,10 +73,13 @@ on, not Neovim's cwd. Bad, binary or oversized paths are reported in the panel,
 never silently dropped. `<leader>ns` sends a visual selection with its file and
 line range.
 
-**Sessions resume.** The session for a project root is remembered, so reopening
-chat replays the earlier turns. `<C-r>` lists nvime's past sessions for that
-root by title and age; resume survives Neovim restarts, and several Neovim
-instances share the session file without overwriting each other.
+**Fresh by default, resumable by choice.** Opening chat always starts a new
+conversation, so yesterday's context cannot silently leak into today's task.
+`<C-r>` lists the project's past sessions by title and age; `<C-n>` clears the
+surface for another new conversation without deleting history. Resume survives
+Neovim restarts, and several Neovim instances share the session file without
+overwriting each other. A running turn must be stopped before switching, so its
+stream and cancellation handle cannot be orphaned.
 
 ![The session picker: past conversations by first prompt and age](assets/sessions-dark.png)
 
@@ -402,10 +406,11 @@ big change in this project with its review progress. `<CR>` opens one.
 | `:Nvime` | the dashboard |
 | `:Nvime chat` | open the chat panel |
 | `:Nvime edit` | instruct claude about the current file |
-| `:Nvime big` | start or resume a big change |
+| `:Nvime big` | start a big change (`<C-r>` resumes one) |
 | `:Nvime diff` | review the changeset |
 | `:Nvime cancel` | stop whichever run is going |
 | `:Nvime model` | pick a lane and its model/effort override |
+| `:Nvime enroll` | show and copy this workstation's public enrollment record |
 | `:Nvime doctor` | the preflight, as one pass/warn/fail list |
 | `:Nvime health` | the same checks in `:checkhealth` |
 | `:Nvime statusline` | toggle the built-in winbar status |
@@ -425,12 +430,12 @@ Off until `keymaps.enabled = true`.
 | `<leader>nB` | normal | open a big change |
 | `<CR>` | prompt, normal | send |
 | `<C-s>` | prompt, insert | send (so `<CR>` still inserts a newline) |
-| `<C-r>` | chat panel | session picker |
+| `<C-n>` / `<C-r>` | chat panel | new conversation · resume one |
 | `<C-c>` | panel | stop the running turn |
 | `q` | scrollback | close |
 | `y` / `n` / `<Esc>` | approval float | allow once / deny / deny |
 | `<CR>` / `r` / `d` | changeset | open the file · revert the hunk · unified diff |
-| `<C-r>` / `<C-t>` | big panel | pick a change · open the review threads |
+| `<C-n>` / `<C-r>` / `<C-t>` | big panel | new change · resume one · open the review threads |
 | `]t` / `[t` | review | next · previous thread |
 | `a` / `e` / `r` | review | defend this thread · explain a cleared one · request changes |
 | `X` / `R` / `M` | review | re-open a trivial thread · rebase onto a moved base · merge |
@@ -500,11 +505,42 @@ require('nvime').setup({
   project_instructions = {
     enabled = true,             -- send CLAUDE.md / AGENTS.md as a marked-untrusted block
   },
+  -- Supplied by a licensed organization deployment. Leave all three defaults
+  -- alone for community mode.
+  organization = {
+    control_plane_url = nil,    -- HTTPS, or loopback HTTP for local development
+    trust_core = nil,           -- absolute path to the licensed nvime-trust binary
+    github = 'gh',              -- authenticated GitHub CLI executable
+  },
 })
 ```
 
 Every value is validated at `setup()`; a bad one raises with the path that was
 wrong rather than being silently coerced.
+
+## Managed GitHub assurance
+
+The public plugin remains useful on its own. A licensed organization can add a
+private control plane and the native `nvime-trust` signer without putting a
+shared commercial secret in Lua or JavaScript. The editor fetches the live
+organization policy before it creates a Big Change, records that immutable
+policy revision and exact threshold in the session, and refuses local changes
+to the managed gate.
+
+After every reviewed merge, nvime verifies that repository `HEAD` is still the
+exact commit it landed. It resolves numeric GitHub user and repository IDs
+through the authenticated local `gh` account, signs canonical evidence with a
+mode-0600 Ed25519 device key, and submits it to the configured control plane.
+The private key never enters Neovim or the Node sidecar. The later GitHub pull-
+request webhook matches the stored repository ID and commit SHA to the live PR
+head before the server publishes the required `nvime / understanding` Check.
+
+An administrator enrolls a workstation by asking the user to run `:Nvime
+enroll` and copying the public record. Enrollment is repository-scoped and can
+be revoked immediately. If the paid entitlement, policy service, signer, GitHub
+identity, repository binding, gate evidence, or signature is invalid, managed
+review fails closed; copying or modifying the open plugin cannot mint a valid
+company Check.
 
 ### Looks
 
@@ -530,7 +566,8 @@ Font codepoint, so it renders in any font a terminal is likely to have.
 `ui.icons = 'ascii'` swaps the whole set for pure ASCII.
 
 The highlight groups are all named `Nvime*` and can be overridden after setup:
-`NvimeUser`, `NvimeAgent`, `NvimeHeading`, `NvimeCode`, `NvimeFence`,
+`NvimeUser`, `NvimeAgent`, `NvimeUserBody`, `NvimeAgentBody`, `NvimeTool`,
+`NvimeHeading`, `NvimeCode`, `NvimeFence`,
 `NvimeInlineCode`, `NvimeDim`, `NvimeError`, `NvimeSession`, `NvimeSelected`,
 `NvimeBar`, `NvimeBarDim`, `NvimeCursorLine`, `NvimeLabel`, `NvimeKey`,
 `NvimeOk`, `NvimeWarn`, `NvimeFile`, `NvimeAdded`, `NvimeChanged`,
@@ -681,6 +718,7 @@ Methods: `chat.send`, `chat.list`, `chat.history`, `chat.cancel`,
 `big.capture`, `big.revise`, `big.toggle`, `big.answer`, `big.difficulty`,
 `big.mergecheck`, `big.merge`, `big.rebase`, `big.discard`, `big.cancel`,
 `big.explain`, `big.attach`, `big.steer`, `big.stop`, `big.detach`, `ping`,
+`organization.policy`, `organization.enrollment`, `organization.attest`,
 `shutdown`.
 
 `big.build`, `big.revise` and `big.rebase` spawn the detached runner and then
