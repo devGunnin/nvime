@@ -20,6 +20,9 @@ M.VERSION = require('nvime.version')
 function M.setup(user)
   local opts = config.setup(user)
   log.set_level(opts.debug.level)
+  -- A sidecar that is already up must hear the new level too; `set_level` may
+  -- also have turned itself off, and then the mirror has to stop as well.
+  agent.set_debug_level(log.level())
   palette.attach()
   keymaps.apply(opts)
   vim.api.nvim_create_autocmd('VimLeavePre', {

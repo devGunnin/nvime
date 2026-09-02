@@ -24,7 +24,15 @@ local function parts()
       { level = 'error', message = 'the sidecar is not built', advice = 'npm run build' },
     },
     log = { level = 'info', path = '/somewhere/nvime.log', size = 2048, tail = { 'one', 'two' } },
-    session = { id = 'abc', display = 'reviewing', baseSha = 'aaa', headSha = 'bbb', steerable = false },
+    session = {
+      id = 'abc',
+      state = 'reviewing',
+      display = 'reviewing',
+      steerable = false,
+      base = { commit = 'aaa', branch = 'main' },
+      merge = { commit = 'bbb', branch = 'nvime/big/x', baseBranch = 'main', at = 1 },
+      worktree = { path = '/tmp/wt', createdAt = 1, ready = true },
+    },
     runlog = {
       { seq = 1, at = 0, event = 'big.delta', params = { text = string.rep('z', 500) } },
       { seq = 2, at = 1, event = 'big.done', params = { ok = true } },
@@ -63,7 +71,7 @@ describe('nvime.bundle rendering', function()
 
   it('carries the big-change session view when there is one', function()
     local text = rendered()
-    for _, needle in ipairs({ 'reviewing', 'aaa', 'bbb', 'steerable' }) do
+    for _, needle in ipairs({ 'reviewing', 'aaa', 'bbb', 'steerable', '/tmp/wt' }) do
       ok(text:find(needle, 1, true) ~= nil, 'the session view must report ' .. needle)
     end
   end)

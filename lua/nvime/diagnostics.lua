@@ -106,24 +106,27 @@ local function check_login_file(entries)
   )
 end
 
-local function check_node(entries)
+--- @param timeout_ms integer how long the version probe may take
+--- @return string|nil the version, so the bundle can report it without a
+--- second probe of its own
+local function check_node(entries, timeout_ms)
   local node = config.get().agent.node
   if vim.fn.executable(node) == 0 then
     fail(entries, string.format("node not found (looked for '%s')", node), 'install Node 20 or newer')
-    return false
+    return nil
   end
-  local version, err = run({ node, '--version' }, PROBE_TIMEOUT_MS)
+  local version, err = run({ node, '--version' }, timeout_ms)
   if version == nil then
     fail(entries, 'could not run node: ' .. tostring(err))
-    return false
+    return nil
   end
   local major = tonumber(version:match('^v(%d+)'))
   if major == nil or major < 20 then
     fail(entries, 'node ' .. version .. ' is too old', 'nvime needs Node 20 or newer')
-    return false
+    return nil
   end
   ok(entries, 'node ' .. version)
-  return true
+  return version
 end
 
 local function check_build(entries)
@@ -228,14 +231,15 @@ end
 --- Skipped, not failed, outside a git repository — there is nothing to check.
 --- @param entries DiagnosticEntry[]
 --- @param root string a directory to start looking from
-local function check_git_identity(entries, root)
+--- @param timeout_ms integer how long each git probe may take
+local function check_git_identity(entries, root, timeout_ms)
   local git_root = vim.fs.root(root, { '.git' })
   if git_root == nil then
     info(entries, 'not inside a git repository — nothing to check for identity')
     return
   end
-  local name = run({ 'git', '-C', git_root, 'config', 'user.name' }, PROBE_TIMEOUT_MS)
-  local email = run({ 'git', '-C', git_root, 'config', 'user.email' }, PROBE_TIMEOUT_MS)
+  local name = run({ 'git', '-C', git_root, 'config', 'user.name' }, timeout_ms)
+  local email = run({ 'git', '-C', git_root, 'config', 'user.email' }, timeout_ms)
   if name == nil or name == '' or email == nil or email == '' then
     fail(
       entries,
@@ -263,11 +267,19 @@ local function check_model_dial(entries)
   info(entries, 'model dial: ' .. table.concat(active, '  '))
 end
 
---- The debug log's own row: what a bug report can be asked to attach. Always
---- informational — an off log is the default, not a problem to fix.
+--- The debug log's own row: what a bug report can be asked to attach. A log
+--- that could not be opened is a WARNING that names the file — reporting it as
+--- plain "off" reads as a user setting rather than as the failure it is.
 --- @return DiagnosticEntry
 function M.log_entry()
   local status = require('nvime.log').status()
+  if status.broken ~= nil then
+    return {
+      level = 'warn',
+      message = 'debug log: off (the file could not be opened: ' .. status.broken .. ')',
+      advice = 'check the directory exists and is writable, then :Nvime debug on',
+    }
+  end
   if status.level == 'off' then
     return {
       level = 'info',
@@ -281,35 +293,108 @@ function M.log_entry()
 end
 
 --- Runs a probe the way every check here does: bounded, and answering the
---- error rather than raising it. Shared with `:Nvime bundle`.
+--- error rather than raising it. BLOCKING — `:Nvime bundle` uses
+--- `probe_async` instead, since the binary it asks about may be the hung one.
 --- @param cmd string[]
+--- @param timeout_ms integer|nil
 --- @return string|nil output, string|nil error
-function M.probe(cmd)
+function M.probe(cmd, timeout_ms)
   assert(type(cmd) == 'table' and #cmd > 0, 'diagnostics.probe needs a command')
-  return run(cmd, PROBE_TIMEOUT_MS)
+  return run(cmd, timeout_ms or PROBE_TIMEOUT_MS)
+end
+
+--- The same probe without the wait: `cb(output, err)` is called exactly once,
+--- on the reply or on the deadline. A binary that never answers costs
+--- `timeout_ms`, not the editor.
+--- @param cmd string[]
+--- @param timeout_ms integer
+--- @param cb fun(output: string|nil, err: string|nil)
+function M.probe_async(cmd, timeout_ms, cb)
+  assert(type(cmd) == 'table' and #cmd > 0, 'diagnostics.probe_async needs a command')
+  assert(type(timeout_ms) == 'number' and timeout_ms > 0, 'diagnostics.probe_async needs a deadline')
+  assert(type(cb) == 'function', 'diagnostics.probe_async needs a callback')
+  local settled, timer = false, nil
+  local function settle(output, err)
+    if settled then
+      return
+    end
+    settled = true
+    if timer ~= nil then
+      timer:stop()
+      timer:close()
+      timer = nil
+    end
+    cb(output, err)
+  end
+  local spawned, proc = pcall(vim.system, cmd, { text = true }, function(done)
+    vim.schedule(function()
+      if done.code ~= 0 then
+        settle(nil, vim.trim((done.stderr or '') .. (done.stdout or '')))
+        return
+      end
+      settle(vim.trim(done.stdout or ''), nil)
+    end)
+  end)
+  if not spawned then
+    settle(nil, tostring(proc))
+    return
+  end
+  -- The deadline has to be ours: `vim.system`'s own `timeout` waits for the
+  -- child's pipes to close, and a grandchild still holding them (`sh -c` that
+  -- spawned something) never lets that happen. Answering `nil, nil` is what
+  -- tells the caller this was a deadline, not a failure it can quote.
+  timer = vim.uv.new_timer()
+  timer:start(timeout_ms, 0, function()
+    vim.schedule(function()
+      pcall(function()
+        proc:kill('sigkill')
+      end)
+      settle(nil, nil)
+    end)
+  end)
 end
 
 --- Runs every check and returns what each found, in the order a reader should
 --- see them. Never raises — a probe that cannot even run is reported as a
 --- failure of that probe, not a crash of the command that asked for this.
+--- Reports the sidecar this editor already has, without starting one. What
+--- `:Nvime bundle` gets instead of a second spawn: the diagnostic question
+--- there is "what is the sidecar I am talking to doing", not "can one start".
+local function report_live_sidecar(entries)
+  if agent().is_running() then
+    ok(entries, 'sidecar: running for this Neovim instance (not probed — no second one was started)')
+    return
+  end
+  info(entries, 'sidecar: not running for this Neovim instance')
+end
+
 --- @param root string|nil where to check git identity from; defaults to cwd
+--- @param opts table|nil skip_sidecar (do not spawn one) and probe_timeout_ms
 --- @return DiagnosticEntry[]
-function M.run(root)
-  local entries = {}
+--- @return table facts machine-readable values the probes already paid for
+function M.run(root, opts)
+  opts = opts or {}
+  local timeout_ms = opts.probe_timeout_ms or PROBE_TIMEOUT_MS
+  local entries, facts = {}, {}
   check_neovim(entries)
   check_keymaps(entries)
   local exit = agent().last_exit()
   if exit ~= nil and exit.code ~= 0 then
     warn(entries, 'the sidecar exited with code ' .. tostring(exit.code), exit.stderr)
   end
-  if check_node(entries) and check_build(entries) then
-    check_sidecar(entries)
+  facts.node = check_node(entries, timeout_ms)
+  if facts.node ~= nil and check_build(entries) then
+    if opts.skip_sidecar then
+      report_live_sidecar(entries)
+    else
+      check_sidecar(entries)
+    end
   end
   check_login_file(entries)
-  check_git_identity(entries, root or vim.uv.cwd())
+  check_git_identity(entries, root or vim.uv.cwd(), timeout_ms)
   check_model_dial(entries)
   entries[#entries + 1] = M.log_entry()
-  return entries
+  return entries, facts
 end
 
 return M

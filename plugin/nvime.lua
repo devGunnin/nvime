@@ -8,6 +8,13 @@ if vim.fn.has('nvim-0.10') == 0 then
   return
 end
 
+--- The words each subcommand that takes one will accept, for completion and
+--- for refusing an argument a subcommand has no use for.
+local arguments = {
+  debug = { 'on', 'off', 'toggle', 'info', 'debug' },
+  log = { 'clear' },
+}
+
 --- Subcommands of the single `:Nvime` entry point. Each takes whatever words
 --- followed its own name — `:Nvime log clear`, `:Nvime debug on`.
 local subcommands = {
@@ -67,18 +74,32 @@ vim.api.nvim_create_user_command('Nvime', function(args)
     )
     return
   end
-  handler(unpack(args.fargs, 2))
+  local rest = { unpack(args.fargs, 2) }
+  if #rest > 0 and arguments[name] == nil then
+    vim.notify(string.format("nvime: :Nvime %s takes no argument (got '%s')", name, rest[1]), vim.log.levels.ERROR)
+    return
+  end
+  handler(unpack(rest))
 end, {
   nargs = '*',
   desc = 'nvime',
-  complete = function(lead, line)
-    -- Only the first word is a subcommand; past it the arguments belong to
-    -- the subcommand itself and nvime has nothing to offer.
-    if line:match('^%s*Nvime%s+%S+%s') ~= nil then
+  complete = function(lead, line, cursor)
+    -- The subcommand is the first word after `Nvime`, wherever `Nvime` sits:
+    -- a command modifier (`:silent Nvime log <Tab>`) puts words before it, and
+    -- matching from the start of the line offered subcommands as arguments.
+    local typed = line:sub(1, cursor):match('Nvime%s+(.*)$')
+    if typed == nil then
       return {}
     end
-    return vim.tbl_filter(function(name)
-      return vim.startswith(name, lead)
-    end, vim.tbl_keys(subcommands))
+    local subcommand = typed:match('^(%S+)%s')
+    if subcommand == nil then
+      return vim.tbl_filter(function(name)
+        return vim.startswith(name, lead)
+      end, vim.tbl_keys(subcommands))
+    end
+    -- Past the subcommand the words are its own; only `debug` and `log` have any.
+    return vim.tbl_filter(function(word)
+      return vim.startswith(word, lead)
+    end, arguments[subcommand] or {})
   end,
 })

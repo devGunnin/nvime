@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { DebugLog, MAX_PAYLOAD_CHARS, REDACTED, isSecretKey, renderParams } from '../src/debuglog.js';
+import { DebugLog, MAX_BYTES, MAX_PAYLOAD_CHARS, REDACTED, isSecretKey, renderParams } from '../src/debuglog.js';
 
 function scratch(): string {
   return join(mkdtempSync(join(tmpdir(), 'nvime-debuglog-')), 'nvime.log');
@@ -105,5 +105,57 @@ describe('DebugLog redaction', () => {
     log.setLevel('info', path);
     log.request('organization.attest', 3, { token: 'sk-ant-notreal-2' });
     assert.ok(!readFileSync(path, 'utf8').includes('sk-ant-notreal-2'), 'REDACTION BOUNDARY');
+  });
+});
+
+describe('DebugLog round-1 regressions', () => {
+  // F4: the template literal was built before `#write` looked at the level, so
+  // a 1000-token stream paid a full redact + JSON.stringify per delta at `off`.
+  it('formats nothing at all while off', () => {
+    const log = new DebugLog();
+    const real = JSON.stringify;
+    let calls = 0;
+    (JSON as { stringify: typeof JSON.stringify }).stringify = ((...args: Parameters<typeof real>) => {
+      calls += 1;
+      return real(...args);
+    }) as typeof JSON.stringify;
+    try {
+      for (let index = 0; index < 1000; index += 1) log.request('big.delta', index, { text: `t${index}` });
+      log.reply('big.delta', 1, 5);
+      log.note('anything');
+    } finally {
+      (JSON as { stringify: typeof JSON.stringify }).stringify = real;
+    }
+    assert.equal(calls, 0, 'an off log must not encode anything');
+  });
+
+  // F8: `#bytes` only ever moved in setLevel, so one rotation by the plugin
+  // stopped the sidecar half of the timeline for the rest of the session,
+  // silently.
+  it('says once that it stopped at the cap, then resumes after the plugin rotates', () => {
+    const path = scratch();
+    writeFileSync(path, 'x'.repeat(MAX_BYTES + 1024));
+    const log = new DebugLog();
+    log.setLevel('info', path);
+    log.note('dropped one');
+    log.note('dropped two');
+    const atCap = readFileSync(path, 'utf8');
+    assert.ok(atCap.includes('mirror stopped'), 'the mirror must say it stopped, not vanish');
+    assert.ok(!atCap.includes('dropped one'), 'and it really does stop');
+    assert.equal(atCap.split('mirror stopped').length - 1, 1, 'said once, not per line');
+
+    // The plugin rotates: the file it points at is now small again.
+    writeFileSync(path, '');
+    log.note('after the rotation');
+    assert.ok(readFileSync(path, 'utf8').includes('after the rotation'), 'the mirror must come back');
+  });
+
+  // F9: `appendFileSync` takes the umask, so the shared log landed 0644.
+  it('creates the file 0600', () => {
+    const path = scratch();
+    const log = new DebugLog();
+    log.setLevel('info', path);
+    log.note('one');
+    assert.equal(statSync(path).mode & 0o777, 0o600, 'the shared log must be owner-only');
   });
 });

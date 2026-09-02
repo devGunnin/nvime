@@ -90,3 +90,36 @@ describe(':Nvime diagnostics subcommands', function()
     ok(seen[1] ~= nil and seen[1].message:find('nonsense', 1, true) ~= nil, vim.inspect(seen))
   end)
 end)
+
+describe(':Nvime completion and arity after the nargs change', function()
+  -- F16: the guard was `line:match('^%s*Nvime%s+%S+%s')`, which a command
+  -- modifier defeats — `:silent Nvime log <Tab>` offered the subcommand list
+  -- as an argument completion.
+  it('does not offer subcommands as an argument, under a modifier too', function()
+    install()
+    for _, line in ipairs({ 'Nvime log ', 'silent Nvime log ', 'vert Nvime debug ' }) do
+      local names = vim.fn.getcompletion(line, 'cmdline')
+      ok(not vim.tbl_contains(names, 'statusline'), line .. ' offered a subcommand: ' .. vim.inspect(names))
+    end
+  end)
+
+  it('completes the words debug and log actually take', function()
+    install()
+    local levels = vim.fn.getcompletion('Nvime debug ', 'cmdline')
+    for _, word in ipairs({ 'on', 'off', 'toggle', 'info', 'debug' }) do
+      ok(vim.tbl_contains(levels, word), word .. ' must be completable: ' .. vim.inspect(levels))
+    end
+    ok(vim.tbl_contains(vim.fn.getcompletion('Nvime log ', 'cmdline'), 'clear'), 'log takes clear')
+  end)
+
+  -- F16: `nargs='?'` used to reject a trailing word outright; `'*'` silently
+  -- swallowed it, so `:Nvime chat extra` looked like it did something.
+  it('refuses a trailing word for a subcommand that takes none', function()
+    local calls = install()
+    local seen = warnings(function()
+      vim.cmd('Nvime chat extra')
+    end)
+    eq(0, #calls, 'nothing may run for a command with an argument it cannot take')
+    ok(seen[1] ~= nil and seen[1].message:find('takes no argument', 1, true) ~= nil, vim.inspect(seen))
+  end)
+end)

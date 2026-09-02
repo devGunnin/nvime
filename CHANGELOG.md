@@ -23,12 +23,31 @@
   newest line (`q` closes it); `:Nvime log clear` empties the file. `:Nvime
   doctor` gains a row naming the log's level, path and size.
 
-  **`:Nvime bundle`** writes one markdown file under `stdpath('cache')` and
-  copies its path to the `+` and `"` registers: nvime version and git sha,
+  **`:Nvime bundle`** writes one markdown file under `stdpath('cache')`, 0600,
+  and copies its path to the `+` and `"` registers: nvime version and git sha,
   Neovim, OS, node and claude versions, the configuration with secrets
-  redacted, the full doctor output, the last 200 log lines and — when a big
-  change is selected — its session view and the last 50 events from its build
-  log, through a new read-only `big.runlog`.
+  redacted, the doctor output, the last 200 log lines and — when a big change
+  is selected — its session and the last 50 events from its build log, through
+  a new read-only `big.runlog`. Nothing blocks the editor: the version probes
+  run off the main thread with a 3 s deadline and print `(timed out)` rather
+  than waiting, and the bundle never starts a second sidecar.
+
+  **The bundle prints what it names, never what it is handed.** Every section
+  is an allow-list over a shape the sidecar owns and will grow fields in — the
+  session it sends carries the runner's control token and socket, the spec, the
+  conversation, and a title that is the first 80 characters of what the user
+  typed. The bundle prints id, state, display, steerable, base and head sha,
+  the worktree path, the runner's pid and liveness, and the timestamps.
+  Run-log events likewise: a delta is a byte count, a tool is its name and a
+  summary length, a phase is its phase, anything else is its key names.
+
+  **One log file per process** (`nvime-<pid>.log`, 0600): two editors sharing
+  one file rotated over each other's history, silently. `:Nvime log` and the
+  bundle merge every process's file — and the rotated `.1` — by timestamp, and
+  a week-old file from an editor that is gone is pruned. A rotation that
+  cannot happen now stops the log and says so instead of letting the file grow
+  past its cap unbounded, and a log that cannot be opened reads as a failure
+  in `:Nvime doctor` rather than as "off".
 
 - **A long merge check says so.** While the review tab checks the merge
   preconditions the bars already carried a spinner; past 30 seconds it now says

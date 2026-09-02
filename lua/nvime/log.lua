@@ -1,11 +1,21 @@
 --- The debug log you can attach to a bug report.
 ---
---- Off by default and free when off: nothing is formatted, nothing is opened,
---- no file is created. Turned on (config `debug.level`, or `:Nvime debug on`
---- for the session) it records one line per RPC request, reply and event, plus
---- the state transitions the surfaces go through, into one append-only file
---- that the sidecar mirrors its own detail into — so both halves of a stuck
---- run land in one timeline.
+--- Off by default and free when off: the level is the first thing every public
+--- function here checks, before any string is built, so a streamed token pays
+--- nothing at `off`. Turned on (config `debug.level`, or `:Nvime debug on` for
+--- the session) it records one line per RPC request, reply and event, plus the
+--- state transitions the surfaces go through, into an append-only file that
+--- the sidecar mirrors its own detail into — so both halves of a stuck run
+--- land in one timeline.
+---
+--- One file per process (`nvime-<pid>.log`): two editors sharing one file
+--- rotate over each other's history, silently. `:Nvime log` and the bundle
+--- merge every process's file back together by timestamp.
+---
+--- Every write happens on the RPC receive path, which is a FAST EVENT CONTEXT:
+--- nothing below `emit` may call `vim.fn.*` or `vim.notify`. The handle is
+--- opened in `set_level` and `clear` — both ordinary main-loop calls — and a
+--- write that finds no handle drops its line and says so once, scheduled.
 ---
 --- Nothing a user typed and nothing they own ever reaches it: content-bearing
 --- fields are recorded as a size, secret-named fields as `<redacted>`, and
@@ -22,10 +32,22 @@ local ORDER = { off = 0, info = 1, debug = 2 }
 --- the tests lower it to exercise rotation without writing 5 MB.
 M.MAX_BYTES = 5 * 1024 * 1024
 
---- How much of one payload a line may carry.
+--- How many BYTES of one payload a line may carry. Bytes, not characters: the
+--- cut is backed off to a character boundary but the budget is a byte budget.
 M.MAX_PAYLOAD_CHARS = 200
 
 M.REDACTED = '<redacted>'
+
+--- Owner-only. The log carries project paths, session ids and RPC timings, and
+--- the bundle built from it carries the git identity as well.
+local OWNER_ONLY = 384
+
+--- `2026-01-01T00:00:00Z` — the prefix every line starts with, and the key the
+--- multi-process merge sorts on.
+local TIMESTAMP_BYTES = 20
+
+--- Another process's log is pruned once it is this old AND its pid is gone.
+local PRUNE_AFTER_SECONDS = 7 * 24 * 60 * 60
 
 --- Fields that carry what the user wrote or what their files hold. Recorded as
 --- a size, never as text — a log that quotes a prompt cannot be pasted into an
@@ -53,24 +75,37 @@ local MAX_DEPTH = 8
 
 local state = {
   level = 'off',
-  --- Where the log is written. Resolved on the first `set_level`, so a caller
-  --- can name one (the tests do) instead of writing the user's real log.
+  --- Where this process writes. Resolved on `set_level`, so a caller can name
+  --- one (the tests do) instead of writing the user's real log.
   path = nil,
   handle = nil,
   bytes = 0,
-  --- Set once the file could not be opened, so a broken log complains once
-  --- rather than on every frame.
-  failed = false,
+  --- The path whose open failed, or nil. Keeps "the user asked for off" apart
+  --- from "the log could not be written", which the doctor row must not blur.
+  broken = nil,
+  --- Set once a write path gave up, so it complains once and then stays quiet.
+  said = false,
 }
 
 --- `stdpath('log')`, or `stdpath('state')` on a Neovim that has no log dir.
---- @return string
+--- @return string this process's own log file
 function M.default_path()
   local ok_log, dir = pcall(vim.fn.stdpath, 'log')
   if not ok_log or type(dir) ~= 'string' or dir == '' then
     dir = vim.fn.stdpath('state')
   end
-  return vim.fs.normalize(dir .. '/nvime.log')
+  return vim.fs.normalize(string.format('%s/nvime-%d.log', dir, vim.uv.os_getpid()))
+end
+
+--- @return string the path this process writes to, whether or not it exists
+function M.path()
+  return state.path or M.default_path()
+end
+
+--- @param level string
+--- @return boolean whether a line at `level` would be written right now
+function M.enabled(level)
+  return ORDER[state.level] >= ORDER[level]
 end
 
 --- @param name any
@@ -135,12 +170,22 @@ function M.summarise(value)
 end
 
 --- @param text string
---- @return string `text` cut to the payload budget, with an explicit marker
+--- @return string `text` cut to the byte budget, backed off to a character
+--- boundary so a multi-byte character is never written out in halves
 function M.clip(text)
   if #text <= M.MAX_PAYLOAD_CHARS then
     return text
   end
-  return text:sub(1, M.MAX_PAYLOAD_CHARS) .. '…(clipped)'
+  local cut = M.MAX_PAYLOAD_CHARS
+  -- UTF-8 continuation bytes are 10xxxxxx; walk back off them to the lead.
+  while cut > 0 do
+    local next_byte = text:byte(cut + 1)
+    if next_byte == nil or next_byte < 0x80 or next_byte >= 0xC0 then
+      break
+    end
+    cut = cut - 1
+  end
+  return text:sub(1, cut) .. '…(clipped)'
 end
 
 --- One payload as a single redacted, clipped line.
@@ -157,60 +202,113 @@ function M.render(params)
   return M.clip(encoded)
 end
 
-local function rotate()
+--- Stops writing and says why, once. Reachable from the RPC receive path, so
+--- the notice is scheduled — `vim.notify` is refused in a fast event context,
+--- and a diagnostic must never be the thing that breaks the editor.
+--- @param reason string
+local function give_up(reason)
+  state.level = 'off'
   if state.handle ~= nil then
     state.handle:close()
     state.handle = nil
   end
-  os.remove(state.path .. '.1')
-  os.rename(state.path, state.path .. '.1')
-  state.bytes = 0
+  if state.said then
+    return
+  end
+  state.said = true
+  vim.schedule(function()
+    vim.notify('nvime: the debug log stopped — ' .. reason, vim.log.levels.WARN)
+  end)
 end
 
---- The append handle, opening it on first use. A log that cannot be opened is
---- reported once and turns itself off rather than failing every later frame:
---- diagnostics must never be the thing that breaks the editor.
---- @return file*|nil
-local function handle()
-  if state.handle ~= nil then
-    return state.handle
-  end
-  if state.failed then
-    return nil
-  end
-  local path = state.path or M.default_path()
-  state.path = path
-  vim.fn.mkdir(vim.fs.dirname(path), 'p')
+--- Opens the append handle at `path`. MAIN LOOP ONLY: `vim.fn.mkdir` is
+--- refused in a fast event context, which is where every write comes from.
+--- @param path string
+--- @return boolean opened
+--- @return string|nil error
+local function open_handle(path)
+  pcall(vim.fn.mkdir, vim.fs.dirname(path), 'p')
   local opened, err = io.open(path, 'a')
   if opened == nil then
-    state.failed = true
-    state.level = 'off'
-    vim.notify(string.format('nvime: could not open the debug log %s (%s)', path, tostring(err)), vim.log.levels.WARN)
-    return nil
+    return false, tostring(err)
   end
+  -- Before the first line, and again on a file an older nvime left at 0644.
+  vim.uv.fs_chmod(path, OWNER_ONLY)
   state.handle = opened
   local stat = vim.uv.fs_stat(path)
   state.bytes = stat ~= nil and stat.size or 0
-  return opened
+  return true, nil
 end
 
---- @param level string the level this line needs to be written at
---- @param line string one formatted line, without its newline
-local function emit(level, line)
-  if ORDER[state.level] < ORDER[level] then
+--- @param pid integer
+--- @return boolean whether a process with that id is still running
+local function pid_alive(pid)
+  local signalled, result = pcall(vim.uv.kill, pid, 0)
+  return signalled and result ~= nil
+end
+
+--- Removes a log left behind by an editor that is gone and has been for a
+--- week. Never this process's own file, and never a live editor's.
+local function prune_stale()
+  local dir = vim.fs.dirname(M.path())
+  local mine = vim.fs.basename(M.path())
+  local cutoff = os.time() - PRUNE_AFTER_SECONDS
+  local listed, iter = pcall(vim.fs.dir, dir)
+  if not listed then
     return
   end
-  local file = handle()
-  if file == nil then
+  for name in iter do
+    local pid = name:match('^nvime%-(%d+)%.log$') or name:match('^nvime%-(%d+)%.log%.1$')
+    if pid ~= nil and name ~= mine and name ~= mine .. '.1' and not pid_alive(tonumber(pid)) then
+      local path = dir .. '/' .. name
+      local stat = vim.uv.fs_stat(path)
+      if stat ~= nil and stat.mtime.sec < cutoff then
+        os.remove(path)
+      end
+    end
+  end
+end
+
+--- Renames the live log aside, keeping exactly one `.1`, and reopens.
+--- @return boolean rotated — false means writing has stopped and said so
+local function rotate()
+  local path = M.path()
+  if state.handle ~= nil then
+    state.handle:close()
+    state.handle = nil
+  end
+  os.remove(path .. '.1')
+  local renamed, rename_err = os.rename(path, path .. '.1')
+  if not renamed then
+    give_up(string.format('could not rotate %s (%s)', path, tostring(rename_err)))
+    return false
+  end
+  local opened, open_err = io.open(path, 'a')
+  if opened == nil then
+    give_up(string.format('could not reopen %s after rotating (%s)', path, tostring(open_err)))
+    return false
+  end
+  vim.uv.fs_chmod(path, OWNER_ONLY)
+  state.handle = opened
+  state.bytes = 0
+  return true
+end
+
+--- Writes one already-formatted line. The LEVEL IS NOT CHECKED HERE — every
+--- caller checks it before building the line, which is what makes `off` free.
+--- @param line string one formatted line, without its newline
+local function emit(line)
+  if state.handle == nil then
+    give_up('its file is not open')
     return
   end
   local record = os.date('!%Y-%m-%dT%H:%M:%SZ') .. ' ' .. line .. '\n'
-  if state.bytes + #record > M.MAX_BYTES then
-    rotate()
-    file = handle()
-    if file == nil then
-      return
-    end
+  if state.bytes + #record > M.MAX_BYTES and not rotate() then
+    return
+  end
+  local file = state.handle
+  if file == nil then
+    return
   end
   file:write(record)
   file:flush()
@@ -224,12 +322,23 @@ function M.set_level(level, path)
     error('nvime: debug.level must be one of: ' .. table.concat(M.LEVELS, ', '), 0)
   end
   M.close()
-  state.level = level
-  state.failed = false
+  state.broken, state.said = nil, false
   if path ~= nil then
     assert(type(path) == 'string' and path ~= '', 'log.set_level needs a real path')
     state.path = path
   end
+  state.level = level
+  if level == 'off' then
+    return
+  end
+  prune_stale()
+  local opened, err = open_handle(M.path())
+  if opened then
+    return
+  end
+  -- Turning the log on is a main-loop action, so this one is said directly.
+  state.level, state.broken = 'off', M.path()
+  vim.notify(string.format('nvime: could not open the debug log %s (%s)', M.path(), err), vim.log.levels.WARN)
 end
 
 --- @return string the level in force right now
@@ -244,19 +353,21 @@ function M.toggle()
   return state.level
 end
 
---- @return string the path the log is written to, whether or not it exists
-function M.path()
-  return state.path or M.default_path()
-end
-
---- Level, path and size — the `:Nvime doctor` row and the bundle's log header.
---- @return table { level, path, size }
+--- Level, path and size, plus the path an open failed on — the `:Nvime doctor`
+--- row and the bundle's log header.
+--- @return table { level, path, size, broken }
 function M.status()
   local stat = vim.uv.fs_stat(M.path())
-  return { level = state.level, path = M.path(), size = stat ~= nil and stat.size or 0 }
+  return {
+    level = state.level,
+    path = M.path(),
+    size = stat ~= nil and stat.size or 0,
+    broken = state.broken,
+  }
 end
 
---- Releases the file. The next write reopens it; nothing is lost.
+--- Releases the file. Nothing reopens it from the write path — that runs in a
+--- fast event context — so writes are dropped until `set_level` or `clear`.
 function M.close()
   if state.handle ~= nil then
     state.handle:close()
@@ -277,7 +388,10 @@ end
 --- @param id integer|nil
 --- @param params table|nil
 function M.request(method, id, params)
-  emit('info', string.format('rpc > %s #%s %s', method, tostring(id), M.render(params)))
+  if not M.enabled('info') then
+    return
+  end
+  emit(string.format('rpc > %s #%s %s', method, tostring(id), M.render(params)))
 end
 
 --- @param method string
@@ -285,14 +399,21 @@ end
 --- @param duration_ms integer
 --- @param err table|nil the sidecar's error frame, or nil for a success
 function M.reply(method, id, duration_ms, err)
+  if not M.enabled('info') then
+    return
+  end
   local outcome = err == nil and 'ok' or ('error ' .. tostring(err.code or 'internal'))
-  emit('info', string.format('rpc < %s #%s %dms %s', method, tostring(id), duration_ms, outcome))
+  emit(string.format('rpc < %s #%s %dms %s', method, tostring(id), duration_ms, outcome))
 end
 
 --- @param name string
 --- @param params table|nil
 function M.event(name, params)
-  emit(event_level(name), string.format('evt   %s %s', name, M.render(params)))
+  -- Cheapest check first: at `off` the event's own name is not even inspected.
+  if state.level == 'off' or not M.enabled(event_level(name)) then
+    return
+  end
+  emit(string.format('evt   %s %s', name, M.render(params)))
 end
 
 --- One state transition in a surface: a display or phase change, an approval,
@@ -301,48 +422,133 @@ end
 --- @param what string the transition, in the surface's own words
 --- @param fields table|nil
 function M.state_change(surface, what, fields)
-  emit('info', string.format('state %s %s %s', surface, what, M.render(fields)))
+  if not M.enabled('info') then
+    return
+  end
+  emit(string.format('state %s %s %s', surface, what, M.render(fields)))
 end
 
---- The last `count` lines of the log, oldest first — what `:Nvime log` renders
---- and what the bundle attaches.
---- @param count integer
+--- Every nvime log file worth reading, rotated halves before live ones so that
+--- lines sharing a timestamp still come out in the order they were written.
 --- @return string[]
-function M.tail(count)
-  assert(type(count) == 'number' and count > 0, 'log.tail needs a positive count')
-  local file = io.open(M.path(), 'r')
-  if file == nil then
-    return {}
+function M.files()
+  local path = M.path()
+  local dir = vim.fs.dirname(path)
+  local seen, out = {}, {}
+  local function add(candidate)
+    if not seen[candidate] and vim.uv.fs_stat(candidate) ~= nil then
+      seen[candidate] = true
+      out[#out + 1] = candidate
+    end
   end
-  -- Ring buffer rather than a full read: the file is capped at 5 MB and only
-  -- its tail is ever wanted.
-  local ring, total = {}, 0
-  for line in file:lines() do
-    total = total + 1
-    ring[(total - 1) % count + 1] = line
+  local names = {}
+  local listed, iter = pcall(vim.fs.dir, dir)
+  if listed then
+    for name in iter do
+      if name:match('^nvime%-%d+%.log$') ~= nil or name:match('^nvime%-%d+%.log%.1$') ~= nil then
+        names[#names + 1] = name
+      end
+    end
   end
-  file:close()
-  local out = {}
-  local first = total > count and total - count or 0
-  for index = first + 1, total do
-    out[#out + 1] = ring[(index - 1) % count + 1]
+  table.sort(names)
+  add(path .. '.1')
+  for _, name in ipairs(names) do
+    if name:match('%.1$') ~= nil then
+      add(dir .. '/' .. name)
+    end
+  end
+  add(path)
+  for _, name in ipairs(names) do
+    if name:match('%.1$') == nil then
+      add(dir .. '/' .. name)
+    end
   end
   return out
 end
 
---- `:Nvime log clear`: truncates the file, leaving it in place so the next
---- write does not have to recreate a directory tree.
-function M.clear()
-  M.close()
-  local file = io.open(M.path(), 'w')
-  if file == nil then
-    vim.notify('nvime: could not clear ' .. M.path(), vim.log.levels.WARN)
-    return
+--- The last `count` lines across every process's log, oldest first — what
+--- `:Nvime log` renders and what the bundle attaches. Merged on the timestamp
+--- each line starts with: one editor's file is only half the story when two
+--- are running, and the rotated `.1` holds the rest of this one's.
+--- @param count integer
+--- @return string[]
+function M.tail(count)
+  assert(type(count) == 'number' and count > 0, 'log.tail needs a positive count')
+  local entries = {}
+  for rank, path in ipairs(M.files()) do
+    local file = io.open(path, 'r')
+    if file ~= nil then
+      local index = 0
+      for line in file:lines() do
+        index = index + 1
+        entries[#entries + 1] = { at = line:sub(1, TIMESTAMP_BYTES), rank = rank, index = index, line = line }
+      end
+      file:close()
+    end
   end
-  file:close()
+  -- Not a stable sort, so the comparison is made total: same timestamp falls
+  -- back to the file, then to the position within it.
+  table.sort(entries, function(a, b)
+    if a.at ~= b.at then
+      return a.at < b.at
+    end
+    if a.rank ~= b.rank then
+      return a.rank < b.rank
+    end
+    return a.index < b.index
+  end)
+  local out = {}
+  for index = math.max(#entries - count + 1, 1), #entries do
+    out[#out + 1] = entries[index].line
+  end
+  return out
 end
 
 local view = { win = nil, buf = nil }
+
+--- How much of the log `:Nvime log` shows. The same window the bundle attaches.
+M.VIEW_LINES = 200
+
+--- Fills the open split with the log as it stands now. No-op when none is up.
+local function render_view()
+  if view.buf == nil or not vim.api.nvim_buf_is_valid(view.buf) then
+    return
+  end
+  local lines = M.tail(M.VIEW_LINES)
+  if #lines == 0 then
+    lines = { string.format('(the log at %s is empty — :Nvime debug on starts recording)', M.path()) }
+  end
+  vim.bo[view.buf].modifiable = true
+  vim.api.nvim_buf_set_lines(view.buf, 0, -1, false, lines)
+  vim.bo[view.buf].modifiable = false
+  vim.bo[view.buf].readonly = true
+  if view.win ~= nil and vim.api.nvim_win_is_valid(view.win) then
+    vim.api.nvim_win_set_cursor(view.win, { vim.api.nvim_buf_line_count(view.buf), 0 })
+  end
+end
+
+--- `:Nvime log clear`: empties THIS process's file — never another editor's —
+--- and reopens the handle before returning, so the next inbound frame has
+--- somewhere to write without touching the filesystem itself.
+function M.clear()
+  M.close()
+  local path = M.path()
+  local file = io.open(path, 'w')
+  if file == nil then
+    vim.notify('nvime: could not clear ' .. path, vim.log.levels.WARN)
+    return
+  end
+  file:close()
+  vim.uv.fs_chmod(path, OWNER_ONLY)
+  if state.level ~= 'off' then
+    local opened, err = open_handle(path)
+    if not opened then
+      state.level, state.broken = 'off', path
+      vim.notify(string.format('nvime: could not reopen %s (%s)', path, err), vim.log.levels.WARN)
+    end
+  end
+  render_view()
+end
 
 local function close_view()
   if view.win ~= nil and vim.api.nvim_win_is_valid(view.win) then
@@ -354,32 +560,22 @@ local function close_view()
   view.win, view.buf = nil, nil
 end
 
---- How much of the log `:Nvime log` shows. The same window the bundle attaches.
-M.VIEW_LINES = 200
-
 --- `:Nvime log`: the tail in a readonly scratch split, parked at the bottom so
 --- the newest line is the one under the cursor. `q` closes it.
 function M.open()
   close_view()
-  local lines = M.tail(M.VIEW_LINES)
-  if #lines == 0 then
-    lines = { string.format('(the log at %s is empty — :Nvime debug on starts recording)', M.path()) }
-  end
   vim.cmd('botright new')
   local win = vim.api.nvim_get_current_win()
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_win_set_buf(win, buf)
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].bufhidden = 'wipe'
   vim.bo[buf].filetype = 'log'
-  vim.bo[buf].modifiable = false
-  vim.bo[buf].readonly = true
   vim.api.nvim_buf_set_name(buf, 'nvime://log')
   vim.wo[win].number = false
   vim.wo[win].wrap = false
-  vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
-  require('nvime.modes').normal()
   view.win, view.buf = win, buf
+  render_view()
+  require('nvime.modes').normal()
   for _, lhs in ipairs({ 'q', '<Esc>' }) do
     vim.keymap.set('n', lhs, close_view, { buffer = buf, nowait = true, silent = true, desc = 'nvime: close the log' })
   end

@@ -162,19 +162,26 @@ describe('nvime.log rotation', function()
     local path = scratch()
     -- Every line is clipped to the payload budget, so filling a real 5 MB
     -- would take ~65k writes per rotation. The cap is asserted above; here it
-    -- is lowered so two rotations are actually exercised.
+    -- is lowered so two rotations are actually exercised. Restored whatever
+    -- happens: a failure here must not leave the module capped at 4 KB for
+    -- every spec that runs after this one.
     local real_cap = log.MAX_BYTES
-    log.MAX_BYTES = 4096
-    log.set_level('info', path)
-    for index = 1, 400 do
-      log.state_change('big', 'bulk', { n = index })
-    end
-    log.close()
-    local size = vim.uv.fs_stat(path).size
+    local finished, err = pcall(function()
+      log.MAX_BYTES = 4096
+      log.set_level('info', path)
+      for index = 1, 400 do
+        log.state_change('big', 'bulk', { n = index })
+      end
+      log.close()
+      local size = vim.uv.fs_stat(path).size
+      ok(vim.uv.fs_stat(path .. '.1') ~= nil, 'the rotated file must exist')
+      eq(nil, vim.uv.fs_stat(path .. '.2'), 'only one rotated file is ever kept')
+      ok(size < 4096, 'the live log stays under the cap, got ' .. size)
+    end)
     log.MAX_BYTES = real_cap
-    ok(vim.uv.fs_stat(path .. '.1') ~= nil, 'the rotated file must exist')
-    eq(nil, vim.uv.fs_stat(path .. '.2'), 'only one rotated file is ever kept')
-    ok(size < 4096, 'the live log stays under the cap, got ' .. size)
+    if not finished then
+      error(err, 0)
+    end
   end)
 end)
 

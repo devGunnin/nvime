@@ -1,4 +1,4 @@
-import { appendFileSync, statSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, statSync } from 'node:fs';
 import { ProtocolError } from './protocol.js';
 
 /**
@@ -21,13 +21,20 @@ const ORDER: Record<DebugLevel, number> = { off: 0, info: 1, debug: 2 };
 
 export const REDACTED = '<redacted>';
 
-/** How much of one payload a line may carry. Matches `lua/nvime/log.lua`. */
+/**
+ * How much of one payload a line may carry. UTF-16 code units here, bytes in
+ * `lua/nvime/log.lua` — the same number, not the same unit, and neither half
+ * splits a character: this one cuts on a code-unit boundary and steps back off
+ * a lone surrogate.
+ */
 export const MAX_PAYLOAD_CHARS = 200;
 
 /**
  * The plugin rotates at 5 MB. This half never rotates — two writers renaming
- * one file race — so it stops writing at the same mark instead, and lets the
- * plugin's own next write do the rotation.
+ * one file race — so it stops at the same mark and lets the plugin's next
+ * write rotate. `#bytes` is a cheap running estimate of the FILE's size, not
+ * of this process's own writes: it is re-stat'd whenever the estimate says the
+ * cap is reached, so a rotation underneath brings the mirror straight back.
  */
 export const MAX_BYTES = 5 * 1024 * 1024;
 
@@ -105,7 +112,15 @@ export function renderParams(params: unknown): string {
     encoded = '<unencodable payload>';
   }
   if (encoded.length <= MAX_PAYLOAD_CHARS) return encoded;
-  return `${encoded.slice(0, MAX_PAYLOAD_CHARS)}…(clipped)`;
+  // Back off a lone high surrogate, or the cut writes half a character.
+  const at = isHighSurrogate(encoded.charCodeAt(MAX_PAYLOAD_CHARS - 1))
+    ? MAX_PAYLOAD_CHARS - 1
+    : MAX_PAYLOAD_CHARS;
+  return `${encoded.slice(0, at)}…(clipped)`;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
 }
 
 export class DebugLog {
@@ -115,6 +130,8 @@ export class DebugLog {
   #bytes = 0;
   /** Set once a write failed, so a broken log complains once, not per frame. */
   #broken = false;
+  /** Set once the cap notice has been written, so it is written only once. */
+  #atCap = false;
 
   get level(): DebugLevel {
     return this.#level;
@@ -139,39 +156,81 @@ export class DebugLog {
     this.#level = level;
     this.#path = path;
     this.#broken = false;
+    this.#atCap = false;
     this.#bytes = level === 'off' || path === null ? 0 : sizeOf(path);
+  }
+
+  /** Whether a line at `level` would be written. Checked BEFORE the caller
+   *  builds its line: at `off` a streamed token must cost nothing at all. */
+  enabled(level: DebugLevel): boolean {
+    return ORDER[this.#level] >= ORDER[level];
   }
 
   /** One request this sidecar accepted. */
   request(method: string, id: number, params: unknown): void {
-    this.#write('info', `rpc handled ${method} #${id} ${renderParams(params)}`);
+    if (!this.enabled('info')) return;
+    this.#write(`rpc handled ${method} #${id} ${renderParams(params)}`);
   }
 
   /** How that request ended, and how long it took. */
   reply(method: string, id: number, durationMs: number, errorCode?: string): void {
+    if (!this.enabled('info')) return;
     const outcome = errorCode === undefined ? 'ok' : `error ${errorCode}`;
-    this.#write('info', `rpc answered ${method} #${id} ${durationMs}ms ${outcome}`);
+    this.#write(`rpc answered ${method} #${id} ${durationMs}ms ${outcome}`);
   }
 
   /** Anything else worth a line in the shared timeline. */
   note(text: string): void {
-    this.#write('info', `note  ${text}`);
+    if (!this.enabled('info')) return;
+    this.#write(`note  ${text}`);
   }
 
   /** A line only a `debug` level wants — the chatty per-frame detail. */
   detail(text: string): void {
-    this.#write('debug', `detail ${text}`);
+    if (!this.enabled('debug')) return;
+    this.#write(`detail ${text}`);
   }
 
-  #write(level: DebugLevel, line: string): void {
+  /**
+   * Writes one already-formatted line. The LEVEL IS NOT CHECKED HERE — every
+   * caller checks it before building the line, which is what makes `off` free.
+   */
+  #write(line: string): void {
     const path = this.#path;
-    if (path === null || this.#broken || ORDER[this.#level] < ORDER[level]) return;
+    if (path === null || this.#broken) return;
     const record = `${new Date().toISOString()} agent ${line}\n`;
-    // The plugin owns rotation; stopping at the same mark keeps this half from
-    // growing a file it is not allowed to rename.
-    if (this.#bytes + record.length > MAX_BYTES) return;
+    if (this.#bytes + record.length > MAX_BYTES && !this.#recheckCap(path, record.length)) return;
+    this.#append(path, record);
+  }
+
+  /**
+   * The estimate says the file is full. Ask the filesystem instead: the plugin
+   * may have rotated underneath, in which case the mirror resumes. If it
+   * really is full, say so once — a mirror that just stops leaves half the
+   * timeline missing with nothing to explain it.
+   *
+   * @returns whether there is room for a record of `length` bytes
+   */
+  #recheckCap(path: string, length: number): boolean {
+    this.#bytes = sizeOf(path);
+    if (this.#bytes + length <= MAX_BYTES) {
+      this.#atCap = false;
+      return true;
+    }
+    if (!this.#atCap) {
+      this.#atCap = true;
+      this.#append(path, `${new Date().toISOString()} agent note  mirror stopped: log at cap\n`);
+    }
+    return false;
+  }
+
+  #append(path: string, record: string): void {
     try {
+      const fresh = !existsSync(path);
       appendFileSync(path, record, 'utf8');
+      // Owner-only, before anything but the first line: the shared log carries
+      // project paths and session ids.
+      if (fresh) chmodSync(path, 0o600);
       this.#bytes += record.length;
     } catch (cause) {
       this.#broken = true;

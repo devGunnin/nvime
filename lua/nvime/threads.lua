@@ -499,7 +499,7 @@ function M.slow_note()
   if elapsed < M.SLOW_ACTIVITY_MS then
     return nil
   end
-  return string.format('still checking after %ds · :Nvime bundle', math.floor(elapsed / 1000))
+  return string.format('still %s after %ds · :Nvime bundle', current.label, math.floor(elapsed / 1000))
 end
 
 --- The two bars. The gate's count goes on the narrow tree, where it always

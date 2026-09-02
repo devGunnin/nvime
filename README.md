@@ -684,27 +684,45 @@ one glanceable list with the fix named under each failure.
 Three things make a stuck nvime reportable. All local, none of them costs a
 token, and nothing runs until you turn it on.
 
-**A debug log.** Off by default: nothing is formatted and no file is created.
+**A debug log.** Off by default, and free when off — the level is the first
+thing every log call checks, so a streamed token costs nothing at all.
 `debug = { level = 'info' }` in `setup()`, or `:Nvime debug on` for the
 session. At `info` it records one line per RPC request, reply and event, plus
 every state transition in big/edit/chat — display and phase changes, approvals,
-steers, the merge precondition check. `debug` adds the streamed deltas. It goes
-to `stdpath('log')/nvime.log`, append-only, rotated at 5 MB keeping one `.1`,
-and the sidecar mirrors its own half into the same file so both ends of a stuck
-run read as one timeline.
+steers, the merge precondition check. `debug` adds the streamed deltas.
+
+It goes to `stdpath('log')/nvime-<pid>.log` — one file per process, because two
+editors sharing one file rotate over each other's history silently. Append-only,
+rotated at 5 MB keeping one `.1`, created 0600, and pruned once a week-old file
+belongs to an editor that is gone. The sidecar mirrors its own half into its
+editor's file, so both ends of a stuck run read as one timeline.
 
 Your prompts and your files' contents never reach it. A content-bearing field
 is recorded as a size (`<412 chars>`), a secret-named one as `<redacted>`, and
-every payload is clipped. That is what makes the log safe to paste in public.
+every payload is clipped at a character boundary. That is what makes the log
+safe to paste in public.
 
 **`:Nvime log`** opens the last 200 lines in a readonly split parked at the
-newest line; `q` closes it. `:Nvime log clear` empties the file.
+newest line; `q` closes it. Every process's log is merged by timestamp, the
+rotated `.1` included. `:Nvime log clear` empties this process's file — never
+another editor's — and re-renders the split if one is open.
 
-**`:Nvime bundle`** writes one markdown file under `stdpath('cache')` and copies
-its path to the `+` and `"` registers: nvime version and git sha, Neovim, OS,
-node and claude versions, your config with secrets redacted, the full doctor
-output, the last 200 log lines, and — when a big change is selected — its
-session view and the last 50 events from its build log.
+**`:Nvime bundle`** writes one markdown file under `stdpath('cache')`, 0600,
+and copies its path to the `+` and `"` registers: nvime version and git sha,
+Neovim, OS, node and claude versions, your config with secrets redacted, the
+doctor output, the last 200 log lines, and — when a big change is selected —
+its session and the last 50 events from its build log. Nothing blocks the
+editor: the version probes run off the main thread with a 3 s deadline and
+print `(timed out)` rather than waiting, and no second sidecar is started.
+
+**The bundle prints what it names, never what it is handed.** Every section is
+an allow-list. The session the sidecar sends carries the runner's control token
+and socket, the spec, the conversation, and a title that is the first 80
+characters of what you typed; the bundle prints id, state, display, steerable,
+base and head sha, the worktree path, the runner's pid and whether it is still
+alive, and the timestamps — and nothing else. Run-log events are the same: a
+delta becomes a byte count, a tool becomes its name and a summary length, a
+phase becomes its phase, and anything unrecognised becomes its key names.
 
 And while the review tab checks the merge preconditions, the bars carry a
 spinner and what is running. Past 30 seconds it says so and names
