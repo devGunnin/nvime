@@ -211,6 +211,10 @@ local function adopt(session)
   if session ~= nil and (state.session == nil or state.session.id ~= session.id) then
     state.seq = 0
   end
+  local was = (state.session or {}).display
+  if (session or {}).display ~= was then
+    require('nvime.log').state_change('big', 'display', { from = was, to = (session or {}).display })
+  end
   state.session = session
   refresh_status()
 end
@@ -228,6 +232,7 @@ end
 --- One steer, as it moves from accepted to read by the build agent.
 local function render_steer(params)
   local who = steer_author(params)
+  require('nvime.log').state_change('big', 'steer', { state = params.state, mine = params.mine == true })
   if params.state == 'queued' then
     surface():interject('  ' .. who .. ' → build · ' .. (params.text or ''), 'NvimeUser')
     return

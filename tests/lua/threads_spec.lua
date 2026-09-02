@@ -1331,3 +1331,57 @@ describe('issue #10: the base moved, R rebases, M merges', function()
     threads.close()
   end)
 end)
+
+describe('issue #10: a merge check that runs long says so', function()
+  it('spins on the merge check and stops on the next event', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    ok(wait_for_spinner(), 'the merge check paints an indicator once it outlives the delay')
+    ok(tree_bar():find('checking the merge preconditions', 1, true) ~= nil, tree_bar())
+    local first = threads.activity().frame
+    ok(
+      vim.wait(2000, function()
+        return (threads.activity() or {}).frame > first
+      end, 20),
+      'the spinner keeps ticking while the check runs'
+    )
+    with_notices(function()
+      ok(fake.settle('big.merge', nil, {
+        merged = false,
+        refusals = { { code = 'base-moved', message = 'main has moved' } },
+        session = session({ block({ state = 'resolved' }) }),
+      }))
+    end)
+    eq(nil, threads.activity(), 'the spinner stops on the answer')
+    ok(tree_bar():find('checking the merge', 1, true) == nil, tree_bar())
+    threads.close()
+  end)
+
+  it('names :Nvime bundle once the check has run past the slow mark', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    ok(wait_for_spinner(), 'the merge check paints an indicator')
+    ok(threads.activity_line():find('Nvime bundle', 1, true) == nil, 'a check that just started is not slow yet')
+
+    -- Backdate the record rather than waiting out the real threshold.
+    local current = threads.activity()
+    current.started_ms = current.started_ms - (threads.SLOW_ACTIVITY_MS + 1000)
+    local line = threads.activity_line()
+    ok(line:find('still checking', 1, true) ~= nil, line)
+    ok(line:find(':Nvime bundle', 1, true) ~= nil, line)
+
+    with_notices(function()
+      ok(fake.settle('big.merge', nil, {
+        merged = false,
+        refusals = { { code = 'base-moved', message = 'main has moved' } },
+        session = session({ block({ state = 'resolved' }) }),
+      }))
+    end)
+    eq(nil, threads.activity())
+    threads.close()
+  end)
+end)

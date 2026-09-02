@@ -162,7 +162,15 @@ local function on_external_change(params)
 end
 
 local function on_approval(request)
+  require('nvime.log').state_change('edit', 'approval asked', {
+    approvalId = request.approvalId,
+    tool = request.tool,
+  })
   approval.ask(request, function(allow)
+    require('nvime.log').state_change('edit', 'approval answered', {
+      approvalId = request.approvalId,
+      allow = allow,
+    })
     agent.request('edit.answer', { approvalId = request.approvalId, allow = allow }, function(err, result)
       if err ~= nil then
         show_error(err)
@@ -181,6 +189,11 @@ end
 --- identical for the rest of the run.
 --- @param params table approvalId, allowed, cause
 local function on_approval_settled(params)
+  require('nvime.log').state_change('edit', 'approval settled', {
+    approvalId = params.approvalId,
+    allowed = params.allowed,
+    cause = params.cause,
+  })
   if params.allowed then
     return
   end

@@ -8,7 +8,8 @@ if vim.fn.has('nvim-0.10') == 0 then
   return
 end
 
---- Subcommands of the single `:Nvime` entry point.
+--- Subcommands of the single `:Nvime` entry point. Each takes whatever words
+--- followed its own name — `:Nvime log clear`, `:Nvime debug on`.
 local subcommands = {
   chat = function()
     require('nvime').chat()
@@ -41,6 +42,15 @@ local subcommands = {
     local on = require('nvime').toggle_statusline()
     vim.notify('nvime: winbar status ' .. (on and 'on' or 'off'))
   end,
+  log = function(...)
+    require('nvime').log(...)
+  end,
+  bundle = function()
+    require('nvime').bundle()
+  end,
+  debug = function(...)
+    require('nvime').debug(...)
+  end,
 }
 
 vim.api.nvim_create_user_command('Nvime', function(args)
@@ -57,11 +67,16 @@ vim.api.nvim_create_user_command('Nvime', function(args)
     )
     return
   end
-  handler()
+  handler(unpack(args.fargs, 2))
 end, {
-  nargs = '?',
+  nargs = '*',
   desc = 'nvime',
-  complete = function(lead)
+  complete = function(lead, line)
+    -- Only the first word is a subcommand; past it the arguments belong to
+    -- the subcommand itself and nvime has nothing to offer.
+    if line:match('^%s*Nvime%s+%S+%s') ~= nil then
+      return {}
+    end
     return vim.tbl_filter(function(name)
       return vim.startswith(name, lead)
     end, vim.tbl_keys(subcommands))

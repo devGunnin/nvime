@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- **Diagnostics you can attach to a bug report.** Issue #10 ("stuck, never
+  allowing me to merge") had nothing attachable: no log, no way to say what
+  nvime was doing. Three things now do.
+
+  A **debug log**, off by default and free when off — nothing is formatted and
+  no file is created. `debug = { level = 'off' | 'info' | 'debug' }` in
+  `setup()`, or `:Nvime debug on|off|toggle` for the session. At `info` it
+  records one line per RPC request, reply and event, plus every state
+  transition in big/edit/chat (display and phase changes, approvals, steers,
+  the merge precondition check); `debug` adds the streamed deltas. It goes to
+  `stdpath('log')/nvime.log`, append-only, rotated at 5 MB keeping one `.1`,
+  and the sidecar mirrors its own half into the same file through a new
+  `debug.set` so both ends of a stuck run read as one timeline. Your prompts
+  and your files' contents never reach it: a content-bearing field is recorded
+  as a size, a secret-named one as `<redacted>`, and every payload is clipped —
+  which is what makes the log safe to paste into a public issue.
+
+  **`:Nvime log`** shows the last 200 lines in a readonly split parked at the
+  newest line (`q` closes it); `:Nvime log clear` empties the file. `:Nvime
+  doctor` gains a row naming the log's level, path and size.
+
+  **`:Nvime bundle`** writes one markdown file under `stdpath('cache')` and
+  copies its path to the `+` and `"` registers: nvime version and git sha,
+  Neovim, OS, node and claude versions, the configuration with secrets
+  redacted, the full doctor output, the last 200 log lines and — when a big
+  change is selected — its session view and the last 50 events from its build
+  log, through a new read-only `big.runlog`.
+
+- **A long merge check says so.** While the review tab checks the merge
+  preconditions the bars already carried a spinner; past 30 seconds it now says
+  how long it has been running and names `:Nvime bundle`, once as a warning and
+  on the wide bar, instead of looking exactly like a wedged editor (#10).
+
 ## 3.1.0 - 2026-09-02
 
 - Review threads open the clone's real, read-only file with diff annotations,

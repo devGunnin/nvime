@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,5 +86,47 @@ describe('index: drain vs. the version probe', () => {
       /"id":1,"ok":true/,
       `the accepted ping must be answered before exit; got: ${run.stdout}`,
     );
+  });
+});
+
+describe('index: debug.set mirrors the sidecar into the plugin log', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'nvime-index-debug-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('takes a level and a path, and records what it handled there', async () => {
+    const logPath = join(dir, 'nvime.log');
+    const env = { NVIME_SESSION_STORE: join(dir, 'sessions.json') };
+    const run = await runSidecar(
+      [
+        `{"id":1,"method":"debug.set","params":{"level":"info","path":${JSON.stringify(logPath)}}}`,
+        '{"id":2,"method":"ping","params":{}}',
+        '{"id":3,"method":"shutdown","params":{}}',
+      ],
+      env,
+      DRAIN_TIMEOUT_MS + 5000,
+    );
+    assert.match(run.stdout, /"id":1,"ok":true/, run.stdout);
+    const body = readFileSync(logPath, 'utf8');
+    assert.ok(body.includes('ping'), `the sidecar must record what it handled: ${body}`);
+  });
+
+  it('refuses a level it does not know rather than writing anywhere', async () => {
+    const run = await runSidecar(
+      [
+        `{"id":1,"method":"debug.set","params":{"level":"loud","path":${JSON.stringify(join(dir, 'x.log'))}}}`,
+        '{"id":2,"method":"shutdown","params":{}}',
+      ],
+      { NVIME_SESSION_STORE: join(dir, 'sessions.json') },
+      DRAIN_TIMEOUT_MS + 5000,
+    );
+    assert.match(run.stdout, /"id":1,"ok":false/, run.stdout);
+    assert.equal(existsSync(join(dir, 'x.log')), false);
   });
 });

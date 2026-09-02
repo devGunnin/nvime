@@ -6,6 +6,7 @@ local chat = require('nvime.chat')
 local config = require('nvime.config')
 local edit = require('nvime.edit')
 local keymaps = require('nvime.keymaps')
+local log = require('nvime.log')
 local models = require('nvime.models')
 local palette = require('nvime.palette')
 local statusline = require('nvime.statusline')
@@ -18,6 +19,7 @@ M.VERSION = require('nvime.version')
 --- @param user table|nil
 function M.setup(user)
   local opts = config.setup(user)
+  log.set_level(opts.debug.level)
   palette.attach()
   keymaps.apply(opts)
   vim.api.nvim_create_autocmd('VimLeavePre', {
@@ -84,5 +86,43 @@ M.model = models.open
 --- `:Nvime enroll`: show the public, repository-scoped workstation record an
 --- organization administrator enrolls. The private signing key never enters Lua.
 M.enrollment = require('nvime.organization').enrollment
+
+--- `:Nvime log [clear]`: the debug log's tail in a readonly split, or an empty
+--- log to start recording into.
+--- @param word string|nil
+function M.log(word)
+  if word == nil then
+    log.open()
+    return
+  end
+  if word ~= 'clear' then
+    vim.notify("nvime: :Nvime log takes 'clear' or nothing", vim.log.levels.ERROR)
+    return
+  end
+  log.clear()
+  vim.notify('nvime: cleared ' .. log.path())
+end
+
+--- `:Nvime debug on|off|toggle`: the debug log's level for this session, on
+--- top of whatever `debug.level` in `setup()` asked for.
+--- @param word string|nil
+function M.debug(word)
+  local levels = { on = 'info', off = 'off', info = 'info', debug = 'debug' }
+  if word == 'toggle' or word == nil then
+    log.toggle()
+  elseif levels[word] ~= nil then
+    log.set_level(levels[word])
+  else
+    vim.notify('nvime: :Nvime debug takes on, off, toggle, info or debug', vim.log.levels.ERROR)
+    return
+  end
+  agent.set_debug_level(log.level())
+  vim.notify(string.format('nvime: debug log %s → %s', log.level(), log.path()))
+end
+
+--- `:Nvime bundle`: everything a bug report needs, in one attachable file.
+function M.bundle()
+  require('nvime.bundle').write()
+end
 
 return M

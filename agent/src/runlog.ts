@@ -172,6 +172,18 @@ export function readLogAfter(path: string, after: number, maxBytes = MAX_REPLAY_
 }
 
 /**
+ * The last `limit` events, oldest first — what `:Nvime bundle` attaches so a
+ * bug report can say what the build was actually doing.
+ *
+ * @throws ProtocolError when the log exists but cannot be read.
+ */
+export function tailRunLog(path: string, limit: number): RunEvent[] {
+  if (!Number.isInteger(limit) || limit <= 0) throw new TypeError('tailRunLog needs a positive limit');
+  const { events } = readLogAfter(path, 0);
+  return events.slice(Math.max(0, events.length - limit));
+}
+
+/**
  * The highest seq the log already holds, or 0 for a log that is not there.
  *
  * @throws ProtocolError when the log exists but cannot be read.

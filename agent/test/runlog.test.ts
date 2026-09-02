@@ -3,7 +3,15 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFile
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { isTerminal, lastSeqOf, MAX_EVENT_BYTES, readLogAfter, RunLog, type RunEvent } from '../src/runlog.js';
+import {
+  isTerminal,
+  lastSeqOf,
+  MAX_EVENT_BYTES,
+  readLogAfter,
+  RunLog,
+  tailRunLog,
+  type RunEvent,
+} from '../src/runlog.js';
 
 let root = '';
 let path = '';
@@ -213,5 +221,34 @@ describe('RunLog', () => {
   it('ignores a line that parses but is not an event', () => {
     writeFileSync(path, `${JSON.stringify({ seq: 0, event: '', params: null })}\n`);
     assert.deepEqual(eventsIn(), []);
+  });
+});
+
+describe('tailRunLog', () => {
+  it('returns the last events, oldest first', () => {
+    const log = new RunLog(path);
+    for (let index = 1; index <= 10; index += 1) log.append('big.delta', { n: index });
+    log.close();
+    const tail = tailRunLog(path, 3);
+    assert.equal(tail.length, 3);
+    assert.deepEqual(
+      tail.map((event) => event.seq),
+      [8, 9, 10],
+    );
+  });
+
+  it('returns everything when the log is shorter than the window', () => {
+    const log = new RunLog(path);
+    log.append('big.done', { ok: true });
+    log.close();
+    assert.equal(tailRunLog(path, 50).length, 1);
+  });
+
+  it('is empty for a log nobody has written', () => {
+    assert.deepEqual(tailRunLog(join(root, 'absent.ndjson'), 10), []);
+  });
+
+  it('refuses a window that is not a positive count', () => {
+    assert.throws(() => tailRunLog(path, 0), /positive/);
   });
 });

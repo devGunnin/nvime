@@ -8,6 +8,7 @@ import { BigStore, defaultBigRoot } from './bigstore.js';
 import { CertificationService } from './certification.js';
 import { ChatService } from './chat.js';
 import { parseContextBlocks, parseProjectInstructions } from './context.js';
+import { DebugLog, isDebugLevel } from './debuglog.js';
 import { DetachedService } from './detached.js';
 import { parseDial, parseTriageDial } from './dial.js';
 import { EditService, parseScope } from './edit.js';
@@ -26,6 +27,7 @@ import {
 import { LineSplitter, ProtocolError, encodeFrame, type OutgoingFrame } from './protocol.js';
 import { ManagedPolicyClient } from './managed-policy.js';
 import { Dispatcher } from './rpc.js';
+import { tailRunLog } from './runlog.js';
 import { SessionStore, defaultStorePath } from './sessions.js';
 import { CLAUDE_VERSION_PROBE_TIMEOUT_MS, DRAIN_TIMEOUT_MS } from './timeouts.js';
 
@@ -99,9 +101,33 @@ function main(): void {
 
   const organization = createCertificationService(process.env);
 
-  const dispatcher = new Dispatcher(write);
+  const debugLog = new DebugLog();
+  const dispatcher = new Dispatcher(write, debugLog);
   registerHandlers(dispatcher, { chat, edit, big, detached, organization }, claudePath, store.path);
+  registerDiagnosticHandlers(dispatcher, debugLog, bigStore);
   readStdin(dispatcher);
+}
+
+/**
+ * The two methods `:Nvime bundle` and `:Nvime debug` need. Read-only, and the
+ * only writer here is the debug log the plugin explicitly turned on.
+ */
+function registerDiagnosticHandlers(dispatcher: Dispatcher, debugLog: DebugLog, bigStore: BigStore): void {
+  dispatcher.register('debug.set', async (_id, params) => {
+    const level = params.level;
+    if (!isDebugLevel(level)) {
+      throw new ProtocolError('bad_request', 'params.level must be off, info or debug');
+    }
+    debugLog.setLevel(level, level === 'off' ? null : requireAbsolutePath(params, 'path'));
+    return { level, path: debugLog.path };
+  });
+
+  dispatcher.register('big.runlog', async (_id, params) => ({
+    events: tailRunLog(
+      bigStore.logPathFor(requireAbsolutePath(params, 'root'), requireString(params, 'sessionId')),
+      optionalPositiveInt(params, 'limit', 500) ?? 50,
+    ),
+  }));
 }
 
 interface Services {

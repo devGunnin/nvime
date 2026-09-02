@@ -263,6 +263,32 @@ local function check_model_dial(entries)
   info(entries, 'model dial: ' .. table.concat(active, '  '))
 end
 
+--- The debug log's own row: what a bug report can be asked to attach. Always
+--- informational — an off log is the default, not a problem to fix.
+--- @return DiagnosticEntry
+function M.log_entry()
+  local status = require('nvime.log').status()
+  if status.level == 'off' then
+    return {
+      level = 'info',
+      message = 'debug log: off — :Nvime debug on starts one at ' .. status.path,
+    }
+  end
+  return {
+    level = 'info',
+    message = string.format('debug log: level %s · %s · %d bytes', status.level, status.path, status.size),
+  }
+end
+
+--- Runs a probe the way every check here does: bounded, and answering the
+--- error rather than raising it. Shared with `:Nvime bundle`.
+--- @param cmd string[]
+--- @return string|nil output, string|nil error
+function M.probe(cmd)
+  assert(type(cmd) == 'table' and #cmd > 0, 'diagnostics.probe needs a command')
+  return run(cmd, PROBE_TIMEOUT_MS)
+end
+
 --- Runs every check and returns what each found, in the order a reader should
 --- see them. Never raises — a probe that cannot even run is reported as a
 --- failure of that probe, not a crash of the command that asked for this.
@@ -282,6 +308,7 @@ function M.run(root)
   check_login_file(entries)
   check_git_identity(entries, root or vim.uv.cwd())
   check_model_dial(entries)
+  entries[#entries + 1] = M.log_entry()
   return entries
 end
 

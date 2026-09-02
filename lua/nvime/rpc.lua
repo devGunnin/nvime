@@ -3,6 +3,12 @@
 --- Every process interaction is callback-driven (`vim.system`), so nothing here
 --- ever blocks the editor. Frames arrive in a fast event context; the decode is
 --- pure Lua and the user callbacks are handed to `vim.schedule`.
+---
+--- This is also where the debug log sees the wire: every request, reply and
+--- event passes through here exactly once, and only here are the method a
+--- reply answers and how long it took both still known.
+local log = require('nvime.log')
+
 local M = {}
 
 --- A run-on line means the peer desynchronized, not that it is chatty.
@@ -69,6 +75,9 @@ function M.new(opts)
     on_event = opts.on_event,
     on_exit = opts.on_exit,
     pending = {},
+    --- What each in-flight id asked and when, so a reply can be logged with
+    --- the method it answers and its round-trip time. Cleared with `pending`.
+    sent = {},
     stderr = {},
     splitter = M.new_splitter(),
     proc = nil,
@@ -159,6 +168,9 @@ function Client:request(method, params, cb, timeout_ms)
     end)
   end
 
+  self.sent[id] = { method = method, at = vim.uv.now() }
+  log.request(method, id, params)
+
   local line = vim.json.encode({ id = id, method = method, params = params or vim.empty_dict() })
   local written, err = pcall(function()
     self.proc:write(line .. '\n')
@@ -175,10 +187,24 @@ end
 
 --- Removes and returns the pending callback for `id`, or nil if something
 --- else (a reply, a write failure, `_fail_all`) already claimed it.
+---
+--- The returned callback logs the outcome first, so every way a request can
+--- settle — a reply, a deadline, a failed write — leaves one line, and none of
+--- them has to remember to log for itself.
 function Client:_claim(id)
   local settle = self.pending[id]
+  if settle == nil then
+    return nil
+  end
   self.pending[id] = nil
-  return settle
+  local sent = self.sent[id]
+  self.sent[id] = nil
+  return function(err, result)
+    if sent ~= nil then
+      log.reply(sent.method, id, vim.uv.now() - sent.at, err)
+    end
+    settle(err, result)
+  end
 end
 
 function Client:stop()
@@ -229,6 +255,7 @@ function Client:_dispatch(line)
   end
   if frame.event ~= nil then
     local name, params = frame.event, frame.params or {}
+    log.event(name, params)
     vim.schedule(function()
       self.on_event(name, params)
     end)
@@ -277,9 +304,13 @@ end
 
 --- No request is ever left hanging: a dead sidecar fails everything in flight.
 function Client:_fail_all(err)
-  local pending = self.pending
-  self.pending = {}
-  for _, cb in pairs(pending) do
+  local pending, sent = self.pending, self.sent
+  self.pending, self.sent = {}, {}
+  for id, cb in pairs(pending) do
+    local record = sent[id]
+    if record ~= nil then
+      log.reply(record.method, id, vim.uv.now() - record.at, err)
+    end
     vim.schedule(function()
       cb(err, nil)
     end)
