@@ -291,10 +291,18 @@ export class ChatService {
 }
 
 /** A session with no title yet (created, but no prompt has landed) reads as
- *  "(new)" rather than its raw id — the id is meaningless to a reader. */
+ *  "(new) <short id>" — the full id is meaningless to a reader, but two
+ *  prompt-less sessions still have to be tellable apart before a delete. */
 function toSummary(info: SDKSessionInfo): SessionSummary {
-  const title = info.customTitle ?? info.firstPrompt ?? info.summary ?? '(new)';
+  const named = nonEmpty(info.customTitle) ?? nonEmpty(info.firstPrompt) ?? nonEmpty(info.summary);
+  const title = named ?? `(new) ${info.sessionId.slice(0, 8)}`;
   return { sessionId: info.sessionId, title, lastModified: info.lastModified };
+}
+
+/** `??` alone would let a blank title through as a blank picker row. */
+function nonEmpty(value: string | undefined | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed !== undefined && trimmed !== '' ? trimmed : undefined;
 }
 
 /** Best-effort text of a stored transcript message; shapes vary by producer. */

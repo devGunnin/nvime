@@ -21,6 +21,7 @@ import {
   requireArray,
   requireBoolean,
   requireString,
+  requireUuid,
 } from './params.js';
 import { LineSplitter, ProtocolError, encodeFrame, type OutgoingFrame } from './protocol.js';
 import { ManagedPolicyClient } from './managed-policy.js';
@@ -272,7 +273,7 @@ function registerChatHandlers(dispatcher: Dispatcher, chat: ChatService | null):
   }));
 
   dispatcher.register('chat.forget', async (_id, params) => {
-    await present(chat).forget(requireAbsolutePath(params, 'root'), requireString(params, 'sessionId'));
+    await present(chat).forget(requireAbsolutePath(params, 'root'), requireUuid(params, 'sessionId'));
     return { forgotten: true };
   });
 

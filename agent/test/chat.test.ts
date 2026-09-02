@@ -413,7 +413,7 @@ describe('ChatService.list', () => {
     assert.deepEqual(listed.sessions, [{ sessionId: SESSION, title: 'say ping', lastModified: 42 }]);
   });
 
-  it('titles a session with no prompt yet "(new)" instead of its raw id', async () => {
+  it('titles a session with no prompt yet "(new)" plus its short id, not the raw id', async () => {
     const live = [
       { sessionId: SESSION, lastModified: 42 },
     ] as unknown as SDKSessionInfo[];
@@ -422,7 +422,23 @@ describe('ChatService.list', () => {
     });
     await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
     const listed = await h.service.list(ROOT, 25);
-    assert.equal(listed.sessions[0]?.title, '(new)');
+    assert.equal(listed.sessions[0]?.title, `(new) ${SESSION.slice(0, 8)}`);
+  });
+
+  it('keeps two prompt-less sessions tellable apart, and a blank title from blanking a row', async () => {
+    const other = 'cccccccc-dddd-eeee-ffff-000000000000';
+    const live = [
+      { sessionId: SESSION, firstPrompt: '   ', lastModified: 42 },
+      { sessionId: other, lastModified: 43 },
+    ] as unknown as SDKSessionInfo[];
+    const h = harness([frames.init(), frames.success('ok')], storePath, {
+      listSessions: async () => live,
+    });
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    h.store.remember(ROOT, other);
+    const titles = (await h.service.list(ROOT, 25)).sessions.map((s) => s.title);
+    assert.deepEqual(titles.slice().sort(), [`(new) ${SESSION.slice(0, 8)}`, `(new) ${other.slice(0, 8)}`].sort());
+    assert.equal(new Set(titles).size, 2, 'two blank sessions must not render identically');
   });
 
   it('forgets a session the SDK dropped from a complete listing', async () => {
