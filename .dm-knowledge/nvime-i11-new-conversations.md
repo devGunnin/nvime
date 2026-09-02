@@ -1,0 +1,1 @@
+- **[pitfall]** panel.lua Panel:close/ensure_windows used ipairs({ self.prompt_win, self.win }) - ipairs stops at the first nil, so a prompt-less panel (prompt_win==nil) leaked its window and buffer on every close. List the never-nil field (self.win/self.buf) first.  _(2026-09-02T11:39:51Z)_
