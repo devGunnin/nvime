@@ -120,9 +120,9 @@ export class DetachedService {
       return this.#fallback(requestId, kind, params, this.#runnerStderr(params, spawned.errFrom));
     }
     const followed = await this.#follow(requestId, params, from);
-    // Only a run that reached its own terminal event live is still shutting
-    // down its claim; a killed runner's is deliberately left stale for later.
-    if (followed.ended) await this.#awaitClaimReleased(params);
+    // Only a run that reached a terminal event is still shutting down its
+    // claim; a killed runner's is deliberately left stale for later.
+    if (followed.ended) await this.#awaitClaimReleased(requestId, params);
     return this.#settle(params, from);
   }
 
@@ -134,7 +134,7 @@ export class DetachedService {
   async attach(requestId: number, params: { root: string; id: string; after: number }): Promise<{ seq: number }> {
     this.#store.require(params.root, params.id);
     const followed = await this.#follow(requestId, params, params.after);
-    if (followed.ended) await this.#awaitClaimReleased(params);
+    if (followed.ended) await this.#awaitClaimReleased(requestId, params);
     return { seq: followed.cursor };
   }
 
@@ -302,15 +302,22 @@ export class DetachedService {
     }
   }
 
-  /** Waits for a just-ended run's own claim to clear, released well after
-   *  start()/attach() resolves, so its own run never reads as held elsewhere. */
-  async #awaitClaimReleased(params: { root: string; id: string }): Promise<void> {
+  /** Waits for a just-ended run's own claim to clear or be replaced by a
+   *  newer one — a fast re-claim is not this run's release to wait on. */
+  async #awaitClaimReleased(requestId: number, params: { root: string; id: string }): Promise<void> {
     const deadline = Date.now() + CLAIM_RELEASE_TIMEOUT_MS;
+    let seen: ClaimGeneration | null = null;
     for (;;) {
       const session = this.#store.read(params.root, params.id);
       const lock = session === null ? null : this.#store.readLock(session);
       if (lock === null || !isLockLive(lock)) return;
-      if (Date.now() >= deadline) return;
+      const generation = { owner: lock.owner, pid: lock.pid, startedAt: lock.startedAt };
+      if (seen !== null && !sameGeneration(seen, generation)) return;
+      seen = generation;
+      if (Date.now() >= deadline) {
+        this.#emit('big.notice', { id: requestId, text: 'the finished build is still releasing its claim' });
+        return;
+      }
       await sleep(HANDSHAKE_POLL_MS);
     }
   }
@@ -332,12 +339,12 @@ export class DetachedService {
     after: number,
   ): Promise<{ cursor: number; ended: boolean }> {
     const token = tokenOf(this.#store.read(params.root, params.id));
-    if (token === null) return { cursor: this.#replay(requestId, params, after), ended: false };
+    if (token === null) return this.#replay(requestId, params, after);
     let client: ControlClient;
     try {
       client = await connectControl(this.#socketFor(params), token);
     } catch {
-      return { cursor: this.#replay(requestId, params, after), ended: false };
+      return this.#replay(requestId, params, after);
     }
     let cursor = after;
     let ended = false;
@@ -390,19 +397,22 @@ export class DetachedService {
           reject(cause instanceof Error ? cause : new Error(String(cause)));
         });
     });
-    return ended ? { cursor, ended: true } : { cursor: this.#replay(requestId, params, cursor), ended: false };
+    return ended ? { cursor, ended: true } : this.#replay(requestId, params, cursor);
   }
 
-  /** Emits everything after `from` straight from the log. Returns the new cursor. */
-  #replay(requestId: number, params: { root: string; id: string }, from: number): number {
+  /** Emits everything after `from` straight from the log. `ended` is true when
+   *  a terminal event was among them — the backstop can deliver one too. */
+  #replay(requestId: number, params: { root: string; id: string }, from: number): { cursor: number; ended: boolean } {
     const slice = readLogAfter(this.#store.logPathFor(params.root, params.id), from);
     this.#noteElided(requestId, slice.elided);
     let cursor = from;
+    let ended = false;
     for (const event of slice.events) {
       cursor = Math.max(cursor, event.seq);
       this.#push(requestId, event);
+      if (isTerminal(event)) ended = true;
     }
-    return cursor;
+    return { cursor, ended };
   }
 
   /** Says what a replay could not reach, rather than letting it look complete. */
@@ -559,6 +569,13 @@ export function detachedEnabled(env: Env): boolean {
 function tokenOf(session: BigSession | null): string | null {
   const token = session?.runner?.token;
   return typeof token === 'string' && token !== '' ? token : null;
+}
+
+type ClaimGeneration = { owner: string; pid: number; startedAt: number };
+
+/** Whether two claim snapshots name the same run, not merely the same session. */
+function sameGeneration(a: ClaimGeneration, b: ClaimGeneration): boolean {
+  return a.owner === b.owner && a.pid === b.pid && a.startedAt === b.startedAt;
 }
 
 function signal(pid: number, sig: NodeJS.Signals | 0): SignalOutcome {

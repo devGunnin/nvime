@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -523,7 +523,9 @@ describe('when the runner cannot start', () => {
 describe('two runners over one session', () => {
   it('lets only one write the log, and refuses the loser before it opens one', async () => {
     const session = await approved();
-    writeScript({ holdMs: 5_000, readyOut: join(root, 'ready') });
+    // As long as the other long-hold tests: a cold spawn under load must
+    // never be able to outlast this margin before the first run releases.
+    writeScript({ holdMs: 60_000, readyOut: join(root, 'ready') });
     const running = detached.start(1, 'build', { root: repo, id: session.id });
     // Asserted below, but `#follow` can rarely settle it this early — mark it
     // handled now so node:test never flags the race as unhandled rather than caught.
@@ -629,6 +631,42 @@ describe('a build, the moment it finishes', () => {
     assert.ok(
       !check.refusals.some((refusal) => refusal.code === 'held-elsewhere'),
       `a build cannot be held by the run that just finished it: ${JSON.stringify(check.refusals)}`,
+    );
+  });
+
+  it('waits out a claim still live when its terminal event arrives, deterministically', async () => {
+    const session = await approved();
+    writeScript({ write: { path: 'tool.py', content: 'def main():\n    print("v1")\n' } });
+    await detached.start(1, 'build', { root: repo, id: session.id });
+
+    // Manufacture the race on purpose: a terminal event already logged, and a
+    // fresh, live claim still on the record, as if a runner were mid-release.
+    writeFileSync(
+      store.lockPathFor(repo, session.id),
+      JSON.stringify({
+        owner: 'a-runner-still-shutting-down',
+        pid: process.pid,
+        host: hostname(),
+        what: 'build',
+        startedAt: Date.now(),
+        heartbeatAt: Date.now(),
+      }),
+    );
+
+    let resolved = false;
+    const attaching = detached.attach(2, { root: repo, id: session.id, after: 0 }).then((result) => {
+      resolved = true;
+      return result;
+    });
+
+    await sleep(200);
+    assert.equal(resolved, false, 'attach() must not resolve while the claim it observed is still live');
+    rmSync(store.lockPathFor(repo, session.id), { force: true });
+
+    await attaching;
+    assert.equal(resolved, true, 'and resolves once that same claim actually clears');
+    assert.ok(
+      !(await big.mergeCheck(repo, session.id)).refusals.some((refusal) => refusal.code === 'held-elsewhere'),
     );
   });
 });
