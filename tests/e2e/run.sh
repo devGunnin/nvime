@@ -360,7 +360,14 @@ for name in $wanted; do
     verdict=FAIL
     failed=1
   fi
-  [ "$verdict" = PASS ] || tail -n 20 "$console" | sed 's/^/   | /'
+  # A driver that dies takes its wrapper's `cat` of the report with it, so the
+  # console alone can be just the banner. Show both.
+  if [ "$verdict" != PASS ]; then
+    tail -n 20 "$console" | sed 's/^/   | /'
+    if [ -s "$work/report.txt" ]; then
+      tail -n 10 "$work/report.txt" | sed 's/^/   > /'
+    fi
+  fi
   echo "== $name $verdict in ${elapsed}s"
   results="$results$name|$verdict|$elapsed|$console
 "

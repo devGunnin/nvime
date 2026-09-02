@@ -946,6 +946,7 @@ make e2e                              # every scenario
 make e2e-one SCENARIO=cold-start      # one of them
 tests/e2e/run.sh --list               # names and default timeouts
 tests/e2e/run.sh --keep prompt-keys   # keep the scratch root even on success
+tests/e2e/run.sh --selftest           # the runner's own checks; spends nothing
 ```
 
 | scenario | what it proves |
@@ -967,13 +968,22 @@ key. `NVIME_E2E_MODEL` (default `sonnet`) picks the model.
 before-you-merge check you run by hand.
 
 Every scenario gets its own directory under a scratch root for the run, with
-all four XDG homes pointed inside it — a scenario never reads or writes your
-own config, data, state or cache. The root is removed when everything passes
-and kept, with its path printed, when anything does not; `--keep` keeps it
-either way. Per-scenario timeouts default per scenario and are overridden with
-`NVIME_E2E_TIMEOUT_<NAME>` (`NVIME_E2E_TIMEOUT_COLD_START=600`); a scenario
-that misses its deadline is killed along with any detached runner it started,
-so a timeout cannot leave a build spending tokens behind it.
+all four XDG homes pointed inside it, so a scenario never reads or writes
+**nvime's** own config, data, state or cache. Your `~/.claude` is *not*
+isolated — that is where the subscription login lives — so the scratch repos'
+prompts and transcripts do land in your real claude directory. The root is
+removed when everything passes and kept, with its path printed, when anything
+does not; `--keep` keeps it either way.
+
+Deadlines default per scenario and are overridden with
+`NVIME_E2E_TIMEOUT_<NAME>` (`NVIME_E2E_TIMEOUT_COLD_START=600`). A scenario
+that misses its deadline is killed — and so is any build runner it started.
+That second half needs saying: a big-change build is spawned detached, in a
+process group of its own, so killing the scenario's group does not reach it and
+nothing caps its wall clock. The runner reads the pid out of the scenario's own
+session store and kills that too, and it traps `SIGINT`/`SIGTERM` so Ctrl-C
+stops the tree instead of leaving it running. `tests/e2e/run.sh --selftest`
+proves both paths against stub scenarios, without spending anything.
 
 ### The screenshots
 
