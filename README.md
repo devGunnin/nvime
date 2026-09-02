@@ -699,12 +699,16 @@ editor's file, so both ends of a stuck run read as one timeline — with one
 exception: a detached build's runner is a separate process and does not mirror.
 
 What you typed does not reach it. A content-bearing field is recorded as a size
-(`<412 chars>`), a secret-named one as `<redacted>`, and a title-derived name —
-a big change's `title`, its `branch`, any `slug` of one — as a size too, since
-a branch is `nvime/big/<slug of the title>` and a title is the first 80
-characters of your prompt. Every payload is clipped at a character boundary.
-That is what makes the log safe to paste in public, and it has to hold at the
-log line: `:Nvime bundle` attaches the tail verbatim.
+(`<412 chars>`, or `<5 keys, 251 bytes>` for an object), a secret-named one as
+`<redacted>`, and a title-derived name — a big change's `title`, its `branch`,
+any `slug` of one — as a size too, since a branch is `nvime/big/<slug of the
+title>` and a title is the first 80 characters of your prompt. So does the
+approved spec, as `spec` and as each of its fields (`goal`, `approach`,
+`scope`, `acceptance`, `outOfScope`), since a spec can arrive unwrapped.
+**A field named as content is recorded by its size whatever it holds — never
+walked into.** Every payload is clipped at a character boundary. That is what
+makes the log safe to paste in public, and it has to hold at the log line:
+`:Nvime bundle` attaches the tail verbatim.
 
 **`:Nvime log`** opens the last 200 lines in a readonly split parked at the
 newest line; `q` closes it. Every process's log is merged by timestamp, the

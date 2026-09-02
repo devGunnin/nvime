@@ -93,9 +93,19 @@ describe('DebugLog redaction', () => {
     assert.ok(rendered.includes('400 chars'), rendered);
   });
 
-  it('summarises a content-named list but keeps a settings object of the same name', () => {
-    assert.ok(renderParams({ context: [{ path: 'a' }, { path: 'b' }] }).includes('<2 items>'));
+  it('summarises a content key whatever it holds, and never walks into it', () => {
+    // Round 3: the type-sniffing escape hatch this used to assert is gone. A
+    // content key that recursed put `spec.goal` one field beyond the rule.
+    assert.ok(renderParams({ answers: [{ text: 'a' }, { text: 'b' }] }).includes('<2 items>'));
+    assert.ok(renderParams({ prompt: 'a prompt' }).includes('<8 chars>'));
+    assert.match(renderParams({ spec: { goal: 'ship it', scope: [] } }), /keys/);
+  });
+
+  it('judges a settings object by its own field names, not by the name above it', () => {
+    // Why `context` is no longer a content key at all: it is a block list in an
+    // RPC payload and a settings object in the config the bundle renders.
     assert.ok(renderParams({ context: { maxFileBytes: 204800 } }).includes('204800'));
+    assert.ok(renderParams({ context: [{ path: 'a', text: 'x' }] }).includes('<1 chars>'));
   });
 
   it('clips a long payload to the line budget', () => {
@@ -221,5 +231,37 @@ describe('DebugLog round-2 regressions', () => {
     atDebug.setLevel('debug', loud);
     atDebug.detail('big.delta 41 bytes');
     assert.ok(readFileSync(loud, 'utf8').includes('big.delta 41 bytes'), 'debug takes it');
+  });
+});
+
+describe('DebugLog round-3 regressions', () => {
+  // D1: `spec` was a content key, but the summariser only fired for a string
+  // or an array — so an object walked straight through it and the approved
+  // plan's `goal`/`approach` were written out verbatim.
+  const SPEC = {
+    goal: 'stop the hunter2 staging password leaking into auth logs',
+    scope: ['src/hunter2_auth.rs'],
+    approach: 'rotate the hunter2 credential and scrub the log sink',
+    acceptance: ['no hunter2 in any sink'],
+    outOfScope: ['the hunter2 rotation runbook'],
+  };
+
+  it('summarises a content-named object rather than walking into it', () => {
+    const rendered = renderParams({ session: { id: 'sess', spec: SPEC } });
+    assert.ok(!rendered.includes('hunter2'), rendered);
+    assert.ok(/keys/.test(rendered), `the shape is still described: ${rendered}`);
+  });
+
+  it('holds for each spec field arriving on its own', () => {
+    for (const [key, value] of Object.entries(SPEC)) {
+      const rendered = renderParams({ [key]: value });
+      assert.ok(!rendered.includes('hunter2'), `${key} reached the log: ${rendered}`);
+    }
+  });
+
+  it('still judges an ordinary settings object by its own field names', () => {
+    const rendered = renderParams({ context: { maxFileBytes: 204800, blocks: [{ text: 'secret' }] } });
+    assert.ok(rendered.includes('204800'), `a number is not content: ${rendered}`);
+    assert.ok(!rendered.includes('secret'), `and the text inside it still is: ${rendered}`);
   });
 });

@@ -48,6 +48,10 @@ const SECRET_PARTS = ['token', 'secret', 'password', 'passwd', 'authorization', 
 /**
  * Fields carrying what the user wrote or what their files hold. Recorded as a
  * size, never as text.
+ *
+ * `context` is deliberately absent: it is a block list in an RPC payload and a
+ * settings object in the config the bundle renders, so naming it meant one of
+ * the two was always wrong. Its children answer for themselves instead.
  */
 const CONTENT_KEYS = new Set([
   'answers',
@@ -57,12 +61,17 @@ const CONTENT_KEYS = new Set([
   'slug',
   'comment',
   'content',
-  'context',
   'diff',
   'message',
   'prompt',
   'rationale',
+  // `BigSpec`, and each of its fields: a spec can arrive unwrapped.
   'spec',
+  'goal',
+  'approach',
+  'scope',
+  'acceptance',
+  'outOfScope',
   'summary',
   'text',
   'title',
@@ -85,16 +94,17 @@ export function isSecretKey(name: string): boolean {
 function summarise(value: unknown): string {
   if (typeof value === 'string') return `<${value.length} chars>`;
   if (Array.isArray(value)) return `<${value.length} items>`;
-  return `<${typeof value}>`;
-}
-
-/**
- * A content-named field only carries content when it is text or a list of it.
- * `context` is a block list in an RPC payload and a settings object in the
- * config the bundle renders; summarising the settings object would gut it.
- */
-function isContent(value: unknown): boolean {
-  return typeof value === 'string' || Array.isArray(value);
+  if (value === null || typeof value !== 'object') return `<${typeof value}>`;
+  // An object is described by its shape: the count alone would not say a spec
+  // was there.
+  const keys = Object.keys(value).length;
+  let bytes = 0;
+  try {
+    bytes = JSON.stringify(value)?.length ?? 0;
+  } catch {
+    bytes = 0;
+  }
+  return `<${keys} keys, ${bytes} bytes>`;
 }
 
 function redact(value: unknown, depth: number): unknown {
@@ -104,7 +114,10 @@ function redact(value: unknown, depth: number): unknown {
   const out: Record<string, unknown> = {};
   for (const [key, nested] of Object.entries(value)) {
     if (isSecretKey(key)) out[key] = REDACTED;
-    else if (CONTENT_KEYS.has(key) && isContent(nested)) out[key] = summarise(nested);
+    // A CONTENT KEY NEVER RECURSES, whatever it holds: `spec` was named here
+    // and still leaked, because walking into the object put its `goal` and
+    // `approach` — the reader's own words — one field beyond the rule.
+    else if (CONTENT_KEYS.has(key)) out[key] = summarise(nested);
     else out[key] = redact(nested, depth + 1);
   }
   return out;

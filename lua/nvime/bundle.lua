@@ -122,7 +122,9 @@ local function session_lines(session)
     '- state: ' .. scalar(session.state),
     '- display: ' .. scalar(session.display),
     '- steerable: ' .. scalar(session.steerable),
-    '- base sha: ' .. scalar(base.commit) .. ' (branch ' .. scalar(base.branch) .. ')',
+    -- The sha identifies the base on its own; the branch is a content key, so
+    -- printing it beside the sha only ever rendered a size.
+    '- base sha: ' .. scalar(base.commit),
     '- head sha: ' .. scalar(merge.commit),
     '- worktree dir: ' .. scalar(worktree.path ~= nil and vim.fs.dirname(worktree.path) or nil),
     runner_line(session.runner),

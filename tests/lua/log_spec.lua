@@ -135,11 +135,21 @@ describe('nvime.log redaction', function()
     ok(body:find('400 chars', 1, true) ~= nil, 'its size is recorded instead')
   end)
 
-  it('summarises a content-named list but keeps a settings table of the same name', function()
-    -- `context` is a block list in an RPC payload and a settings table in the
-    -- config the bundle renders; only the first is content.
-    eq('<2 items>', log.redact({ context = { { path = 'a' }, { path = 'b' } } }).context)
-    eq({ max_file_bytes = 204800 }, log.redact({ context = { max_file_bytes = 204800 } }).context)
+  it('summarises a content key whatever it holds, and never walks into it', function()
+    -- Round 3: the type-sniffing escape hatch this used to assert is gone. A
+    -- content key that recursed put `spec.goal` one field beyond the rule, so
+    -- a content key is now summarised whatever its type.
+    eq('<2 items>', log.redact({ answers = { { text = 'a' }, { text = 'b' } } }).answers)
+    eq('<8 chars>', log.redact({ prompt = 'a prompt' }).prompt)
+    ok(log.redact({ spec = { goal = 'ship it', scope = {} } }).spec:find('keys', 1, true) ~= nil)
+  end)
+
+  it('judges a settings table by its own field names, not by the name above it', function()
+    -- Why `context` is no longer a content key at all: it is a block list in
+    -- an RPC payload and a settings table in the config the bundle renders, so
+    -- naming it meant one of the two was always wrong.
+    eq(204800, log.redact({ context = { max_file_bytes = 204800 } }).context.max_file_bytes)
+    eq('<1 chars>', log.redact({ context = { { path = 'a', text = 'x' } } }).context[1].text)
   end)
 
   it('clips a long payload to roughly the line budget', function()

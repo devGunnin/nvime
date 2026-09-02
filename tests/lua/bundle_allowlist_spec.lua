@@ -100,6 +100,18 @@ describe('bundle: the session section is an allow-list', function()
     ok(text:find('steerable', 1, true) ~= nil, text)
   end)
 
+  -- D3 LOW: `branch` is a content key, so the session line rendered
+  -- `base sha aa9fb774 (branch <4 chars>)` — a size where a name used to be,
+  -- which says nothing at all. The sha already identifies the base.
+  it('names the base by its sha alone, with no summarised branch beside it', function()
+    local text = rendered()
+    local line = text:match('%- base sha[^\n]*')
+    ok(line ~= nil, 'the base sha is still reported')
+    ok(line:find('aa9fb774', 1, true) ~= nil, line)
+    ok(line:find('branch', 1, true) == nil, 'no branch, summarised or otherwise: ' .. line)
+    ok(line:find('chars>', 1, true) == nil, line)
+  end)
+
   it('survives a session view that grows a new secret-shaped field', function()
     local grown = parts()
     grown.session.futureAuthorization = SECRET

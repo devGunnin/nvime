@@ -295,6 +295,35 @@ describe('the log view and a failed open', function()
   end)
 end)
 
+describe('a probe that timed out says so', function()
+  -- D2 LOW: `report_node` kept its probe error, `report_git_identity` did not
+  -- — so a slow or hung `git` was reported as "git has no identity
+  -- configured", which is a different problem with a different fix.
+  it('reports a hung git as a timeout, not as a missing identity', function()
+    local dir = scratch_dir()
+    local shim = dir .. '/git'
+    local handle = assert(io.open(shim, 'w'))
+    handle:write('#!/bin/sh\nsleep 30\n')
+    handle:close()
+    vim.uv.fs_chmod(shim, 493)
+    local diagnostics = require('nvime.diagnostics')
+    local entries = diagnostics.run(vim.uv.cwd(), {
+      skip_sidecar = true,
+      probe_timeout_ms = 300,
+      git = shim,
+    })
+    local said = nil
+    for _, entry in ipairs(entries) do
+      if entry.message:find('git ', 1, true) == 1 then
+        said = entry.message
+      end
+    end
+    ok(said ~= nil, 'the git identity check must report something: ' .. vim.inspect(entries))
+    ok(said:find('timed out', 1, true) ~= nil, said)
+    ok(said:find('no identity configured', 1, true) == nil, 'a timeout is not a missing identity: ' .. said)
+  end)
+end)
+
 describe('clipping is UTF-8 safe', function()
   -- F13: the Lua cut was a raw byte slice, so a multi-byte character straddling
   -- the budget went into the log — and into the bundle's markdown — in pieces.

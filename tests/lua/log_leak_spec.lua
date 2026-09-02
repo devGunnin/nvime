@@ -117,6 +117,68 @@ describe("the log tail is the bundle's third path", function()
   end)
 end)
 
+describe('a content key never recurses', function()
+  -- D1 HIGH: `spec` was a CONTENT_KEY, but the summariser only fired for a
+  -- string or a list. A `BigSpec` is an OBJECT, so `redact` walked into it and
+  -- `goal`/`approach` — the approved plan, in the reader's own words — landed
+  -- verbatim in the log and in the bundle. The same object, one field over
+  -- from the `title` that round 2 closed.
+  local SPEC = {
+    goal = 'stop the hunter2 staging password leaking into auth logs',
+    scope = { 'src/hunter2_auth.rs' },
+    approach = 'rotate the hunter2 credential and scrub the log sink',
+    acceptance = { 'no hunter2 in any sink' },
+    outOfScope = { 'the hunter2 rotation runbook' },
+  }
+
+  it('summarises a spec object rather than walking into it', function()
+    local bytes, rendered = capture(function()
+      log.event('big.view', { id = 1, session = { id = 'sess', display = 'building', spec = SPEC } })
+    end)
+    ok(bytes:find(MARKER, 1, true) == nil, 'HIGH: the approved plan is what the reader typed: ' .. bytes)
+    ok(rendered:find(MARKER, 1, true) == nil, 'HIGH: and the bundle attaches the log verbatim')
+    ok(bytes:find('spec', 1, true) ~= nil, 'the field is still named')
+    ok(bytes:find('keys', 1, true) ~= nil, 'and described by shape: ' .. bytes)
+  end)
+
+  it('holds for a spec arriving on its own, outside a session wrapper', function()
+    local bytes = capture(function()
+      log.event('big.intake', { id = 1, spec = SPEC })
+      log.state_change('big', 'approved', { spec = SPEC })
+    end)
+    ok(bytes:find(MARKER, 1, true) == nil, bytes)
+  end)
+
+  it('holds for each spec field arriving unwrapped', function()
+    local bytes = capture(function()
+      for key, value in pairs(SPEC) do
+        log.event('big.notice', { [key] = value })
+      end
+    end)
+    ok(bytes:find(MARKER, 1, true) == nil, 'belt and braces: a spec field can arrive alone: ' .. bytes)
+  end)
+
+  -- `pairs` order is not defined, and `redact` walks a table with it: a leak
+  -- that depends on which key is visited first would pass intermittently.
+  it('does not depend on the order the table happens to be walked in', function()
+    for _ = 1, 20 do
+      local bytes = capture(function()
+        log.event('big.view', { id = 1, session = { spec = SPEC, runner = { pid = 1 }, id = 'sess' } })
+      end)
+      ok(bytes:find(MARKER, 1, true) == nil, bytes)
+    end
+  end)
+
+  it('still lets an ordinary settings table through, judged by its own names', function()
+    -- Why the escape hatch existed: `context` is a block list in an RPC
+    -- payload and a settings table in the config the bundle renders. It is no
+    -- longer a content key at all — its children answer for themselves.
+    local redacted = log.redact({ context = { max_file_bytes = 204800, blocks = { { text = 'secret' } } } })
+    t.eq(204800, redacted.context.max_file_bytes, 'a number is not content')
+    t.eq('<6 chars>', redacted.context.blocks[1].text, 'and the text inside it still is')
+  end)
+end)
+
 describe('the merged timeline keeps the order the file has', function()
   -- G3 HIGH: the plugin stamped 20 bytes ending `Z`, the sidecar 24 ending
   -- `.123Z`, and the merge sorted on a 20-byte key — so `.` (0x2E) beat `Z`

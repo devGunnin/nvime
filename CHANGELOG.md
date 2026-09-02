@@ -18,8 +18,10 @@
   timeline — except a detached build's runner, which is a separate process and
   does not mirror. What you typed does not reach it: content-bearing fields are
   recorded as a size, secret-named ones as `<redacted>`, title-derived names (a
-  big change's `title`, `branch` or `slug`) as a size too, and every payload is
-  clipped — which is what makes the log safe to paste into a public issue.
+  big change's `title`, `branch` or `slug`) and the approved spec (`spec` and
+  each of its fields) as a size too, and every payload is clipped — which is
+  what makes the log safe to paste into a public issue. A field named as
+  content is recorded by its size whatever it holds, never walked into.
 
   **`:Nvime log`** shows the last 200 lines in a readonly split parked at the
   newest line (`q` closes it); `:Nvime log clear` empties the file. `:Nvime

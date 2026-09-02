@@ -48,6 +48,17 @@ local function run(cmd, timeout_ms)
   return vim.trim(done.stdout or ''), nil
 end
 
+--- A probe error worth reporting as such. An unset git value answers with an
+--- empty string and an empty error; only an unrunnable probe has a message.
+--- @param err string|nil
+--- @return string|nil
+local function timeout_error(err)
+  if err == nil or err == '' then
+    return nil
+  end
+  return err
+end
+
 --- @param entries DiagnosticEntry[]
 local function ok(entries, message)
   entries[#entries + 1] = { level = 'ok', message = message }
@@ -245,12 +256,19 @@ end
 --- @field root string|nil the repository root, or nil outside one
 --- @field name string|nil
 --- @field email string|nil
+--- @field err string|nil why the probe could not answer at all
 
 --- @param entries DiagnosticEntry[]
 --- @param probed GitProbe
 local function report_git_identity(entries, probed)
   if probed.root == nil then
     info(entries, 'not inside a git repository — nothing to check for identity')
+    return
+  end
+  -- A probe that never answered is a different problem with a different fix
+  -- from a repository that genuinely has no identity set.
+  if probed.err ~= nil then
+    fail(entries, 'git identity could not be read: ' .. probed.err, 'check that `git` responds: git config user.name')
     return
   end
   if probed.name == nil or probed.name == '' or probed.email == nil or probed.email == '' then
@@ -377,15 +395,19 @@ end
 --- @param root string
 --- @param timeout_ms integer
 --- @return table { node = NodeProbe, git = GitProbe }
-local function probe_machine(root, timeout_ms)
+local function probe_machine(root, timeout_ms, git)
   local node = config.get().agent.node
   local probed = { node = { found = vim.fn.executable(node) == 1 }, git = { root = vim.fs.root(root, { '.git' }) } }
   if probed.node.found then
     probed.node.version, probed.node.err = run({ node, '--version' }, timeout_ms)
   end
   if probed.git.root ~= nil then
-    probed.git.name = run({ 'git', '-C', probed.git.root, 'config', 'user.name' }, timeout_ms)
-    probed.git.email = run({ 'git', '-C', probed.git.root, 'config', 'user.email' }, timeout_ms)
+    local name, name_err = run({ git, '-C', probed.git.root, 'config', 'user.name' }, timeout_ms)
+    local email, email_err = run({ git, '-C', probed.git.root, 'config', 'user.email' }, timeout_ms)
+    probed.git.name, probed.git.email = name, email
+    -- An unset identity answers with an empty value and an empty error; only a
+    -- probe that could not run at all reports one.
+    probed.git.err = timeout_error(name_err) or timeout_error(email_err)
   end
   return probed
 end
@@ -396,7 +418,7 @@ end
 --- @param root string
 --- @param timeout_ms integer
 --- @param cb fun(probed: table)
-local function probe_machine_async(root, timeout_ms, cb)
+local function probe_machine_async(root, timeout_ms, cb, git)
   local node = config.get().agent.node
   local probed = { node = { found = vim.fn.executable(node) == 1 }, git = { root = vim.fs.root(root, { '.git' }) } }
   local wanted = {}
@@ -406,7 +428,7 @@ local function probe_machine_async(root, timeout_ms, cb)
   if probed.git.root ~= nil then
     for _, field in ipairs({ 'name', 'email' }) do
       wanted[#wanted + 1] = {
-        cmd = { 'git', '-C', probed.git.root, 'config', 'user.' .. field },
+        cmd = { git, '-C', probed.git.root, 'config', 'user.' .. field },
         into = probed.git,
         key = field,
       }
@@ -422,6 +444,8 @@ local function probe_machine_async(root, timeout_ms, cb)
       probe.into[probe.key] = output
       if probe.key == 'version' then
         probe.into.err = err or 'timed out'
+      elseif output == nil then
+        probe.into.err = probe.into.err or timeout_error(err) or nil
       end
       outstanding = outstanding - 1
       if outstanding == 0 then
@@ -474,13 +498,15 @@ end
 --- deliberately asking "why doesn't this work". Never raises: a probe that
 --- cannot run is a failure of that probe, not a crash of the command.
 --- @param root string|nil where to check git identity from; defaults to cwd
---- @param opts table|nil skip_sidecar (do not spawn one) and probe_timeout_ms
+--- @param opts table|nil skip_sidecar, probe_timeout_ms, and `git` (the binary
+--- to ask, so a test can point it at a shim)
 --- @return DiagnosticEntry[]
 --- @return table facts machine-readable values the probes already paid for
 function M.run(root, opts)
   opts = opts or {}
   local timeout_ms = opts.probe_timeout_ms or PROBE_TIMEOUT_MS
-  return assemble(probe_machine(root or vim.uv.cwd(), timeout_ms), opts.skip_sidecar == true)
+  local probed = probe_machine(root or vim.uv.cwd(), timeout_ms, opts.git or 'git')
+  return assemble(probed, opts.skip_sidecar == true)
 end
 
 --- The same checks with nothing on the main thread. Always skips the sidecar
@@ -493,7 +519,7 @@ function M.run_async(root, timeout_ms, cb)
   assert(type(cb) == 'function', 'diagnostics.run_async needs a callback')
   probe_machine_async(root or vim.uv.cwd(), timeout_ms, function(probed)
     cb(assemble(probed, true))
-  end)
+  end, 'git')
 end
 
 return M

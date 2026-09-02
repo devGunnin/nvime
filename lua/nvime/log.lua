@@ -52,22 +52,32 @@ local TIMESTAMP_BYTES = 24
 --- Another process's log is pruned once it is this old AND its pid is gone.
 local PRUNE_AFTER_SECONDS = 7 * 24 * 60 * 60
 
---- Fields that carry what the user wrote or what their files hold. Recorded as
---- a size, never as text — a log that quotes a prompt cannot be pasted into an
---- issue, which is the only reason this log exists.
+--- Fields that carry what the user wrote or what their files hold. Recorded
+--- as a size, never as text — a log that quotes a prompt cannot be pasted into
+--- an issue, which is the only reason this log exists.
+---
 --- A big change's `branch` is `nvime/big/<slug of its title>`, and its title
---- is the first 80 characters of what the user typed — so a branch name is
---- the reader's own words, and so is any slug built from one.
+--- is the first 80 characters of what the user typed — so a branch name is the
+--- reader's own words, and so is any slug built from one. The `spec` fields are
+--- listed individually as well as under `spec`: they can arrive unwrapped.
+---
+--- `context` is deliberately NOT here. It is a block list in an RPC payload and
+--- a settings table in the config the bundle renders; naming it meant one of
+--- the two was always wrong. Its children answer for themselves instead.
 local CONTENT_KEYS = {
+  acceptance = true,
   answers = true,
+  approach = true,
   branch = true,
   comment = true,
   content = true,
-  context = true,
   diff = true,
+  goal = true,
   message = true,
+  outOfScope = true,
   prompt = true,
   rationale = true,
+  scope = true,
   slug = true,
   spec = true,
   summary = true,
@@ -137,15 +147,6 @@ function M.is_secret_key(name)
   return lower == 'key' or lower == 'apikey' or lower:match('[_%-]key$') ~= nil or lower:match('api_?key$') ~= nil
 end
 
---- A content-named field only carries content when it is text or a list of it.
---- `context` is a block list in an RPC payload and a settings table in the
---- config; summarising the settings table would gut the bundle it belongs in.
---- @param value any
---- @return boolean
-local function is_content(value)
-  return type(value) == 'string' or (type(value) == 'table' and vim.islist(value))
-end
-
 --- @param value any
 --- @param depth integer|nil
 --- @return any the same shape with secrets replaced and content summarised
@@ -161,7 +162,10 @@ function M.redact(value, depth)
   for key, nested in pairs(value) do
     if M.is_secret_key(key) then
       out[key] = M.REDACTED
-    elseif CONTENT_KEYS[key] and is_content(nested) then
+    elseif CONTENT_KEYS[key] then
+      -- A CONTENT KEY NEVER RECURSES, whatever it holds. `spec` was named here
+      -- and still leaked, because walking into the object put its `goal` and
+      -- `approach` — the reader's own words — one field beyond the rule.
       out[key] = M.summarise(nested)
     else
       out[key] = M.redact(nested, depth + 1)
@@ -170,16 +174,25 @@ function M.redact(value, depth)
   return out
 end
 
---- What a content-bearing field was, without any of what it said.
+--- What a content-bearing field was, without any of what it said. An object is
+--- described by its shape — the count alone would not say a spec was there.
 --- @return string
 function M.summarise(value)
   if type(value) == 'string' then
     return string.format('<%d chars>', #value)
   end
-  if type(value) == 'table' then
+  if type(value) ~= 'table' then
+    return string.format('<%s>', type(value))
+  end
+  if vim.islist(value) then
     return string.format('<%d items>', #value)
   end
-  return string.format('<%s>', type(value))
+  local keys = 0
+  for _ in pairs(value) do
+    keys = keys + 1
+  end
+  local encoded_ok, encoded = pcall(vim.json.encode, value)
+  return string.format('<%d keys, %d bytes>', keys, encoded_ok and #encoded or 0)
 end
 
 --- @param text string
