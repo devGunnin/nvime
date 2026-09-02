@@ -24,6 +24,7 @@ plugin="$(dirname "$(dirname "$here")")"
 # real runner rather than in a copy of it. Never set by a real run.
 selftest_dir="${NVIME_E2E_SELFTEST_DIR:-}"
 scenario_dir="$here"
+pids_helper="$here/runner-pids.mjs"
 
 # Scenario name, then its default timeout in seconds. One flat list because
 # bash 3.2 (still the system bash on macOS) has no associative arrays.
@@ -41,6 +42,9 @@ detached-build:1200
 if [ -n "$selftest_dir" ]; then
   scenario_dir="$selftest_dir"
   SCENARIOS="$(cat "$selftest_dir/scenarios.txt")"
+  # Self-test only, so a real run cannot be pointed at a helper that lies about
+  # what is still running.
+  pids_helper="${NVIME_E2E_PIDS_HELPER:-$pids_helper}"
 fi
 
 usage() {
@@ -142,6 +146,14 @@ need() {
 }
 need node
 
+# The reaper is what stands between a wedged build and unbounded spend, and
+# nothing else in the repo compiles it. A syntax error must not be discovered
+# at teardown, after the tokens are gone.
+if ! node --check "$pids_helper"; then
+  echo "run.sh: $pids_helper does not parse — the runner reaper would be blind." >&2
+  exit 2
+fi
+
 # Every deadline is resolved here, before anything is built or spent: a bad
 # override must not surface minutes into a run.
 for name in $wanted; do
@@ -224,22 +236,31 @@ group_kill() {
   kill "-$1" -- "-$2" 2>/dev/null || true
 }
 
-# The detached build runners this scenario started, by the pid its own store
-# records. They are setsid'd and reparented to init, so the scenario's process
-# group does not contain them and a group kill alone leaves them spending.
-runner_pids() {
-  local work="$1"
-  [ -d "$work" ] || return 0
-  node "$here/runner-pids.mjs" "$work" 2>/dev/null || true
-}
+# Set when the reaper could not read the store. A run that cannot see its own
+# runners has no token guard, and must never be reported as a pass.
+reaper_blind=0
 
 # Everything one scenario started: its process group, and every build runner
-# outside it. Pids are read ONCE up front — a runner clears its own record as it
-# goes down, and a list gathered after the TERM would be short.
+# outside it — those are setsid'd and reparented to init, so the group does not
+# contain them and a group kill alone leaves them spending.
+#
+# Only LIVE runners are signalled. The helper vouches for a pid off the store's
+# own claim, because `session.runner` outlives the process it names and the
+# number is free for reuse the moment the runner exits.
+#
+# Pids are read ONCE up front — a runner clears its own record as it goes down,
+# and a list gathered after the TERM would be short.
 # `pid` may be empty, to reap runners belonging to a scenario that already ended.
 reap_scenario() {
-  local pid="$1" work="$2" runners runner alive=0
-  runners="$(runner_pids "$work")"
+  local pid="$1" work="$2" runners="" runner alive=0 status=0
+  if [ -d "$work" ]; then
+    # stderr is NOT swallowed: the helper names the record it could not read.
+    runners="$(node "$pids_helper" "$work")" || status=$?
+    if [ "$status" != 0 ]; then
+      reaper_blind=1
+      echo "run.sh: WARNING the runner reaper failed (exit $status) — a detached build may still be running and spending." >&2
+    fi
+  fi
   if [ -n "$pid" ]; then
     group_kill TERM "$pid"
   fi
@@ -339,6 +360,7 @@ for name in $wanted; do
 
   echo "== $name (timeout ${limit}s)"
   started="$(date +%s)"
+  reaper_blind=0
   "$scenario_dir/$name.sh" >"$console" 2>&1 &
   pid=$!
   current_pid="$pid"
@@ -358,6 +380,12 @@ for name in $wanted; do
     failed=1
   else
     verdict=FAIL
+    failed=1
+  fi
+  # A scenario whose runners could not be read is not a pass, whatever the
+  # driver said: nobody knows whether a build is still spending.
+  if [ "$reaper_blind" = 1 ]; then
+    verdict=BLIND
     failed=1
   fi
   # A driver that dies takes its wrapper's `cat` of the report with it, so the

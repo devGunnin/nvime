@@ -982,8 +982,20 @@ That second half needs saying: a big-change build is spawned detached, in a
 process group of its own, so killing the scenario's group does not reach it and
 nothing caps its wall clock. The runner reads the pid out of the scenario's own
 session store and kills that too, and it traps `SIGINT`/`SIGTERM` so Ctrl-C
-stops the tree instead of leaving it running. `tests/e2e/run.sh --selftest`
-proves both paths against stub scenarios, without spending anything.
+stops the tree instead of leaving it running.
+
+Only a *live* runner is ever signalled. The store keeps naming a runner after
+it exits — that is how a died build is told apart from a running one — so the
+pid alone proves nothing, and by the time a scenario ends some other process
+may hold that number. A pid is signalled only when the session's claim
+(`lock.json`) is on this host, names that same pid, and has been heartbeated
+within the same staleness window the sidecar itself uses. And if the store
+cannot be read at all, the scenario is reported `BLIND` rather than passed: a
+run that cannot see its own builds has no cost guard, and that must never look
+like success.
+
+`tests/e2e/run.sh --selftest` proves all of it against stub scenarios, without
+spending anything.
 
 ### The screenshots
 
