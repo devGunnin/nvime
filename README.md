@@ -935,6 +935,46 @@ big-change sidecar tests run against a real scratch git repo: the clone is
 really made, the build agent is mocked at the SDK boundary but its writes are
 real, and the diff capture and triage fallback run over what it actually wrote.
 
+### End-to-end scenarios
+
+The unit suites mock the SDK at its boundary. `tests/e2e/` does not: every
+scenario drives real Neovim against the real `claude` CLI, and one runner runs
+them all.
+
+```sh
+make e2e                              # every scenario
+make e2e-one SCENARIO=cold-start      # one of them
+tests/e2e/run.sh --list               # names and default timeouts
+tests/e2e/run.sh --keep prompt-keys   # keep the scratch root even on success
+```
+
+| scenario | what it proves |
+| --- | --- |
+| `cold-start` | an empty machine: `:Nvime` opens, the sidecar starts, one small build lands a diff |
+| `prompt-keys` | `i_<C-s>` sends, `i_<C-c>` stops, `i_<C-r>` is history on an empty box and Vim's register paste on a full one, `i_<C-n>`/`i_<C-t>` stay Vim's (#19) |
+| `debug-bundle` | a build with the log on: `:Nvime log` and `:Nvime bundle` describe it, and the prompt appears in neither |
+| `review-buffers` | the review pane is the clone's own file, with marks rather than diff text |
+| `rebase-merge` | the base moves under a build, `M` refuses, `R` rebases, `M` lands (#10) |
+| `detached-build` | a build outlives its editor and takes a steer from another one |
+
+**They cost real money and need a login.** Each one runs a real model turn —
+most of them a whole build — so a full pass is minutes and tokens against your
+subscription. nvime is subscription-only: the runner refuses early if `claude`
+is missing or does not look logged in, and nothing here reads or sets an API
+key. `NVIME_E2E_MODEL` (default `sonnet`) picks the model.
+
+**CI never runs them**, and nothing in `.github/workflows/` should. They are a
+before-you-merge check you run by hand.
+
+Every scenario gets its own directory under a scratch root for the run, with
+all four XDG homes pointed inside it — a scenario never reads or writes your
+own config, data, state or cache. The root is removed when everything passes
+and kept, with its path printed, when anything does not; `--keep` keeps it
+either way. Per-scenario timeouts default per scenario and are overridden with
+`NVIME_E2E_TIMEOUT_<NAME>` (`NVIME_E2E_TIMEOUT_COLD_START=600`); a scenario
+that misses its deadline is killed along with any detached runner it started,
+so a timeout cannot leave a build spending tokens behind it.
+
 ### The screenshots
 
 Every image in this README is a real terminal running the shipped plugin and is
