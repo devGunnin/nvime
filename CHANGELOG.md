@@ -15,14 +15,14 @@
 - **Fresh means fresh (#11).** Opening chat starts a new conversation by
   default — `chat.default = 'new'|'resume-last'` — instead of the sidecar
   silently falling back to the project's last stored session at send time.
-  Opening Big Change starts a new change too, and its `<C-r>` picker now
-  leads with "start a new change" instead of only listing existing ones.
+  Big Change's `<C-r>` picker now leads with "start a new change" instead of
+  only listing existing ones (opening the panel already started fresh).
   `<C-n>` starts clean in either mode without deleting resumable history;
   `<C-r>` is the explicit resume path, its chat picker also leading with a
   "new conversation" row. Both refuse to switch while work is running,
   preserving the stream and cancellation handle. The chat picker's `d` deletes
   a session and its history behind a y/n float, and a session with no prompt
-  yet reads as `(new)` instead of a raw id.
+  yet reads as `(new)` plus its short id instead of a raw id.
 - **Speaker surfaces that survive light and dark themes (#9).** User prose,
   agent prose and tool activity now occupy distinct, subtle full-width bands
   blended from the active colorscheme. The same visual grammar reaches the

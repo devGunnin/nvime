@@ -224,8 +224,9 @@ Sessions ~
     default; set it to `'resume-last'` to pick this project's most recent
     conversation back up on open instead. <C-r> opens a picker whose first
     row is "new conversation" and whose remaining rows are past sessions by
-    title and age (a session with no prompt yet reads as `(new)`, not a raw
-    id); <C-n> starts another clean conversation without deleting history.
+    title and age (a session with no prompt yet reads as `(new)` plus its
+    short id, so two of them are still tellable apart); <C-n> starts another
+    clean conversation without deleting history.
     `d` on a picker row deletes that session and its history, after a y/n
     float — never a modal. Resume survives Neovim restarts, and several
     Neovim instances share the session file without overwriting each other.
@@ -435,7 +436,7 @@ keymaps.edit           string, `<leader>ne` by default.
 keymaps.changeset      string, `<leader>nd` by default.
 keymaps.big            string, `<leader>nB` by default.
 
-chat.default            'new' (default) or 'resume-last'. What opening chat
+chat.default           'new' (default) or 'resume-last'. What opening chat
                        with no prior selection does: start clean, or pick
                        this project's last conversation back up.
 

@@ -109,7 +109,8 @@ this is `chat.default = 'new'`; set it to `'resume-last'` to pick this
 project's most recent conversation back up on open instead. Either way,
 `<C-r>` opens a picker whose first row is "new conversation" and whose
 remaining rows are past sessions by title and age — a session with no prompt
-yet reads as `(new)` rather than a raw id. `d` on a row deletes that session
+yet reads as `(new)` plus its short id, so two of them are still tellable
+apart. `d` on a row deletes that session
 and its history, after a y/n float, never a modal. `<C-n>` clears the surface
 for another new conversation without deleting history. Resume survives Neovim
 restarts, and several Neovim instances share the session file without
