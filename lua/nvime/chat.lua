@@ -99,7 +99,7 @@ local function on_event(name, params)
   if name == 'chat.started' then
     local log = require('nvime.log')
     if log.enabled('info') then
-      log.state_change('chat', 'turn started', { from = state.session_id, to = params.sessionId })
+      log.state_change('chat', 'turn started', { from_session = state.session_id, to_session = params.sessionId })
     end
     state.session_id = params.sessionId
     refresh_status(params.model)

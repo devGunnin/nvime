@@ -16,14 +16,15 @@
   5 MB keeping one `.1`, and the sidecar mirrors its own half into its editor's
   file through a new `debug.set`, so both ends of a stuck run read as one
   timeline — except a detached build's runner, which is a separate process and
-  does not mirror. What you typed does not reach it: content-bearing fields are
-  recorded as a size, secret-named ones as `<redacted>`, title-derived names (a
-  big change's `title`, `branch` or `slug`) and the approved spec (`spec` and
-  each of its fields) as a size too, and every payload is clipped — which is
-  what makes the log safe to paste into a public issue. A field named as
-  content is recorded by its size whatever it holds, never walked into — down to
-  the small ones (`answer`, `followup`, `label`, `detail`, an attached
-  directory's `entries`), since the clip is a budget and not a redactor.
+  does not mirror. The log is DENY BY DEFAULT: a string is written out
+  only under a name known to be safe (an identifier, one of nvime's own enums,
+  a tool name, a version, a sha, a path, a line range), and every other string
+  is its size, every list `<N items>`, every secret-named field `<redacted>`.
+  Numbers and booleans pass whatever they are called; objects recurse so each
+  leaf answers for its own name. The clip bounds a line but is never the reason
+  something is safe. Your configuration in the bundle is the one exception —
+  secrets redacted, the rest printed, since `setup()` refuses a key the
+  defaults do not name.
 
   **`:Nvime log`** shows the last 200 lines in a readonly split parked at the
   newest line (`q` closes it); `:Nvime log clear` empties the file. `:Nvime

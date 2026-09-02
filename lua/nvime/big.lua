@@ -214,7 +214,7 @@ local function adopt(session)
   local was = (state.session or {}).display
   local log = require('nvime.log')
   if (session or {}).display ~= was and log.enabled('info') then
-    log.state_change('big', 'display', { from = was, to = (session or {}).display })
+    log.state_change('big', 'display', { from_display = was, to_display = (session or {}).display })
   end
   state.session = session
   refresh_status()

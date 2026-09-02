@@ -695,22 +695,21 @@ The debug log ~
     read as one timeline — with one exception: a detached build's runner is a
     separate process and does not mirror.
 
-    What never reaches it: what you typed, your files' contents, and anything
-    in a field named like a secret. Content-bearing fields are recorded as a
-    size (`<412 chars>`, or `<5 keys, 251 bytes>` for an object), secret-named
-    ones as `<redacted>`, and title-derived names — a big change's `title`, its
-    `branch`, any `slug` of one — as a size too, since a branch is
-    `nvime/big/<slug of the title>` and a title is the first 80 characters of
-    your prompt. The approved spec goes the same way, as `spec` and as each of
-    its fields (`goal`, `approach`, `scope`, `acceptance`, `outOfScope`), since
-    a spec can arrive unwrapped. A field named as content is recorded by its
-    size WHATEVER it holds — never walked into. So do the smaller things you
-    write: `answer`, `followup`, an offered choice's `label`/`detail`, and the
-    `entries` of a directory you attach — the clip is a budget, not a
-    redactor, and a short field nobody named would fit inside it whole. Every
-    payload is clipped at a character boundary. That is what makes the log safe to paste into a public
-    issue, and it has to hold at the log line: `:Nvime bundle` attaches the
-    tail verbatim.
+    The log is DENY BY DEFAULT. A string is written out only under a name
+    known to be safe — an identifier, one of nvime's own enums, a tool name, a
+    version, a sha, a filesystem path, a line range. Every other string is
+    recorded as its size (`<412 chars>`), a list as `<N items>`, and a
+    secret-named field as `<redacted>`. Numbers and booleans pass whatever
+    they are called; objects recurse, so every leaf answers for its own name.
+    The clip still bounds a line but is never the reason something is safe.
+
+    So a field nobody has thought about yet is a size, not a leak — which is
+    what makes the log safe to paste into a public issue, and it has to hold
+    at the log line, because `:Nvime bundle` attaches the tail verbatim.
+
+    The one exception is your configuration in the bundle: redacted for
+    secrets, otherwise printed, because `setup()` refuses a key the defaults
+    do not name and its shape is therefore bounded.
 
 :Nvime log ~
     Opens the last 200 lines in a readonly scratch split, parked at the newest

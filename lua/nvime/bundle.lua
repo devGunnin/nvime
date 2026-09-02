@@ -189,7 +189,11 @@ function M.render(parts)
   end
   section(lines, 'environment', environment)
 
-  section(lines, 'configuration', fenced(vim.split(vim.inspect(log.redact(parts.config or {})), '\n'), 'lua'))
+  -- Secrets only: the config is nvime's own settings surface, and `setup()`
+  -- refuses a key the defaults do not name — so unlike a wire payload, its
+  -- shape is known and there is nothing unvouched-for to deny.
+  local settings = vim.inspect(log.redact_secrets(parts.config or {}))
+  section(lines, 'configuration', fenced(vim.split(settings, '\n'), 'lua'))
   section(lines, 'doctor', doctor_lines(parts.doctor or {}))
 
   local status = parts.log

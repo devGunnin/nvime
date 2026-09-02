@@ -111,8 +111,8 @@ describe("the log tail is the bundle's third path", function()
     local bytes = capture(function()
       log.event('big.state', { session = 'sess', state = 'reviewing', branch = BRANCH, note = 'landing' })
     end)
-    ok(bytes:find('reviewing', 1, true) ~= nil, bytes)
-    ok(bytes:find('landing', 1, true) ~= nil, 'fixed prose is not content and stays legible')
+    ok(bytes:find('reviewing', 1, true) ~= nil, 'the state is vouched for and reads: ' .. bytes)
+    ok(bytes:find('sess', 1, true) ~= nil, bytes)
     ok(bytes:find('chars>', 1, true) ~= nil, 'the branch is recorded as a size, not dropped')
   end)
 end)
@@ -131,14 +131,14 @@ describe('a content key never recurses', function()
     outOfScope = { 'the hunter2 rotation runbook' },
   }
 
-  it('summarises a spec object rather than walking into it', function()
+  it('never writes the approved plan, however it is nested', function()
     local bytes, rendered = capture(function()
       log.event('big.view', { id = 1, session = { id = 'sess', display = 'building', spec = SPEC } })
     end)
     ok(bytes:find(MARKER, 1, true) == nil, 'HIGH: the approved plan is what the reader typed: ' .. bytes)
     ok(rendered:find(MARKER, 1, true) == nil, 'HIGH: and the bundle attaches the log verbatim')
     ok(bytes:find('spec', 1, true) ~= nil, 'the field is still named')
-    ok(bytes:find('keys', 1, true) ~= nil, 'and described by shape: ' .. bytes)
+    ok(bytes:find('chars>', 1, true) ~= nil, 'and its leaves are sized: ' .. bytes)
   end)
 
   it('holds for a spec arriving on its own, outside a session wrapper', function()
@@ -155,7 +155,7 @@ describe('a content key never recurses', function()
         log.event('big.notice', { [key] = value })
       end
     end)
-    ok(bytes:find(MARKER, 1, true) == nil, 'belt and braces: a spec field can arrive alone: ' .. bytes)
+    ok(bytes:find(MARKER, 1, true) == nil, 'a spec field can arrive alone: ' .. bytes)
   end)
 
   -- `pairs` order is not defined, and `redact` walks a table with it: a leak
@@ -169,13 +169,13 @@ describe('a content key never recurses', function()
     end
   end)
 
-  it('still lets an ordinary settings table through, judged by its own names', function()
-    -- Why the escape hatch existed: `context` is a block list in an RPC
-    -- payload and a settings table in the config the bundle renders. It is no
-    -- longer a content key at all — its children answer for themselves.
-    local redacted = log.redact({ context = { max_file_bytes = 204800, blocks = { { text = 'secret' } } } })
-    t.eq(204800, redacted.context.max_file_bytes, 'a number is not content')
-    t.eq('<6 chars>', redacted.context.blocks[1].text, 'and the text inside it still is')
+  it('lets numbers through under any name, and reduces the strings beside them', function()
+    -- What the old escape hatch was for: `context` is a block list on the wire
+    -- and a settings table in the config. Neither needs naming now — numbers
+    -- pass by type, and a string needs a name that was vouched for.
+    local redacted = log.redact({ context = { max_file_bytes = 204800, note = 'secret' } })
+    t.eq(204800, redacted.context.max_file_bytes, 'a number is safe by type')
+    t.eq('<6 chars>', redacted.context.note, 'a string is not safe by position')
   end)
 end)
 

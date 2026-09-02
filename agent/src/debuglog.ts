@@ -46,47 +46,72 @@ export const MAX_BYTES = 5 * 1024 * 1024;
 const SECRET_PARTS = ['token', 'secret', 'password', 'passwd', 'authorization', 'credential', 'socket'];
 
 /**
- * Fields carrying what the user wrote or what their files hold. Recorded as a
- * size, never as text.
+ * DENY BY DEFAULT. A string is written out only under a name on this list;
+ * every other string is recorded as its size. Four rounds of enumerating what
+ * to HIDE each ended one name short of the payload, so the question is
+ * inverted: not "is this field dangerous" but "has this name been vouched
+ * for". Kept in step with `lua/nvime/log.lua`'s list, which is the same rule
+ * on the other half of the same file.
  *
- * `context` is deliberately absent: it is a block list in an RPC payload and a
- * settings object in the config the bundle renders, so naming it meant one of
- * the two was always wrong. Its children — `text`, `entries` — answer for
- * themselves instead, which is what an attached `dir` block needs anyway.
+ * `reason` is deliberately absent despite looking enum-shaped: the policy
+ * layer builds it as prose around an error message and a path.
  */
-const CONTENT_KEYS = new Set([
-  'answers',
-  // A big change's branch is `nvime/big/<slug of its title>`, and its title is
-  // the first 80 characters of what the user typed.
-  'branch',
-  'slug',
-  'comment',
-  'content',
-  'diff',
-  'message',
-  'prompt',
-  'rationale',
-  // `BigSpec`, and each of its fields: a spec can arrive unwrapped.
-  'spec',
-  'goal',
-  'approach',
-  'scope',
-  'acceptance',
-  'outOfScope',
-  'summary',
-  'text',
-  'title',
-  // The clip is a budget, not a redactor: a short unnamed field fits inside it
-  // and is written out whole. A `dir` block's listing of the reader's disk, a
-  // defence, the grader's follow-up, an offered choice, a hunk's own lines.
-  'entries',
-  'lines',
-  'answer',
-  'followup',
-  'ungraded',
-  'label',
-  'detail',
-]);
+export const SAFE_KEYS: readonly string[] = [
+  // Identifiers. Correlating a stuck run is the whole point of the log.
+  'id',
+  'sessionId',
+  'blockId',
+  'approvalId',
+  'runId',
+  'diffId',
+  'policyId',
+  'session',
+  'target',
+  'origin',
+  'seq',
+  // nvime's own vocabulary: closed sets, all defined in this codebase.
+  'state',
+  'display',
+  'phase',
+  'kind',
+  'type',
+  'method',
+  'event',
+  'level',
+  'code',
+  'cause',
+  'outcome',
+  'difficulty',
+  'effort',
+  'op',
+  // The tool's NAME, never its arguments or its summary.
+  'tool',
+  // Model ids and version strings: vendor vocabulary, not the reader's.
+  'model',
+  'version',
+  // Object names: hex, and nothing else.
+  'sha',
+  'commit',
+  'base_sha',
+  'head_sha',
+  // Filesystem paths — but NOT `entries`, which is a listing of a directory
+  // the reader chose to attach, i.e. their disk rather than this project.
+  'file',
+  'files',
+  'path',
+  'dir',
+  'root',
+  'worktree',
+  // A line range nvime built, e.g. `10-24`.
+  'range',
+  // Transitions, named for what they hold so the pair cannot later take prose.
+  'from_display',
+  'to_display',
+  'from_session',
+  'to_session',
+];
+
+const SAFE = new Set(SAFE_KEYS);
 
 /** How deep redaction walks before it stops describing and starts eliding. */
 const MAX_DEPTH = 8;
@@ -105,32 +130,35 @@ export function isSecretKey(name: string): boolean {
 function summarise(value: unknown): string {
   if (typeof value === 'string') return `<${value.length} chars>`;
   if (Array.isArray(value)) return `<${value.length} items>`;
-  if (value === null || typeof value !== 'object') return `<${typeof value}>`;
-  // An object is described by its shape: the count alone would not say a spec
-  // was there.
-  const keys = Object.keys(value).length;
-  let bytes = 0;
-  try {
-    bytes = JSON.stringify(value)?.length ?? 0;
-  } catch {
-    bytes = 0;
-  }
-  return `<${keys} keys, ${bytes} bytes>`;
+  return `<${typeof value}>`;
 }
 
-function redact(value: unknown, depth: number): unknown {
-  if (value === null || typeof value !== 'object') return value;
+/** Lists that carry nothing the reader could have written. */
+function allScalar(list: unknown[]): boolean {
+  return list.every((element) => typeof element === 'number' || typeof element === 'boolean');
+}
+
+/**
+ * The rule, in full:
+ *   secret-named  → `<redacted>`, whatever the type. Always wins.
+ *   number/bool   → through, whatever it is called.
+ *   object        → recurse; each leaf answers for its OWN name.
+ *   list          → through only under a safe name AND only if every element
+ *                   is a number or a boolean; otherwise `<N items>`.
+ *   string        → through only under a safe name; otherwise `<N chars>`.
+ * The clip still bounds the line, but is never the reason something is safe.
+ */
+function redact(value: unknown, key: string | null, depth: number): unknown {
+  if (key !== null && isSecretKey(key)) return REDACTED;
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'string') return key !== null && SAFE.has(key) ? value : summarise(value);
+  if (value === null || typeof value !== 'object') return summarise(value);
   if (depth >= MAX_DEPTH) return '<deep>';
-  if (Array.isArray(value)) return value.map((entry) => redact(entry, depth + 1));
-  const out: Record<string, unknown> = {};
-  for (const [key, nested] of Object.entries(value)) {
-    if (isSecretKey(key)) out[key] = REDACTED;
-    // A CONTENT KEY NEVER RECURSES, whatever it holds: `spec` was named here
-    // and still leaked, because walking into the object put its `goal` and
-    // `approach` — the reader's own words — one field beyond the rule.
-    else if (CONTENT_KEYS.has(key)) out[key] = summarise(nested);
-    else out[key] = redact(nested, depth + 1);
+  if (Array.isArray(value)) {
+    return key !== null && SAFE.has(key) && allScalar(value) ? value : summarise(value);
   }
+  const out: Record<string, unknown> = {};
+  for (const [name, nested] of Object.entries(value)) out[name] = redact(nested, name, depth + 1);
   return out;
 }
 
@@ -139,7 +167,7 @@ export function renderParams(params: unknown): string {
   if (params === undefined) return '';
   let encoded: string;
   try {
-    encoded = JSON.stringify(redact(params, 0)) ?? '';
+    encoded = JSON.stringify(redact(params, null, 0)) ?? '';
   } catch {
     encoded = '<unencodable payload>';
   }

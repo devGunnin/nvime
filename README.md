@@ -698,21 +698,24 @@ belongs to an editor that is gone. The sidecar mirrors its own half into its
 editor's file, so both ends of a stuck run read as one timeline — with one
 exception: a detached build's runner is a separate process and does not mirror.
 
-What you typed does not reach it. A content-bearing field is recorded as a size
-(`<412 chars>`, or `<5 keys, 251 bytes>` for an object), a secret-named one as
-`<redacted>`, and a title-derived name — a big change's `title`, its `branch`,
-any `slug` of one — as a size too, since a branch is `nvime/big/<slug of the
-title>` and a title is the first 80 characters of your prompt. So does the
-approved spec, as `spec` and as each of its fields (`goal`, `approach`,
-`scope`, `acceptance`, `outOfScope`), since a spec can arrive unwrapped.
-**A field named as content is recorded by its size whatever it holds — never
-walked into.** So do the smaller things you write: a defence (`answer`), the
-grader's `followup`, an offered choice's `label`/`detail`, and the `entries` of
-a directory you attach — the clip is a budget, not a redactor, and a short
-field nobody named would fit inside it whole. Every payload is clipped at a
-character boundary. That is what
-makes the log safe to paste in public, and it has to hold at the log line:
-`:Nvime bundle` attaches the tail verbatim.
+**The log is deny-by-default.** A string is written out only under a name
+known to be safe — an identifier, one of nvime's own enums, a tool name, a
+version, a sha, a filesystem path, a line range. Every other string is recorded
+as its size (`<412 chars>`), a list as `<N items>`, and a secret-named field as
+`<redacted>`. Numbers and booleans pass whatever they are called, and objects
+recurse so every leaf answers for its own name. The clip still bounds a line
+but is never the reason something is safe.
+
+That is the inversion four review rounds bought: enumerating what to *hide*
+ended one name short of the payload every time — the runner's control token,
+then the change's title, then the approved spec beside it, then the listing of
+a directory you attached. Now a field nobody has thought about is a size, not a
+leak. It has to hold at the log line: `:Nvime bundle` attaches the tail
+verbatim.
+
+The one deliberate exception is your own configuration in the bundle, which is
+redacted for secrets but otherwise printed — `setup()` refuses a key the
+defaults do not name, so unlike a wire payload its shape is bounded and known.
 
 **`:Nvime log`** opens the last 200 lines in a readonly split parked at the
 newest line; `q` closes it. Every process's log is merged by timestamp, the

@@ -3,7 +3,15 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { DebugLog, MAX_BYTES, MAX_PAYLOAD_CHARS, REDACTED, isSecretKey, renderParams } from '../src/debuglog.js';
+import {
+  DebugLog,
+  MAX_BYTES,
+  MAX_PAYLOAD_CHARS,
+  REDACTED,
+  SAFE_KEYS,
+  isSecretKey,
+  renderParams,
+} from '../src/debuglog.js';
 import { ProtocolError } from '../src/protocol.js';
 
 function scratch(): string {
@@ -93,19 +101,18 @@ describe('DebugLog redaction', () => {
     assert.ok(rendered.includes('400 chars'), rendered);
   });
 
-  it('summarises a content key whatever it holds, and never walks into it', () => {
-    // Round 3: the type-sniffing escape hatch this used to assert is gone. A
-    // content key that recursed put `spec.goal` one field beyond the rule.
+  it('reduces anything not vouched for, whatever shape it arrives in', () => {
+    // Round 5: there is no list of dangerous names any more. A string needs a
+    // safe name; a list needs a safe name AND numeric elements; an object
+    // recurses so each leaf answers for itself.
     assert.ok(renderParams({ answers: [{ text: 'a' }, { text: 'b' }] }).includes('<2 items>'));
     assert.ok(renderParams({ prompt: 'a prompt' }).includes('<8 chars>'));
-    assert.match(renderParams({ spec: { goal: 'ship it', scope: [] } }), /keys/);
+    assert.ok(renderParams({ spec: { goal: 'ship it' } }).includes('<7 chars>'), 'the leaf answers for itself');
   });
 
-  it('judges a settings object by its own field names, not by the name above it', () => {
-    // Why `context` is no longer a content key at all: it is a block list in an
-    // RPC payload and a settings object in the config the bundle renders.
+  it('lets a number through under any name, and a string under none', () => {
     assert.ok(renderParams({ context: { maxFileBytes: 204800 } }).includes('204800'));
-    assert.ok(renderParams({ context: [{ path: 'a', text: 'x' }] }).includes('<1 chars>'));
+    assert.ok(renderParams({ context: [{ path: 'a', text: 'x' }] }).includes('<1 items>'));
   });
 
   it('clips a long payload to the line budget', () => {
@@ -246,10 +253,11 @@ describe('DebugLog round-3 regressions', () => {
     outOfScope: ['the hunter2 rotation runbook'],
   };
 
-  it('summarises a content-named object rather than walking into it', () => {
+  it('never writes the approved plan, however it is nested', () => {
     const rendered = renderParams({ session: { id: 'sess', spec: SPEC } });
     assert.ok(!rendered.includes('hunter2'), rendered);
-    assert.ok(/keys/.test(rendered), `the shape is still described: ${rendered}`);
+    assert.ok(rendered.includes('sess'), `the identifier still reads: ${rendered}`);
+    assert.ok(rendered.includes('chars>'), `and the plan's leaves are sized: ${rendered}`);
   });
 
   it('holds for each spec field arriving on its own', () => {
@@ -295,6 +303,77 @@ describe('DebugLog round-4 regressions', () => {
     for (const [key, value] of Object.entries(named)) {
       const rendered = renderParams({ [key]: value });
       assert.ok(!rendered.includes('hunter2'), `${key} was written out whole: ${rendered}`);
+    }
+  });
+});
+
+describe('DebugLog round-5: deny by default', () => {
+  const MARKER = 'hunter2';
+
+  it('writes a string under a name nobody vouched for as a size', () => {
+    const rendered = renderParams({ zzzUnthoughtOf: `the ${MARKER} staging password` });
+    assert.ok(!rendered.includes(MARKER), rendered);
+    assert.ok(rendered.includes('chars>'), rendered);
+  });
+
+  // `reason` was a candidate. It is not an enum: policy.ts builds prose that
+  // embeds an error message and a path, steer returns an arbitrary close
+  // reason, and triage sets it from `cause.message`.
+  it('denies reason, which carries free text however enum-shaped it looks', () => {
+    const rendered = renderParams({ tool: 'Write', reason: `could not resolve /etc/${MARKER}.conf` });
+    assert.ok(!rendered.includes(MARKER), rendered);
+    assert.ok(rendered.includes('Write'), 'the tool name is the diagnostic signal and stays');
+  });
+
+  it('recurses into an object so its leaves are judged by their own names', () => {
+    const rendered = renderParams({ session: { id: 'sess', display: 'building', spec: { goal: MARKER } } });
+    assert.ok(!rendered.includes(MARKER), rendered);
+    assert.ok(rendered.includes('building'), 'a safe leaf under an unsafe parent still reads');
+  });
+
+  it('passes numbers and booleans through whatever they are called', () => {
+    const rendered = renderParams({ anythingAtAll: 42, whatever: true });
+    assert.ok(rendered.includes('42') && rendered.includes('true'), rendered);
+  });
+
+  it('keeps a list of strings as a count, even under a safe name', () => {
+    assert.ok(renderParams({ files: ['a.rs', 'b.rs'] }).includes('<2 items>'));
+    assert.ok(renderParams({ seq: [1, 2, 3] }).includes('[1,2,3]'));
+  });
+
+  it('gives a secret name precedence over a safe one', () => {
+    const rendered = renderParams({ path: '/home/me/proj', socket: '/run/user/1/x.sock' });
+    assert.ok(rendered.includes('/home/me/proj'), rendered);
+    assert.ok(!rendered.includes('x.sock'), rendered);
+    assert.ok(rendered.includes(REDACTED), rendered);
+  });
+
+  it('never lets the clip be the reason something is safe', () => {
+    assert.ok(!renderParams({ unnamed: MARKER }).includes(MARKER));
+  });
+
+  it('renders every safe key that carries a string', () => {
+    for (const key of SAFE_KEYS) {
+      const value = `v-${key}`;
+      assert.ok(renderParams({ [key]: value }).includes(value), `${key} is safe but did not render`);
+    }
+  });
+
+  it('never writes a sentinel under 200 random shapes', () => {
+    // A tiny seeded LCG, so a failure is reproducible.
+    let seed = 20260902;
+    const rand = (n: number): number => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return (seed % n) + 1;
+    };
+    const noise = (depth: number): unknown => {
+      if (depth <= 0 || rand(3) === 1) return `leading ${MARKER} trailing`;
+      const out: Record<string, unknown> = {};
+      for (let index = 1; index <= rand(4); index += 1) out[`k${rand(100000)}_${index}`] = noise(depth - 1);
+      return out;
+    };
+    for (let index = 0; index < 200; index += 1) {
+      assert.ok(!renderParams(noise(4)).includes(MARKER), `a random shape leaked on run ${index}`);
     }
   });
 });

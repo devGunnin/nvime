@@ -70,7 +70,7 @@ describe('nvime.log level', function()
   it('records a state transition with its surface and fields', function()
     local path = scratch()
     log.set_level('info', path)
-    log.state_change('big', 'display', { from = 'reviewing', to = 'merged' })
+    log.state_change('big', 'display', { from_display = 'reviewing', to_display = 'merged' })
     log.close()
     local written = lines(path)
     eq(1, #written)
@@ -110,9 +110,21 @@ describe('nvime.log redaction', function()
       root = '/repo',
       organization = { api_key = 'sk-ant-notreal-0001', github = 'gh' },
     })
-    eq('/repo', redacted.root)
-    eq('gh', redacted.organization.github)
+    eq('/repo', redacted.root, 'a safe name still reads')
+    eq('<2 chars>', redacted.organization.github, 'an unvouched-for name is a size')
     eq(log.REDACTED, redacted.organization.api_key)
+  end)
+
+  it('redacts only secrets in nvime’s own settings, which have a bounded shape', function()
+    -- `redact_secrets` is for the config the bundle renders: `setup()` refuses
+    -- a key the defaults do not name, so there is nothing unvouched-for in it.
+    local settings = log.redact_secrets({
+      organization = { api_key = 'sk-ant-notreal-0001', github = 'gh' },
+      keymaps = { chat = '<leader>nc' },
+    })
+    eq('gh', settings.organization.github)
+    eq('<leader>nc', settings.keymaps.chat)
+    eq(log.REDACTED, settings.organization.api_key)
   end)
 
   it('never lets a secret value reach a logged line', function()
@@ -135,21 +147,18 @@ describe('nvime.log redaction', function()
     ok(body:find('400 chars', 1, true) ~= nil, 'its size is recorded instead')
   end)
 
-  it('summarises a content key whatever it holds, and never walks into it', function()
-    -- Round 3: the type-sniffing escape hatch this used to assert is gone. A
-    -- content key that recursed put `spec.goal` one field beyond the rule, so
-    -- a content key is now summarised whatever its type.
+  it('reduces anything not vouched for, whatever shape it arrives in', function()
+    -- Round 5: there is no list of dangerous names any more. A string needs a
+    -- safe name; a list needs a safe name AND numeric elements; an object
+    -- recurses so each leaf answers for itself.
     eq('<2 items>', log.redact({ answers = { { text = 'a' }, { text = 'b' } } }).answers)
     eq('<8 chars>', log.redact({ prompt = 'a prompt' }).prompt)
-    ok(log.redact({ spec = { goal = 'ship it', scope = {} } }).spec:find('keys', 1, true) ~= nil)
+    eq('<7 chars>', log.redact({ spec = { goal = 'ship it' } }).spec.goal, 'the leaf answers for itself')
   end)
 
-  it('judges a settings table by its own field names, not by the name above it', function()
-    -- Why `context` is no longer a content key at all: it is a block list in
-    -- an RPC payload and a settings table in the config the bundle renders, so
-    -- naming it meant one of the two was always wrong.
+  it('lets a number through under any name, and a string under none', function()
     eq(204800, log.redact({ context = { max_file_bytes = 204800 } }).context.max_file_bytes)
-    eq('<1 chars>', log.redact({ context = { { path = 'a', text = 'x' } } }).context[1].text)
+    eq('<1 items>', log.redact({ context = { { path = 'a', text = 'x' } } }).context)
   end)
 
   it('clips a long payload to roughly the line budget', function()

@@ -52,52 +52,78 @@ local TIMESTAMP_BYTES = 24
 --- Another process's log is pruned once it is this old AND its pid is gone.
 local PRUNE_AFTER_SECONDS = 7 * 24 * 60 * 60
 
---- Fields that carry what the user wrote or what their files hold. Recorded
---- as a size, never as text — a log that quotes a prompt cannot be pasted into
---- an issue, which is the only reason this log exists.
+--- DENY BY DEFAULT. A string is written out only under a name on this list;
+--- every other string is recorded as its size. Four rounds of enumerating what
+--- to HIDE each ended one name short of the payload — the runner record, then
+--- the title, then the spec beside it, then an attached directory's listing —
+--- so the question is inverted: not "is this field dangerous" but "has this
+--- name been vouched for".
 ---
---- A big change's `branch` is `nvime/big/<slug of its title>`, and its title
---- is the first 80 characters of what the user typed — so a branch name is the
---- reader's own words, and so is any slug built from one. The `spec` fields are
---- listed individually as well as under `spec`: they can arrive unwrapped.
----
---- `context` is deliberately NOT here. It is a block list in an RPC payload and
---- a settings table in the config the bundle renders; naming it meant one of
---- the two was always wrong. Its children — `text`, `entries` — answer for
---- themselves instead, which is what an attached `dir` block needs anyway.
----
---- The clip is a budget, not a redactor: a short unnamed field fits inside it
---- and is written out whole. So every field the reader authors is named here,
---- however small — a defence (`answer`), the grader's follow-up, an offered
---- choice (`label`/`detail`), a listing of their disk (`entries`), a hunk's
---- own lines.
-local CONTENT_KEYS = {
-  acceptance = true,
-  answer = true,
-  answers = true,
-  approach = true,
-  branch = true,
-  comment = true,
-  content = true,
-  detail = true,
-  diff = true,
-  entries = true,
-  followup = true,
-  goal = true,
-  label = true,
-  lines = true,
-  message = true,
-  outOfScope = true,
-  prompt = true,
-  rationale = true,
-  scope = true,
-  slug = true,
-  spec = true,
-  summary = true,
-  text = true,
-  title = true,
-  ungraded = true,
+--- Every entry is a name that can only ever hold nvime's own vocabulary, an
+--- identifier, or a filesystem path. Nothing here can carry a sentence the
+--- reader wrote. `reason` is deliberately ABSENT despite looking enum-shaped:
+--- the policy layer builds it as prose around an error message and a path.
+local SAFE_KEYS = {
+  -- Identifiers. Correlating a stuck run is the whole point of the log.
+  id = true,
+  sessionId = true,
+  blockId = true,
+  approvalId = true,
+  runId = true,
+  diffId = true,
+  policyId = true,
+  session = true,
+  target = true,
+  origin = true,
+  seq = true,
+  -- nvime's own vocabulary: closed sets, all of them defined in this codebase.
+  state = true,
+  display = true,
+  phase = true,
+  kind = true,
+  type = true,
+  method = true,
+  event = true,
+  level = true,
+  code = true,
+  cause = true,
+  outcome = true,
+  difficulty = true,
+  effort = true,
+  op = true,
+  -- The tool's NAME (Read/Write/Bash), never its arguments or its summary.
+  tool = true,
+  -- Model ids and version strings: vendor vocabulary, not the reader's.
+  model = true,
+  version = true,
+  -- Object names: hex, and nothing else.
+  sha = true,
+  commit = true,
+  base_sha = true,
+  head_sha = true,
+  -- Filesystem paths. A deliberate line: the log names the project it is
+  -- diagnosing, but NOT `entries` — a listing of a directory the reader chose
+  -- to attach is their disk, not this project.
+  file = true,
+  files = true,
+  path = true,
+  dir = true,
+  root = true,
+  worktree = true,
+  -- A line range nvime built, e.g. `10-24`.
+  range = true,
+  -- Transitions, named for what they hold so the pair cannot later take prose.
+  from_display = true,
+  to_display = true,
+  from_session = true,
+  to_session = true,
 }
+
+--- The safe names, sorted — for the docs, and for the spec that proves every
+--- one of them still renders.
+--- @type string[]
+M.SAFE_KEYS = vim.tbl_keys(SAFE_KEYS)
+table.sort(M.SAFE_KEYS)
 
 --- Substrings that make a field name secret wherever they appear in it.
 --- `socket` is here because the runner's control socket plus its token are a
@@ -161,10 +187,68 @@ function M.is_secret_key(name)
   return lower == 'key' or lower == 'apikey' or lower:match('[_%-]key$') ~= nil or lower:match('api_?key$') ~= nil
 end
 
+--- @param list any[]
+--- @return boolean whether every element is a number or a boolean — the only
+--- lists that carry nothing the reader could have written
+local function all_scalar(list)
+  for _, element in ipairs(list) do
+    local kind = type(element)
+    if kind ~= 'number' and kind ~= 'boolean' then
+      return false
+    end
+  end
+  return true
+end
+
+--- @param value any
+--- @param key string|nil the name `value` arrived under; nil at the top
+--- @param depth integer|nil
+--- @return any the same shape, with everything unvouched-for reduced to a size
+---
+--- The rule, in full:
+---   secret-named  → `<redacted>`, whatever the type. Always wins.
+---   number/bool   → through, whatever it is called.
+---   table (map)   → recurse; each leaf answers for its OWN name.
+---   list          → through only under a safe name AND only if every element
+---                   is a number or a boolean; otherwise `<N items>`.
+---   string        → through only under a safe name; otherwise `<N chars>`.
+--- The clip still bounds the line, but is never the reason something is safe.
+function M.redact(value, key, depth)
+  depth = depth or 0
+  if key ~= nil and M.is_secret_key(key) then
+    return M.REDACTED
+  end
+  local kind = type(value)
+  if kind == 'number' or kind == 'boolean' then
+    return value
+  end
+  if kind == 'string' then
+    return SAFE_KEYS[key] and value or M.summarise(value)
+  end
+  if kind ~= 'table' then
+    return M.summarise(value)
+  end
+  if depth >= MAX_DEPTH then
+    return '<deep>'
+  end
+  if vim.islist(value) then
+    return SAFE_KEYS[key] and all_scalar(value) and value or M.summarise(value)
+  end
+  local out = {}
+  for name, nested in pairs(value) do
+    out[name] = M.redact(nested, name, depth + 1)
+  end
+  return out
+end
+
+--- Secrets only, and everything else left as it is. For nvime's OWN settings,
+--- which `config.check_keys` already refuses to let hold a key the defaults do
+--- not name — a bounded shape this codebase owns, unlike a wire payload whose
+--- shape is the sidecar's and grows. Never use this on anything off the wire.
 --- @param value any
 --- @param depth integer|nil
---- @return any the same shape with secrets replaced and content summarised
-function M.redact(value, depth)
+--- @return any
+function M.redact_secrets(value, depth)
   depth = depth or 0
   if type(value) ~= 'table' then
     return value
@@ -173,40 +257,22 @@ function M.redact(value, depth)
     return '<deep>'
   end
   local out = {}
-  for key, nested in pairs(value) do
-    if M.is_secret_key(key) then
-      out[key] = M.REDACTED
-    elseif CONTENT_KEYS[key] then
-      -- A CONTENT KEY NEVER RECURSES, whatever it holds. `spec` was named here
-      -- and still leaked, because walking into the object put its `goal` and
-      -- `approach` — the reader's own words — one field beyond the rule.
-      out[key] = M.summarise(nested)
-    else
-      out[key] = M.redact(nested, depth + 1)
-    end
+  for name, nested in pairs(value) do
+    out[name] = M.is_secret_key(name) and M.REDACTED or M.redact_secrets(nested, depth + 1)
   end
   return out
 end
 
---- What a content-bearing field was, without any of what it said. An object is
---- described by its shape — the count alone would not say a spec was there.
+--- What a value was, without any of what it said.
 --- @return string
 function M.summarise(value)
   if type(value) == 'string' then
     return string.format('<%d chars>', #value)
   end
-  if type(value) ~= 'table' then
-    return string.format('<%s>', type(value))
-  end
-  if vim.islist(value) then
+  if type(value) == 'table' then
     return string.format('<%d items>', #value)
   end
-  local keys = 0
-  for _ in pairs(value) do
-    keys = keys + 1
-  end
-  local encoded_ok, encoded = pcall(vim.json.encode, value)
-  return string.format('<%d keys, %d bytes>', keys, encoded_ok and #encoded or 0)
+  return string.format('<%s>', type(value))
 end
 
 --- @param text string
