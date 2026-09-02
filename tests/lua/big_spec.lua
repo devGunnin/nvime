@@ -8,7 +8,15 @@ local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
 --- Stands in for the sidecar: records requests, replies from a canned table.
 --- A method with no canned reply stays IN FLIGHT, the way a streaming request
 --- really does, and `fake.settle` answers it later.
-local fake = { requests = {}, replies = {}, pending = {}, subscriber = nil }
+local fake = { requests = {}, replies = {}, pending = {}, subscribers = {} }
+
+--- Fans one server-pushed event out to every listener, the way the real
+--- `agent.on_event` does: the panel and the review tab both subscribe.
+function fake.subscriber(name, params)
+  for _, fn in ipairs(fake.subscribers) do
+    fn(name, params)
+  end
+end
 
 function fake.request(method, params, cb, opts)
   fake.requests[#fake.requests + 1] = { method = method, params = params, opts = opts }
@@ -39,7 +47,7 @@ local real_agent = require('nvime.agent')
 package.loaded['nvime.agent'] = {
   request = fake.request,
   on_event = function(fn)
-    fake.subscriber = fn
+    fake.subscribers[#fake.subscribers + 1] = fn
     return function() end
   end,
   is_running = function()
@@ -423,7 +431,11 @@ describe('big change session states', function()
     fake.replies['big.create'] = { result = { session = session() } }
     fake.replies['big.intake'] = { result = { session = session() } }
     big.send('a flag')
-    ok(fake.subscriber ~= nil, 'the panel subscribes to sidecar events')
+    -- Not a check on the PANEL's own subscription: `nvime.threads` is loaded
+    -- by this file too and subscribes elsewhere in the suite, so this only
+    -- proves SOME subscriber exists. What it actually catches is below: an
+    -- event addressed to another request must not reach this panel.
+    ok(#fake.subscribers > 0, 'nvime.threads has subscribed to sidecar events by this point in the suite')
     fake.subscriber('big.denied', { id = 999, tool = 'Write', reason = 'outside' })
     ok(not has_line('refused'), "another run's events are not this panel's")
     cleanup()

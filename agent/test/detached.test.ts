@@ -183,8 +183,8 @@ afterEach(() => {
 });
 
 /** Drafts, answers intake with a ready spec, and approves. */
-async function approved(): Promise<SessionView> {
-  const created = big.create(repo, 'version flag', 'medium');
+async function approved(difficulty: 'vibe' | 'medium' = 'medium'): Promise<SessionView> {
+  const created = big.create(repo, 'version flag', difficulty);
   inlineTurns.push([init(), result('spec', { ready: true, message: 'here', spec: SPEC })]);
   await big.intake(1, { root: repo, id: created.id, message: 'add a --version flag' });
   return big.approve(repo, created.id);
@@ -513,7 +513,7 @@ describe('when the runner cannot start', () => {
 
     await assert.rejects(
       makeDetached().start(2, 'build', { root: repo, id: session.id }),
-      /already running/,
+      /still running/,
     );
     await detached.stop({ root: repo, id: session.id });
     await assert.rejects(running);
@@ -604,6 +604,118 @@ describe('following a runner that goes quiet', () => {
       await new Promise<void>((resolve) => mute.close(() => resolve()));
       rmSync(path, { force: true });
     }
+  });
+});
+
+/** Advances the base branch with a commit the build never saw (issue #10). */
+function moveBase(): void {
+  writeFileSync(join(repo, 'README.md'), 'somebody else landed this\n');
+  execFileSync('git', ['add', '-A'], { cwd: repo, stdio: 'pipe' });
+  execFileSync('git', ['commit', '-qm', 'moved on'], { cwd: repo, stdio: 'pipe' });
+}
+
+/**
+ * A build detached to its end, with one thread over everything it changed.
+ * At the vibe gate, so what these tests exercise is the base moving rather
+ * than the comprehension gate holding the merge back for its own reasons.
+ */
+async function builtAndTriaged(): Promise<SessionView> {
+  const session = await approved('vibe');
+  writeScript({ write: { path: 'tool.py', content: 'def main():\n    print("v1")\n' }, holdMs: 20 });
+  const view = await detached.start(1, 'build', { root: repo, id: session.id });
+  assert.equal(view.counts.open, 0, 'the scripted triage leaves nothing to defend');
+  return view;
+}
+
+describe('a base that moved under a finished build (issue #10)', () => {
+  it('refuses the merge, then merges once the rebase has moved the build onto it', async () => {
+    const built = await builtAndTriaged();
+    assert.deepEqual(
+      (await big.mergeCheck(repo, built.id)).refusals,
+      [],
+      'nothing stands in the way before the base moves',
+    );
+
+    moveBase();
+    assert.deepEqual(
+      (await big.mergeCheck(repo, built.id)).refusals.map((refusal) => refusal.code),
+      ['base-moved'],
+      'the refusal the reader is shown, verbatim from the report',
+    );
+
+    writeScript({ triageTitle: 'the change, rebased' });
+    const rebased = await detached.start(2, 'rebase', { root: repo, id: built.id });
+    assert.equal(rebased.counts.open, 0, 'unchanged content keeps the state it was cleared in');
+    assert.deepEqual(
+      (await big.mergeCheck(repo, built.id)).refusals,
+      [],
+      'the rebase re-based the record, so the merge is reachable again',
+    );
+
+    const landed = await big.merge(3, { root: repo, id: built.id });
+    assert.equal(landed.merged, true, `M still refused: ${JSON.stringify(landed.refusals)}`);
+  });
+
+  it('tells the reader a rebase is still running rather than blaming another editor', async () => {
+    const built = await builtAndTriaged();
+    moveBase();
+
+    writeScript({ triageTitle: 'rebased', holdMs: 3_000 });
+    const running = detached.start(2, 'rebase', { root: repo, id: built.id });
+    // The claim lands before the runner records itself, and only the pair
+    // proves the holder is a runner rather than a second Neovim.
+    await until(
+      'the runner to record itself behind its claim',
+      () => store.liveRunner(store.require(repo, built.id)) !== null,
+    );
+
+    await assert.rejects(
+      () => big.merge(3, { root: repo, id: built.id }),
+      (cause: Error) => {
+        assert.match(cause.message, /outside the editor/);
+        assert.match(cause.message, /rebase/);
+        assert.doesNotMatch(cause.message, /another editor/, 'their own detached rebase is not somebody else');
+        return true;
+      },
+    );
+    const check = await big.mergeCheck(repo, built.id);
+    const held = check.refusals.find((refusal) => refusal.code === 'held-elsewhere');
+    assert.ok(held !== undefined, JSON.stringify(check.refusals));
+    assert.match(held.message, /outside the editor/);
+
+    await running;
+  });
+
+  it('refuses to discard or restart over your own detached rebase, without blaming another editor', async () => {
+    const built = await builtAndTriaged();
+    moveBase();
+
+    writeScript({ triageTitle: 'rebased', holdMs: 3_000 });
+    const running = detached.start(2, 'rebase', { root: repo, id: built.id });
+    await until(
+      'the runner to record itself behind its claim',
+      () => store.liveRunner(store.require(repo, built.id)) !== null,
+    );
+
+    await assert.rejects(
+      () => big.discard(repo, built.id),
+      (cause: Error) => {
+        assert.match(cause.message, /outside the editor/);
+        assert.doesNotMatch(cause.message, /another editor/, 'discarding over your own rebase is not somebody else');
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      () => makeDetached().start(3, 'rebase', { root: repo, id: built.id }),
+      (cause: Error) => {
+        assert.match(cause.message, /outside the editor/);
+        assert.doesNotMatch(cause.message, /another editor/, 'starting a second run over your own rebase is not somebody else');
+        return true;
+      },
+    );
+
+    await running;
   });
 });
 

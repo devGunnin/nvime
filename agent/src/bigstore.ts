@@ -429,9 +429,17 @@ export class BigStore {
    * and only the runner refreshes it.
    */
   liveRunner(session: BigSession): BigRunner | null {
+    return this.liveRunnerFor(session, this.readLock(session));
+  }
+
+  /**
+   * Like `liveRunner`, but off a lock the caller already read — for `holderOf`,
+   * which must not read the claim file twice and risk the two reads
+   * disagreeing about which claim they describe.
+   */
+  liveRunnerFor(session: BigSession, lock: BigLock | null): BigRunner | null {
     const runner = session.runner;
     if (runner === null) return null;
-    const lock = this.readLock(session);
     if (lock === null || lock.pid !== runner.pid || !isLockLive(lock)) return null;
     return runner;
   }
@@ -441,9 +449,27 @@ export class BigStore {
    * so it is read-only here and neither resumable nor discardable.
    */
   foreignLock(session: BigSession): BigLock | null {
-    const lock = this.readLock(session);
+    return this.foreignLockOf(this.readLock(session));
+  }
+
+  /** Like `foreignLock`, but off a lock the caller already read. */
+  foreignLockOf(lock: BigLock | null): BigLock | null {
     if (lock === null || !isLockLive(lock)) return null;
     return lock.owner === this.#owner ? null : lock;
+  }
+
+  /**
+   * Whoever holds this session's live claim, and whether it is this session's
+   * own detached runner rather than a second editor — off ONE lock read.
+   * `foreignLock` then `liveRunner` each used to read the claim file
+   * separately, which both doubled the read and let the claim change between
+   * them (a wrong `detached` flag beside a `what` string it no longer matches).
+   */
+  holderOf(session: BigSession): { detached: boolean; what: string } | null {
+    const lock = this.readLock(session);
+    const held = this.foreignLockOf(lock);
+    if (held === null) return null;
+    return { detached: this.liveRunnerFor(session, lock) !== null, what: held.what };
   }
 
   /**

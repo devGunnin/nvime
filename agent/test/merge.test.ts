@@ -6,7 +6,14 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { clearCapture, type BigSession } from '../src/bigstore.js';
 import { DEFAULT_DIFFICULTY } from '../src/gate.js';
-import { branchNameFor, checkMerge, expectedTree, landDiff, type MergeRefusalCode } from '../src/merge.js';
+import {
+  branchNameFor,
+  checkMerge,
+  expectedTree,
+  holderMessage,
+  landDiff,
+  type MergeRefusalCode,
+} from '../src/merge.js';
 import { ProtocolError } from '../src/protocol.js';
 import type { TriageBlock } from '../src/triage.js';
 import { parseUnifiedDiff } from '../src/unidiff.js';
@@ -127,7 +134,7 @@ async function codes(overrides: Partial<BigSession> = {}, factOverrides = {}): P
   const refusals = await checkMerge(session(overrides), {
     diff: parseUnifiedDiff(patch()),
     counts: { total: 1, open: 0, substantial: 1, defended: 1 },
-    heldElsewhere: false,
+    heldBy: null,
     ...factOverrides,
   });
   return refusals.map((refusal) => refusal.code);
@@ -182,7 +189,7 @@ describe('merge preconditions', () => {
     const refusals = await checkMerge(session(), {
       diff: binary,
       counts: { total: 1, open: 0, substantial: 1, defended: 1 },
-      heldElsewhere: false,
+      heldBy: null,
     });
     assert.deepEqual(refusals.map((refusal) => refusal.code), ['binary-change']);
     // A build's own output is the usual cause, so the reader has to be told
@@ -191,7 +198,18 @@ describe('merge preconditions', () => {
   });
 
   it('refuses when another editor is driving the change', async () => {
-    assert.deepEqual(await codes({}, { heldElsewhere: true }), ['held-elsewhere']);
+    const holder = { detached: false, what: 'build' };
+    assert.deepEqual(await codes({}, { heldBy: holder }), ['held-elsewhere']);
+    assert.match(holderMessage(holder), /another editor/);
+  });
+
+  it('names a detached runner as this change still running, not as another editor', async () => {
+    const holder = { detached: true, what: 'rebase' };
+    assert.deepEqual(await codes({}, { heldBy: holder }), ['held-elsewhere']);
+    const message = holderMessage(holder);
+    assert.match(message, /outside the editor/);
+    assert.match(message, /rebase/);
+    assert.doesNotMatch(message, /another editor/, 'their own rebase is not somebody else');
   });
 
   it('refuses a change built from a detached HEAD, which names no branch', async () => {
@@ -443,7 +461,7 @@ describe('a merge whose record write did not survive', () => {
     const refusals = await checkMerge(stale, {
       diff: parseUnifiedDiff(patch()),
       counts: { total: 1, open: 0, substantial: 1, defended: 1 },
-      heldElsewhere: false,
+      heldBy: null,
     });
     assert.deepEqual(refusals.map((refusal) => refusal.code), ['merged-elsewhere']);
     assert.match(refusals[0]?.message ?? '', new RegExp(landed.commit.slice(0, 8)));
@@ -469,7 +487,7 @@ describe('a merge whose record write did not survive', () => {
     const refusals = await checkMerge(revised, {
       diff: parseUnifiedDiff(patch()),
       counts: { total: 1, open: 0, substantial: 1, defended: 1 },
-      heldElsewhere: false,
+      heldBy: null,
     });
     assert.deepEqual(refusals.map((refusal) => refusal.code), ['base-moved']);
   });
@@ -481,7 +499,7 @@ describe('a merge whose record write did not survive', () => {
     const refusals = await checkMerge(session(), {
       diff: parseUnifiedDiff(patch()),
       counts: { total: 1, open: 0, substantial: 1, defended: 1 },
-      heldElsewhere: false,
+      heldBy: null,
     });
     assert.deepEqual(refusals.map((refusal) => refusal.code), ['base-moved']);
   });
@@ -501,7 +519,7 @@ describe('a merge whose record write did not survive', () => {
     const refusals = await checkMerge(session(), {
       diff: parseUnifiedDiff(patch()),
       counts: { total: 1, open: 0, substantial: 1, defended: 1 },
-      heldElsewhere: false,
+      heldBy: null,
     });
     assert.deepEqual(refusals.map((refusal) => refusal.code), ['base-moved']);
   });
@@ -521,7 +539,7 @@ describe('a merge whose record write did not survive', () => {
     const refusals = await checkMerge(session(), {
       diff: parseUnifiedDiff(patch()),
       counts: { total: 1, open: 0, substantial: 1, defended: 1 },
-      heldElsewhere: false,
+      heldBy: null,
     });
     assert.deepEqual(refusals.map((refusal) => refusal.code), ['base-moved']);
   });
@@ -544,7 +562,7 @@ describe('a merge whose record write did not survive', () => {
     const refusals = await checkMerge(stale, {
       diff: parseUnifiedDiff(patch()),
       counts: { total: 1, open: 0, substantial: 1, defended: 1 },
-      heldElsewhere: false,
+      heldBy: null,
     });
     assert.deepEqual(refusals.map((refusal) => refusal.code), ['base-moved']);
   });

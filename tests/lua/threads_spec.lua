@@ -5,20 +5,47 @@ local palette = require('nvime.palette')
 local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
 
 --- Stands in for the sidecar: records requests, replies from a canned table.
-local fake = { requests = {}, replies = {} }
+--- A method with no canned reply stays IN FLIGHT, the way an agent turn really
+--- does, and `fake.settle` answers it later.
+local fake = { requests = {}, replies = {}, pending = {}, subscribers = {} }
 
-function fake.request(method, params, cb)
-  fake.requests[#fake.requests + 1] = { method = method, params = params }
+function fake.request(method, params, cb, opts)
+  fake.requests[#fake.requests + 1] = { method = method, params = params, opts = opts }
+  if opts ~= nil and opts.on_sent ~= nil then
+    opts.on_sent(#fake.requests)
+  end
   local reply = fake.replies[method]
   if reply ~= nil then
     cb(reply.err, reply.result)
+    return
+  end
+  fake.pending[#fake.pending + 1] = { method = method, cb = cb }
+end
+
+--- Answers the oldest in-flight `method`. Returns whether one was waiting.
+function fake.settle(method, err, result)
+  for index, entry in ipairs(fake.pending) do
+    if entry.method == method then
+      table.remove(fake.pending, index)
+      entry.cb(err, result)
+      return true
+    end
+  end
+  return false
+end
+
+--- One server-pushed event, to every listener.
+function fake.emit(name, params)
+  for _, fn in ipairs(fake.subscribers) do
+    fn(name, params)
   end
 end
 
 local real_agent = require('nvime.agent')
 package.loaded['nvime.agent'] = {
   request = fake.request,
-  on_event = function()
+  on_event = function(fn)
+    fake.subscribers[#fake.subscribers + 1] = fn
     return function() end
   end,
   is_running = function()
@@ -119,13 +146,19 @@ local function session(blocks, overrides)
   }, overrides or {})
 end
 
-local function open_review(blocks)
+--- @param session_overrides table|nil so a test can reopen on a DIFFERENT
+--- change (a different `id`) instead of the default one.
+local function open_review(blocks, session_overrides)
   threads.close()
   compose.dismiss()
+  -- `fake.pending` deliberately survives: reopening the review must not lose
+  -- track of a request the sidecar is still working on (issue-#10
+  -- regression), and a test that reopens mid-request needs to settle it
+  -- after, same as the real sidecar answering late.
   fake.requests, fake.replies = {}, {}
   palette.apply()
   fake.replies['big.diff'] = { result = { diff = { text = DIFF, hunks = HUNKS } } }
-  threads.open('/tmp/project', session(blocks))
+  threads.open('/tmp/project', session(blocks, session_overrides))
 end
 
 --- Invokes the buffer-local mapping the user would press.
@@ -397,6 +430,36 @@ describe('review thread actions', function()
     threads.open('/tmp/project', view)
     eq(nil, threads.view().tree_buf)
     eq(0, #fake.requests)
+  end)
+
+  -- QA-sweep finding: the review tab can open mid-insert (the big panel's
+  -- prompt is routinely left in insert after sending, and `tabnew` carries
+  -- that mode along), so a raw `a`/`M` types into the buffer instead of
+  -- firing its normal-mode mapping — the `aMDEFEND` corruption the sweep saw.
+  it('forces normal mode when it opens mid-insert', function()
+    -- Headless `-l` scripts cannot actually hold insert mode across
+    -- statements (no UI is attached to carry it), so the precondition is
+    -- stubbed directly rather than via `startinsert` — this still exercises
+    -- the real branch in `build_tab` that checks `vim.fn.mode()`.
+    local real_mode, real_cmd = vim.fn.mode, vim.cmd
+    vim.fn.mode = function()
+      return 'i'
+    end
+    local stopped = false
+    vim.cmd = function(arg)
+      if arg == 'stopinsert' then
+        stopped = true
+        return
+      end
+      return real_cmd(arg)
+    end
+    local finished, err = pcall(open_review, { block() })
+    vim.fn.mode, vim.cmd = real_mode, real_cmd
+    if not finished then
+      error(err, 0)
+    end
+    ok(stopped, 'build_tab must leave insert mode when it opened mid-insert — the aMDEFEND corruption')
+    threads.close()
   end)
 end)
 
@@ -866,5 +929,308 @@ describe('the grade the reader is told about', function()
     ok(seen[1]:find('\n') == nil, 'one line only: ' .. seen[1])
     ok(vim.fn.strchars(seen[1]) < vim.fn.strchars(verdict), seen[1])
     ok(seen[1]:find('88', 1, true) ~= nil, seen[1])
+  end)
+end)
+
+--- The winbar the tree window is currently rendering.
+local function tree_bar()
+  return vim.wo[threads.view().tree_win].winbar
+end
+
+local function pane_bar()
+  return vim.wo[threads.view().pane_win].winbar
+end
+
+--- Waits until the indicator has outlived its delay and painted, or gives up.
+local function wait_for_spinner()
+  return vim.wait(2000, function()
+    return (threads.activity() or {}).shown == true
+  end, 20)
+end
+
+describe('issue #10: the base moved, R rebases, M merges', function()
+  it('walks the whole stuck sequence: M refused, R, then M lands it', function()
+    open_review({ block({ state = 'resolved' }) })
+    -- M, with the base moved out from under the build.
+    fake.replies['big.merge'] = {
+      result = {
+        merged = false,
+        refusals = { { code = 'base-moved', message = 'main has moved since the build started' } },
+        session = session({ block({ state = 'resolved' }) }),
+      },
+    }
+    local seen = with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    ok(said(seen, 'press R to rebase'), vim.inspect(seen))
+
+    -- R: a real rebase is an agent turn, so it stays in flight.
+    fake.replies['big.merge'] = nil
+    local rebased = session({ block({ state = 'resolved' }) }, { base = { commit = 'aa9fb774', branch = 'main' } })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    ok(threads.activity() ~= nil, 'the rebase is in flight and the tab says so')
+    eq('rebasing the build onto the updated base', threads.activity().label)
+
+    seen = with_notices(function()
+      ok(fake.settle('big.rebase', nil, { session = rebased }))
+    end)
+    eq(nil, threads.activity(), 'the indicator clears when the rebase settles')
+    ok(said(seen, 'rebased onto the updated base'), vim.inspect(seen))
+
+    -- M again, on the rebased build: it lands.
+    fake.replies['big.merge'] = {
+      result = {
+        merged = true,
+        refusals = {},
+        session = session({ block({ state = 'resolved' }) }, {
+          display = 'merged',
+          state = 'merged',
+          merge = { branch = 'nvime/big/backoff', commit = 'deadbeefcafe', baseBranch = 'main' },
+        }),
+      },
+    }
+    seen = with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    ok(said(seen, 'merged'), vim.inspect(seen))
+    threads.close()
+  end)
+
+  it('shows a spinner and what the rebase is doing until it settles', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    ok(wait_for_spinner(), 'a request past the delay paints an indicator')
+    ok(tree_bar():find('rebasing the build', 1, true) ~= nil, tree_bar())
+
+    -- The runner's progress is addressed to the request that started it.
+    local id = fake.requests[#fake.requests].opts.on_sent ~= nil and threads.activity().request_id or nil
+    ok(id ~= nil, 'the review tab tracks the request id its events carry')
+    fake.emit('big.tool', { id = id, tool = 'Edit', summary = 'Edit lua/nvime/big.lua' })
+    ok(pane_bar():find('Edit lua/nvime/big.lua', 1, true) ~= nil, pane_bar())
+    fake.emit('big.tool', { id = id + 99, summary = 'somebody else’s build' })
+    ok(pane_bar():find('somebody', 1, true) == nil, 'another request’s progress is not this tab’s')
+
+    with_notices(function()
+      ok(fake.settle('big.rebase', nil, { session = session({ block({ state = 'resolved' }) }) }))
+    end)
+    eq(nil, threads.activity())
+    ok(tree_bar():find('rebasing', 1, true) == nil, tree_bar())
+    ok(pane_bar():find('M merge', 1, true) ~= nil, 'the keys come back once the tab is idle')
+    threads.close()
+  end)
+
+  it('says what is running instead of stacking a second request on it', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    local before = #fake.requests
+    local seen = with_notices(function()
+      press(threads.view().tree_buf, 'M')
+      press(threads.view().tree_buf, 'R')
+    end)
+    eq(before, #fake.requests, 'neither keystroke sent a request the sidecar would only refuse')
+    ok(said(seen, 'rebasing the build onto the updated base'), vim.inspect(seen))
+    ok(said(seen, 'wait for that to finish'), vim.inspect(seen))
+
+    -- Closing the tab must not drop a request that is still running on the
+    -- sidecar (issue-#10 regression): the latch survives, only its timer pauses.
+    threads.close()
+    ok(threads.activity() ~= nil, 'the latch survives the close while the rebase is still in flight')
+
+    with_notices(function()
+      ok(fake.settle('big.rebase', nil, { session = session({ block({ state = 'resolved' }) }) }))
+    end)
+    eq(nil, threads.activity(), 'it clears once the still-running rebase actually settles')
+  end)
+
+  it('keeps a fast round trip silent — no spinner flashes for a toggle', function()
+    open_review({ block({ substantial = false, state = 'resolved' }) })
+    fake.replies['big.toggle'] = { result = { session = session({ block({ substantial = false }) }) } }
+    with_notices(function()
+      press(threads.view().tree_buf, 'X')
+    end)
+    eq(nil, threads.activity(), 'it settled before the indicator was ever due')
+    ok(tree_bar():find('defended', 1, true) ~= nil, tree_bar())
+    threads.close()
+  end)
+
+  -- Coldstart review finding 1 (HIGH): a stale request's completion used to
+  -- tear down a LATER request's indicator and reopen the one-at-a-time latch.
+  -- Reproduces the reviewer's own reopen-mid-rebase probe.
+  it('re-adopts an in-flight rebase across a reopen, and a stale answer never touches what runs after it', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    ok(threads.activity() ~= nil, 'R put the rebase in flight')
+    local rebase_generation = threads.activity().generation
+
+    -- The reader closes and reopens the review tab (big.lua's `<C-t>`, or any
+    -- close/reopen) while the rebase keeps running on the sidecar.
+    open_review({ block({ state = 'resolved' }) })
+    ok(threads.activity() ~= nil, 'reopening the tab must re-adopt the still-running rebase, not orphan it')
+    eq(rebase_generation, threads.activity().generation, 'the same request, not a fresh one')
+
+    -- With the latch re-armed, a second request is refused rather than sent
+    -- while the sidecar still holds the session for the rebase.
+    local before = #fake.requests
+    local seen = with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    eq(before, #fake.requests, 'a merge must not be sent while the rebase is still in flight')
+    ok(said(seen, 'wait for that to finish'), vim.inspect(seen))
+
+    -- The only local escape is `<C-c>`: it frees the latch, but the abandoned
+    -- rebase keeps its old generation, so a late answer cannot relatch it.
+    seen = with_notices(function()
+      press(threads.view().tree_buf, '<C-C>')
+    end)
+    eq(nil, threads.activity(), '<C-c> frees the latch locally')
+    ok(said(seen, 'gave up waiting'), vim.inspect(seen))
+
+    -- A fresh request takes the latch under its own, later, generation.
+    with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    ok(threads.activity() ~= nil, 'M took the freed latch')
+    local merge_generation = threads.activity().generation
+    ok(merge_generation ~= rebase_generation, 'the merge is its own request, not the abandoned rebase')
+
+    -- The stale, abandoned rebase finally answers.
+    seen = with_notices(function()
+      ok(fake.settle('big.rebase', nil, { session = session({ block({ state = 'resolved' }) }) }))
+    end)
+    ok(threads.activity() ~= nil, "BUG regression: a stale answer must not clear a LATER request's indicator")
+    eq(
+      merge_generation,
+      (threads.activity() or {}).generation,
+      "the merge's own indicator must survive the stale rebase settling under it"
+    )
+    -- N2 fix: a stale on_result no longer runs at all (it used to fire
+    -- `M.reload`, mutating `view.session` out from under the merge in
+    -- flight) — only a generic outcome line renders now.
+    ok(
+      said(seen, 'rebasing the build onto the updated base finished'),
+      vim.inspect(seen),
+      'the stale answer still renders an outcome line, but never mutates state'
+    )
+    eq('abc123', threads.view().session.id, "the stale rebase's own on_result must not have run")
+
+    -- Settle the merge too, so nothing is left in flight for the next test.
+    with_notices(function()
+      ok(
+        fake.settle(
+          'big.merge',
+          nil,
+          { merged = true, refusals = {}, session = session({ block({ state = 'resolved' }) }) }
+        )
+      )
+    end)
+    threads.close()
+  end)
+
+  -- Fix-round-1 delta finding N1/N2: the latch was per-module, not
+  -- per-session, so reopening the review on a DIFFERENT change inherited
+  -- the old one's latch — the reviewer's A-rebase, pick B, `<C-t>` probe.
+  it('does not inherit a stale latch when the tab reopens on a different change', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    ok(threads.activity() ~= nil, 'a rebase on change A is in flight')
+
+    -- The reader picks a different change from the panel (`<C-r>`) and opens
+    -- its review (`<C-t>`) while A's rebase is still running on the sidecar.
+    open_review(
+      { block({ id = 'b2', title = 'other change', state = 'resolved' }) },
+      { id = 'session-B', title = 'other change' }
+    )
+    eq('session-B', threads.view().session.id)
+    ok(threads.activity() == nil, "change B must not inherit change A's latch")
+
+    -- B's own M must reach the sidecar rather than being refused as busy
+    -- because of a rebase running on a change the reader has left.
+    fake.replies['big.merge'] = {
+      result = {
+        merged = true,
+        refusals = {},
+        session = session({ block({ id = 'b2', title = 'other change', state = 'resolved' }) }, {
+          id = 'session-B',
+          display = 'merged',
+          state = 'merged',
+          merge = { branch = 'nvime/big/other', commit = 'deadbeefcafe', baseBranch = 'main' },
+        }),
+      },
+    }
+    local seen = with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    ok(said(seen, 'merged'), vim.inspect(seen))
+
+    -- Drain A's stale rebase so it does not leak into a later test.
+    with_notices(function()
+      ok(fake.settle('big.rebase', nil, { session = session({ block({ state = 'resolved' }) }) }))
+    end)
+    threads.close()
+  end)
+
+  it('quarantines a stale rebase that settles after the tab has moved to another change', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+
+    open_review(
+      { block({ id = 'b2', title = 'other change', state = 'resolved' }) },
+      { id = 'session-B', title = 'other change' }
+    )
+    local requests_before = #fake.requests
+
+    -- A's stale rebase finally answers. It must still tell the reader
+    -- something happened, but it must not touch the tab that has since
+    -- moved to B: no mutated `view.session`, no `big.diff` re-issued.
+    local seen = with_notices(function()
+      ok(fake.settle('big.rebase', nil, { session = session({ block({ state = 'resolved' }) }) }))
+    end)
+    eq('session-B', threads.view().session.id, "A's stale answer must not flip the tab back to A")
+    eq(requests_before, #fake.requests, 'a stale settle must not issue big.diff for the change it belongs to')
+    ok(said(seen, 'rebas'), 'the stale settle still renders its own outcome line: ' .. vim.inspect(seen))
+    threads.close()
+  end)
+
+  -- Coldstart review finding 2 (MEDIUM-HIGH): the streamed detail went into
+  -- the winbar unbounded and with newlines intact.
+  it('bounds a long, multi-line streamed detail before it reaches the winbar', function()
+    open_review({ block({ state = 'resolved' }) })
+    with_notices(function()
+      press(threads.view().tree_buf, 'R')
+    end)
+    local id = threads.activity().request_id
+    ok(id ~= nil, 'the review tab tracks the request id its events carry')
+
+    local pane_width = vim.api.nvim_win_get_width(threads.view().pane_win)
+    local long = 'git rebase --onto ' .. string.rep('very-long-branch-name/', 20) .. 'main'
+    fake.emit('big.tool', { id = id, summary = long })
+    local rendered = pane_bar():gsub('%%#%w+#', ''):gsub('%%=', ''):gsub('%%%%', '%%')
+    ok(
+      vim.fn.strdisplaywidth(rendered) <= pane_width,
+      string.format('pane width=%d, rendered width=%d: %s', pane_width, vim.fn.strdisplaywidth(rendered), rendered)
+    )
+
+    local multi = 'the detached build runner could not start (Error: spawn ENOENT\n'
+      .. '  at ChildProcess\n  at onErrorNT) — building in this editor instead'
+    local ok_set = pcall(fake.emit, 'big.notice', { id = id, text = multi })
+    ok(ok_set, 'a multi-line notice must not raise when it becomes a winbar')
+    ok(pane_bar():find('\n', 1, true) == nil, 'the winbar must hold no raw newline: ' .. vim.inspect(pane_bar()))
+
+    with_notices(function()
+      ok(fake.settle('big.rebase', nil, { session = session({ block({ state = 'resolved' }) }) }))
+    end)
+    threads.close()
   end)
 end)
