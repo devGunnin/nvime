@@ -386,4 +386,47 @@ describe('the approval float is tall enough for what it shows', function()
     end
     eq(rows, #lines, 'each rendered line must be exactly one screen row, or the height is undercounted')
   end)
+
+  it('prints a short command once, not as a summary and a payload block', function()
+    local lines = approval.render({
+      approvalId = 'a1',
+      tool = 'Bash',
+      summary = 'running find . -name *.py',
+      reason = 'runs a shell command',
+      detail = { kind = 'command', text = 'find . -name *.py', bytes = 17 },
+    }, 72)
+    local body = table.concat(lines, '\n')
+    eq(nil, body:find('the exact command', 1, true), 'the summary already showed the whole command')
+    ok(body:find('find . -name *.py', 1, true) ~= nil, 'and it is still there in full')
+  end)
+
+  it('still prints the payload when the summary does not carry all of it', function()
+    local long = string.rep('x', 200)
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Bash',
+        summary = 'running ' .. long:sub(1, 119) .. '…',
+        reason = 'runs a shell command',
+        detail = { kind = 'command', text = long, bytes = #long, truncated = false },
+      }, 72),
+      '\n'
+    )
+    ok(body:find('the exact command', 1, true) ~= nil, 'nobody can consent to a clipped command')
+  end)
+
+  it('never collapses a multi-line payload into its whitespace-flattened summary', function()
+    local text = 'line one\nline two'
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Write',
+        summary = 'writing line one line two',
+        reason = 'writes a file',
+        detail = { kind = 'contents', text = text, bytes = #text },
+      }, 72),
+      '\n'
+    )
+    ok(body:find('the exact contents', 1, true) ~= nil, 'the line breaks are part of what is consented to')
+  end)
 end)

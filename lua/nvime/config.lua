@@ -146,6 +146,43 @@ local function validate_organization(opts)
   end
 end
 
+--- Keys `setup()` accepts that the defaults table cannot show: a nil default
+--- does not exist in a Lua table, and `agent.model` is retired but must reach
+--- `validate`, which explains where it went.
+local function optional_keys()
+  local allowed = {
+    ['agent.claude'] = true,
+    ['agent.model'] = true,
+    ['organization.control_plane_url'] = true,
+    ['organization.trust_core'] = true,
+  }
+  for _, lane in ipairs(M.MODEL_LANES) do
+    allowed['models.' .. lane .. '.model'] = true
+    allowed['models.' .. lane .. '.effort'] = true
+  end
+  return allowed
+end
+
+--- Rejects a key the defaults do not name, at every nesting level, with the
+--- path the user wrote. A misspelt key is the most common config mistake there
+--- is, and a silently ignored `pannel` block gives no signal at all.
+--- @param user table the user's own table, never the merged one
+--- @param known table the defaults at this level
+--- @param path string dotted path of `user`, '' at the top
+--- @param allowed table paths valid despite having no default
+local function check_keys(user, known, path, allowed)
+  for key, value in pairs(user) do
+    local full = path == '' and tostring(key) or (path .. '.' .. tostring(key))
+    local default = known[key]
+    if default == nil and not allowed[full] then
+      fail(string.format('unknown option %s', full))
+    end
+    if type(default) == 'table' and type(value) == 'table' then
+      check_keys(value, default, full, allowed)
+    end
+  end
+end
+
 local function validate(opts)
   check_type(opts.panel.width, 'number', 'panel.width')
   if opts.panel.width < 20 or opts.panel.width > 400 then
@@ -187,6 +224,11 @@ local function validate(opts)
   end
   check_type(opts.big.cleanup_on_merge, 'boolean', 'big.cleanup_on_merge')
   check_type(opts.agent.node, 'string', 'agent.node')
+  -- Caught here rather than at the first turn: the sidecar cannot start
+  -- without it, and `doctor` is not where a typo should first surface.
+  if vim.fn.executable(opts.agent.node) ~= 1 then
+    fail('agent.node is not an executable: ' .. opts.agent.node)
+  end
   if opts.agent.model ~= nil then
     fail('agent.model was replaced by models.<lane>.model — see :h nvime-configuration')
   end
@@ -239,6 +281,7 @@ function M.setup(user)
   if user ~= nil and type(user) ~= 'table' then
     fail('expected a table of options, got ' .. type(user))
   end
+  check_keys(user or {}, defaults, '', optional_keys())
   options = validate(vim.tbl_deep_extend('force', vim.deepcopy(defaults), user or {}))
   return options
 end

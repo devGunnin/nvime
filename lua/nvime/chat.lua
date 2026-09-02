@@ -284,7 +284,7 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'prompt · <CR> send · <C-n> new · <C-r> sessions · <C-c> stop',
+    prompt_hint = 'prompt · <CR> send (i_<C-s>) · <C-n> new · <C-r> sessions · <C-c> stop',
     root = state.root,
     on_submit = M.send,
     on_close = on_panel_close,

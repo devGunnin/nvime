@@ -2,6 +2,8 @@
 --- explanation of one thread's hunks. Read-only, and only ever asked for once
 --- the sidecar will actually answer — see `threads.lua`'s `e` key, which
 --- mirrors the server-side gate so the float is never opened on a refusal.
+local modes = require('nvime.modes')
+
 local M = {}
 
 local WIDTH = 76
@@ -70,6 +72,7 @@ local function open_float(title, lines)
   })
   vim.wo[win].wrap = true
   active = { win = win, buf = buf }
+  modes.normal()
   for _, lhs in ipairs({ 'q', '<Esc>' }) do
     vim.keymap.set('n', lhs, close, { buffer = buf, nowait = true, silent = true, desc = 'nvime: close' })
   end

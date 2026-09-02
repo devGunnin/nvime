@@ -12,6 +12,7 @@
 --- they were shown three quarters of.
 local keymaps = require('nvime.keymaps')
 local text = require('nvime.text')
+local modes = require('nvime.modes')
 
 local M = {}
 
@@ -186,10 +187,27 @@ function M.render(request, width)
 
   append_keys(page)
 
-  if shown ~= nil and shown ~= '' then
+  if shown ~= nil and shown ~= '' and not M.summarised(request.summary, detail) then
     append_payload(page, detail, shown)
   end
   return page.lines, page.alerts, page.marks
+end
+
+--- Whether the summary at the top already shows the whole payload, so
+--- repeating it verbatim below would only say the same short command twice.
+--- Single-line payloads only: the summary collapses whitespace, and a file's
+--- contents must never be consented to with its line breaks flattened.
+--- @param summary string|nil
+--- @param detail table|nil kind, text, bytes, truncated
+--- @return boolean
+function M.summarised(summary, detail)
+  if type(summary) ~= 'string' or type(detail) ~= 'table' or type(detail.text) ~= 'string' then
+    return false
+  end
+  if detail.truncated or detail.text:find('\n') ~= nil then
+    return false
+  end
+  return summary:find(detail.text, 1, true) ~= nil
 end
 
 --- Opens the float for `ask` and wires the approval keys to `answer`.
@@ -233,6 +251,7 @@ local function show(ask, answer)
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
   active = { win = win, buf = buf, request = ask.request, on_answer = ask.on_answer }
+  modes.normal()
 
   for _, key in ipairs(keymaps.APPROVAL) do
     vim.keymap.set('n', key.lhs, function()

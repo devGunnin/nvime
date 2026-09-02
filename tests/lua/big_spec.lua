@@ -539,7 +539,7 @@ end
 describe('a build that outlives the editor', function()
   it('reads as a detached build rather than as another editor', function()
     eq('building (detached — keeps running)', big.describe(running_detached()))
-    ok(big.next_step(running_detached()):match('s steers it'), 'and says how to steer it')
+    ok(big.next_step(running_detached()):match('type to steer it'), 'and says how to steer it')
   end)
 
   it('reads a killed runner as a build that died, still resumable', function()
@@ -684,6 +684,70 @@ describe('a build that outlives the editor', function()
     vim.api.nvim_set_current_win(float.win)
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, false, true), 'x', false)
     eq('prefer the existing helper', sent('big.steer').params.text)
+    cleanup()
+  end)
+
+  it('advertises only keys that work in the window showing the hint', function()
+    local _, path = sandbox()
+    open_on(path)
+    local view = panel.get('big')
+    ok(view.prompt_hint:find('i_<C-s>', 1, true) ~= nil, view.prompt_hint)
+    eq(nil, view.prompt_hint:find(' s steer', 1, true), '`s` is `substitute` in the box being typed in')
+    local insert = {}
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(view.prompt_buf, 'i')) do
+      insert[map.lhs] = true
+    end
+    for _, lhs in ipairs({ '<C-N>', '<C-R>', '<C-T>', '<C-C>', '<C-S>' }) do
+      ok(insert[lhs], lhs .. ' is advertised on a box that opens in insert mode')
+    end
+    eq(nil, insert['s'], '`s` is never bound where the reader is typing prose')
+    cleanup()
+  end)
+
+  it('steers the build this editor started, not only one running outside it', function()
+    -- `state.session` is the snapshot adopted BEFORE the runner started, so
+    -- its `runnerLive` is still false while this editor's own build streams.
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ display = 'building' })
+    big.state().request_id = 7
+    ok(big.steerable(), 'a build this editor is following is steerable')
+    big.open_steer()
+    ok(require('nvime.compose').current() ~= nil, 'the steer box opens on your own build')
+    require('nvime.compose').dismiss()
+    cleanup()
+  end)
+
+  it('refuses to steer a session another editor is driving', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ display = 'building', heldElsewhere = true })
+    eq(false, big.steerable())
+    big.open_steer()
+    eq(nil, require('nvime.compose').current())
+    cleanup()
+  end)
+
+  it('sends what is typed in the prompt to the running build as a steer', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ display = 'building' })
+    big.state().request_id = 7
+    big.send('prefer the existing helper')
+    local steer = sent('big.steer')
+    ok(steer ~= nil, 'typing at a streaming build steers it rather than being refused')
+    eq('prefer the existing helper', steer.params.text)
+    ok(not has_line('the build is running'), 'and it is not answered with a hint')
+    cleanup()
+  end)
+
+  it('keeps resume and discard meaning what they say while a build runs', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ display = 'building', detached = true, runner = { pid = 1 } })
+    big.send('discard')
+    eq(nil, sent('big.steer'), 'a word that decides the build’s fate is never a steer')
+    ok(sent('big.discard') ~= nil, 'it discards, as the hint promised')
     cleanup()
   end)
 

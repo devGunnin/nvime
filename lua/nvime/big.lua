@@ -35,6 +35,10 @@ end
 --- never collide with a real (sidecar-issued) session id.
 local NEW_CHANGE = {}
 
+--- Words that decide a build's fate. They keep their meaning while a build
+--- runs instead of being handed to it as a steer.
+local BUILD_WORDS = { resume = true, retriage = true, discard = true }
+
 local state = {
   root = nil,
   --- The last SessionView the sidecar returned, or nil when none is selected.
@@ -164,12 +168,12 @@ function M.next_step(session)
     return nil
   end
   if session.runnerLive then
-    return 'building outside the editor — s steers it, <C-c> stops it, closing Neovim does not'
+    return 'building outside the editor — type to steer it, <C-c> stops it, closing Neovim does not'
   end
   if session.heldElsewhere then
     return 'another editor is driving this — watch it there, or <C-r> to pick a different change'
   end
-  local building = 'building — <C-c> stops it'
+  local building = 'building — type to steer it, <C-c> stops it'
   if session.detached then
     building = session.runner ~= nil and 'the build died part-way — type `resume` to pick it back up, or `discard`'
       or 'type `resume` to pick the build back up, or `discard` to throw it away'
@@ -542,6 +546,17 @@ function M.send(text, echo)
       text, echo = pick, options.echo(pick)
     end
   end
+  local word = vim.trim(text):lower()
+  -- While the build runs, the prompt steers it: that is what a reader typing
+  -- into a panel that is streaming a build expects, and `s` in the transcript
+  -- is only a shortcut to the same thing. The words that decide the build's
+  -- fate keep their meaning. The steer is echoed by `big.steer` when the
+  -- sidecar accepts it, so it is not echoed here as well.
+  if state.session ~= nil and state.session.display == 'building' and not BUILD_WORDS[word] and M.steerable() then
+    M.steer(text)
+    return
+  end
+
   surface():append('you', 'NvimeUser')
   surface():append_markdown(echo or text, 'NvimeUserBody')
   surface():blank()
@@ -550,7 +565,6 @@ function M.send(text, echo)
     start_new(text)
     return
   end
-  local word = vim.trim(text):lower()
   local display = state.session.display
   if display == 'drafting' then
     if word == 'approve' then
@@ -603,7 +617,7 @@ end
 --- @param word string the prompt, trimmed and lowercased
 function M.resume_or_discard(word)
   local session = state.session
-  local hint = M.next_step(session) or 'the build is running — <C-c> stops it'
+  local hint = M.next_step(session) or 'the build is running — type to steer it, <C-c> stops it'
   if session ~= nil and session.heldElsewhere then
     surface():append('  ' .. hint, 'NvimeActivity')
     surface():blank()
@@ -620,7 +634,7 @@ function M.resume_or_discard(word)
     surface():append('  ' .. hint, 'NvimeActivity')
     surface():blank()
   else
-    surface():append('  the build is running — <C-c> stops it', 'NvimeActivity')
+    surface():append('  the build is running — type to steer it, <C-c> stops it', 'NvimeActivity')
     surface():blank()
   end
 end
@@ -702,11 +716,31 @@ function M.steer(text)
   end)
 end
 
+--- Whether what the reader types now is a nudge for a build in flight.
+--- `state.session` is the snapshot adopted before the runner started, so its
+--- `runnerLive` alone would refuse to steer this editor's own build; the live
+--- request/attach id is what this editor knows first-hand.
+--- @return boolean
+function M.steerable()
+  local session = state.session
+  if session == nil then
+    return false
+  end
+  -- Same order as `describe`: a live runner first, because from the lock alone
+  -- it looks exactly like another editor holding the session.
+  if session.runnerLive then
+    return true
+  end
+  if session.heldElsewhere then
+    return false
+  end
+  return M.is_running()
+end
+
 --- `s`: the compose float for one steer.
 function M.open_steer()
-  local session = state.session
-  if session == nil or not session.runnerLive then
-    vim.notify('nvime: no build is running outside the editor to steer', vim.log.levels.INFO)
+  if not M.steerable() then
+    vim.notify('nvime: no build is running to steer', vim.log.levels.INFO)
     return
   end
   require('nvime.compose').open({
@@ -846,7 +880,7 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'describe · <CR> send · <C-n> new · <C-r> changes · <C-t> review · <C-c> stop',
+    prompt_hint = 'describe · <CR> send (i_<C-s>) · <C-n> new · <C-r> changes · <C-t> review · <C-c> stop',
     on_submit = M.send,
     on_close = on_panel_close,
     keys = {

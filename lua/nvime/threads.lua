@@ -11,6 +11,7 @@
 local agent = require('nvime.agent')
 local annotate = require('nvime.annotate')
 local models = require('nvime.models')
+local modes = require('nvime.modes')
 local panel = require('nvime.panel')
 local reviewbuf = require('nvime.reviewbuf')
 local shape = require('nvime.text')
@@ -1758,9 +1759,7 @@ local function build_tab()
   -- `write`) buffer instead of firing `answer`/`merge` — the exact `aMDEFEND`
   -- corruption a QA pass caught, with no error since nvim considers this a
   -- perfectly normal insert.
-  if vim.fn.mode():match('^i') then
-    vim.cmd('stopinsert')
-  end
+  modes.normal()
 end
 
 --- Re-reads the captured diff for `session` and redraws.

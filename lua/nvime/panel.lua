@@ -8,6 +8,7 @@
 --- that name rather than stacking splits.
 local completion = require('nvime.completion')
 local markdown = require('nvime.markdown')
+local modes = require('nvime.modes')
 
 local M = {}
 
@@ -240,6 +241,20 @@ local function bind(buf, mode, lhs, fn, desc)
   vim.keymap.set(mode, lhs, fn, { buffer = buf, nowait = true, silent = true, desc = desc })
 end
 
+--- Which modes a prompt key is bound in. The prompt is left in insert after
+--- every send, so a key advertised on that window has to answer there too —
+--- but only a control chord may: binding a literal key (`]o`, `s`) in insert
+--- would shadow the user's own typing.
+--- @param lhs string
+--- @return string[]
+function M.prompt_modes(lhs)
+  assert(type(lhs) == 'string' and lhs ~= '', 'panel.prompt_modes needs a key')
+  if lhs:match('^<[Cc]%-[^>]+>$') == nil then
+    return { 'n' }
+  end
+  return modes.PROMPT
+end
+
 --- Prompt text, then clear it ready for the next message.
 local function take_prompt(self)
   local lines = vim.api.nvim_buf_get_lines(self.prompt_buf, 0, -1, false)
@@ -427,7 +442,8 @@ function M.open(opts)
   end
   for _, key in ipairs(opts.keys or {}) do
     for _, buf in ipairs(self:_key_buffers(key.where)) do
-      bind(buf, key.mode, key.lhs, key.fn, key.desc)
+      local mode = buf == self.prompt_buf and M.prompt_modes(key.lhs) or key.mode
+      bind(buf, mode, key.lhs, key.fn, key.desc)
     end
   end
   bind(self.buf, 'n', 'q', function()
@@ -487,10 +503,17 @@ function M.close(name)
   panels[name] = nil
 end
 
+--- A prompt panel keeps insert mode — that window is for typing. A panel
+--- without one is driven by normal-mode keys, so it must not inherit the
+--- insert mode of whatever the user was in when it opened.
 function Panel:focus()
   local win = win_valid(self.prompt_win) and self.prompt_win or self.win
-  if win_valid(win) then
-    vim.api.nvim_set_current_win(win)
+  if not win_valid(win) then
+    return
+  end
+  vim.api.nvim_set_current_win(win)
+  if win ~= self.prompt_win then
+    modes.normal()
   end
 end
 

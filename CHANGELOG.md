@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+- **Input modes are fundamentals now.** Every surface driven by normal-mode
+  keys — panels without a prompt, pickers, the dashboard, the doctor, the
+  enrollment and explain floats, the confirm and approval floats, the review
+  tree — leaves insert mode when it takes focus, so a documented key acts
+  instead of typing itself into the window. Every control chord a prompt box
+  advertises (`<C-c>` stop, `<C-r>` sessions, `<C-n>` new, `<C-t>` review) is
+  bound in insert as well; the box is left in insert after every send, which
+  is exactly when they are wanted. `<C-r>` there can no longer open Vim's
+  register prompt. A literal key (`]o`, `s`) is never bound in insert, where it
+  would shadow your own typing, and no hint advertises a key that does
+  something else in the window showing it — the prompt hints name the
+  insert-mode send (`i_<C-s>`) and no longer offer `s`.
+
+- **One `<Esc>` cancels a compose float**, from insert too — it opens there, so
+  a normal-only mapping needed two presses while the footer promised one.
+  Cancelling a box with text in it says the draft was discarded.
+
+- **Steer the build you started.** `s` and the panel prompt both steer any
+  build this editor is following, not only one running outside it — the gate
+  used a session snapshot taken before the runner started. Typing into the
+  prompt while a build runs sends it as a steer instead of being answered with
+  a hint; `resume`, `retriage` and `discard` keep their meaning.
+
+- **The merge commit says what the change was for.** Its subject is the spec's
+  one-line goal, not the first prompt clipped to 80 characters mid-clause; the
+  body keeps that first prompt (or the spec's approach).
+
+- **Unknown config keys are refused at `setup()`** at every level —
+  `pannel`, `panel.widht`, `models.bigg` — each named by the exact path the
+  README promised, and `agent.node` must point at a real executable.
+
+- **Edit mode says less and says it once.** A file left alone because you have
+  unsaved edits is reported once per run instead of on every write to it, an
+  approval nobody answered now shows `× denied (timed out)` rather than staying
+  pending forever, and the approval float prints a short command once instead
+  of as both summary and payload.
+
 - **The review pane is the file.** Selecting a thread now opens the build
   clone's own copy of the changed file as an ordinary buffer — real path,
   filetype, treesitter and your own LSP — with the diff drawn over it as

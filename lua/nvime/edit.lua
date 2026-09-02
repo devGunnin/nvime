@@ -8,6 +8,7 @@ local apply = require('nvime.apply')
 local approval = require('nvime.approval')
 local config = require('nvime.config')
 local context = require('nvime.context')
+local icons = require('nvime.icons')
 local models = require('nvime.models')
 local panel = require('nvime.panel')
 
@@ -89,6 +90,25 @@ local function show_error(err)
   surface():blank()
 end
 
+--- Whether this run has already said that `path` is unapplied. Every write to
+--- a file the reader has unsaved edits in reports the same three lines, so a
+--- run that touches it five times floods the panel with one fact. The count
+--- still reaches the run summary.
+--- @param status string
+--- @param path string
+--- @return boolean
+local function said_already(status, path)
+  if not UNAPPLIED[status] or state.tally == nil then
+    return false
+  end
+  local key = status .. '\0' .. path
+  if state.tally.said[key] then
+    return true
+  end
+  state.tally.said[key] = true
+  return false
+end
+
 --- Applies one pushed mutation and reports the outcome in the panel.
 local function on_applied(change)
   local opts = config.get().edit
@@ -103,6 +123,9 @@ local function on_applied(change)
     if UNAPPLIED[status] then
       state.tally.conflicts = state.tally.conflicts + 1
     end
+  end
+  if said_already(status, change.path) then
+    return
   end
   local spec = STATUS_LINE[status] or { '  %s (%s): ' .. status, 'NvimeDim' }
   surface():interject(string.format(spec[1], relative_to_root(change.path), status), spec[2])
@@ -151,6 +174,18 @@ local function on_approval(request)
   surface():interject('  ? ' .. (request.summary or request.tool) .. ' — ' .. (request.reason or ''), 'NvimeActivity')
 end
 
+--- How an ask ended, in the panel. A denial nobody answered used to leave the
+--- `? …` line exactly as it was, so a pending ask and a timed-out one looked
+--- identical for the rest of the run.
+--- @param params table approvalId, allowed, cause
+local function on_approval_settled(params)
+  if params.allowed then
+    return
+  end
+  local why = { timeout = ' (timed out)', aborted = ' (run stopped)' }
+  surface():interject('  ' .. icons.get().fail .. ' denied' .. (why[params.cause] or ''), 'NvimeError')
+end
+
 local function on_event(name, params)
   if params.id ~= nil and params.id ~= state.request_id then
     return
@@ -171,6 +206,7 @@ local function on_event(name, params)
     on_approval(params)
   elseif name == 'edit.approval_settled' then
     approval.settle(params.approvalId)
+    on_approval_settled(params)
   elseif name == 'rpc.error' then
     show_error(params.error or { message = 'the sidecar rejected a frame' })
   end
@@ -295,7 +331,7 @@ function M.send(text)
   -- Consumed once: a follow-up rides the session's context, not the old scope.
   local scope = state.scope or { kind = 'project' }
   state.scope = nil
-  state.tally = { files = {}, hunks = 0, conflicts = 0 }
+  state.tally = { files = {}, hunks = 0, conflicts = 0, said = {} }
 
   surface():append('you', 'NvimeUser')
   surface():append_markdown(text, 'NvimeUserBody')

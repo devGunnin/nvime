@@ -10,6 +10,7 @@
 --- "2 open" would be worse than one that says it could not reach the sidecar.
 local agent = require('nvime.agent')
 local text = require('nvime.text')
+local modes = require('nvime.modes')
 
 local M = {}
 
@@ -267,6 +268,7 @@ function M.open()
   })
   vim.wo[view.win].cursorline = true
   vim.wo[view.win].winhighlight = 'CursorLine:NvimeCursorLine'
+  modes.normal()
   bind(view.buf)
 
   local facts = {

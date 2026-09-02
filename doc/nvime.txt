@@ -125,10 +125,15 @@ Global ~
 Prompt buffer ~
     <CR>            normal      send the prompt
     <C-s>           insert      send the prompt (<CR> still inserts a newline)
-    <C-n>           normal      start a new conversation / big change
-    <C-r>           normal      session / change picker
-    <C-c>           normal      stop the running turn
+    <C-n>           both        start a new conversation / big change
+    <C-r>           both        session / change picker
+    <C-t>           both        open the review threads (big panel)
+    <C-c>           both        stop the running turn
     ]o              normal      jump to the pending choice
+
+    Every control chord the prompt advertises is bound in insert mode too: the
+    box is left in insert after a send, which is exactly when they are wanted.
+    A literal key is never bound there — it would shadow your own typing.
 
 Session / change picker ~
     <CR>                        open the row under the cursor
@@ -152,7 +157,8 @@ Big-change panel ~
     <C-n>                       start a new big change
     <C-r>                       pick a big change
     <C-t>                       open the review threads
-    s                           steer the running build
+    s                           steer the running build (scrollback; typing
+                                 in the prompt while it builds steers it too)
     <C-c>                       stop the run
     ]o                          jump to the pending choice
     q                           close
@@ -185,7 +191,8 @@ Dashboard ~
 Answer box (paste-blocked) ~
     <CR>                        submit
     <C-s>            insert     submit
-    <Esc>, q                    cancel
+    <Esc>            both       cancel (one press, from insert too)
+    q                           cancel
     p, P, gp, gP, ]p, [p, ]P, [P, i_<C-r>   refused: type it
 
 ==============================================================================
@@ -486,7 +493,7 @@ big.cleanup_on_merge   boolean. Throw the build clone away once the change
                        lands. Off by default: the clone is the only place the
                        build's own history still exists.
 
-agent.node             string. The node binary.
+agent.node             string. The node binary. Must exist at setup().
 agent.claude           string or nil. Absolute path to `claude`; nil resolves
                        it from PATH.
 agent.request_timeout_ms

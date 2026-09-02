@@ -475,7 +475,12 @@ export class EditService {
     });
     const outcome = await this.#gate.request(approvalId, run.abort.signal);
     run.approvalIds.delete(approvalId);
-    this.#emit('edit.approval_settled', { id: run.requestId, approvalId, allowed: outcome.allowed });
+    this.#emit('edit.approval_settled', {
+      id: run.requestId,
+      approvalId,
+      allowed: outcome.allowed,
+      cause: outcome.cause,
+    });
     if (!outcome.allowed) return { behavior: 'deny', message: outcome.reason };
     this.#trackImminent(run, toolUseId, toolName, input);
     return { behavior: 'allow' };

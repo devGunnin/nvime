@@ -228,7 +228,8 @@ function M.open(opts)
   vim.bo[buf].bufhidden = 'wipe'
   vim.bo[buf].filetype = 'markdown'
 
-  local keys = opts.no_paste and ' typed only · <CR> send · <Esc> cancel ' or ' <CR> send · <Esc> cancel '
+  local keys = opts.no_paste and ' typed only · <CR> send (i_<C-s>) · <Esc> cancel '
+    or ' <CR> send (i_<C-s>) · <Esc> cancel '
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
     width = width,
@@ -265,8 +266,19 @@ function M.open(opts)
   end
   bind('n', '<CR>', submit)
   bind('i', '<C-s>', submit)
-  bind('n', 'q', close)
-  bind('n', '<Esc>', close)
+  --- <Esc> cancels from insert too — the float opens there, so an <Esc> bound
+  --- only in normal needs two presses while the footer promises one, and the
+  --- float looks unresponsive. Discarding text is never silent.
+  local function cancel()
+    local held = vim.trim(table.concat(lines_of(buf), '\n'))
+    close()
+    if held ~= '' then
+      vim.notify('nvime: cancelled — the draft was discarded', vim.log.levels.INFO)
+    end
+  end
+  bind('n', 'q', cancel)
+  bind('n', '<Esc>', cancel)
+  bind('i', '<Esc>', cancel)
 
   if opts.no_paste then
     local function refuse()

@@ -62,6 +62,7 @@ import {
   branchCandidates,
   branchNameFor,
   checkMerge,
+  commitMessageFor,
   expectedTree,
   holderMessage,
   landDiff,
@@ -792,7 +793,7 @@ export class BigService {
         baseBranch,
         baseCommit: base.commit,
         patchPath,
-        message: held.title,
+        message: commitMessageFor(held),
         indexFile,
       });
 

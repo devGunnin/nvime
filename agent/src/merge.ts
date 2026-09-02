@@ -1,6 +1,6 @@
 import { rmSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { BigSession } from './bigstore.js';
+import type { BigSession, BigSpec } from './bigstore.js';
 import { git, readHead, resolveRef, trackedChanges, type RepoHead } from './git.js';
 import { ProtocolError } from './protocol.js';
 import type { TriageCounts } from './triage.js';
@@ -57,7 +57,7 @@ export interface LandRequest {
   baseCommit: string;
   /** Absolute path of the verified diff on disk. */
   patchPath: string;
-  /** Commit message: the session title, and nothing about who wrote it. */
+  /** Commit message (`commitMessageFor`), and nothing about who wrote it. */
   message: string;
   /** Absolute path for the private index. Must be outside the repository. */
   indexFile: string;
@@ -185,6 +185,38 @@ export function branchNameFor(title: string, sessionId: string): string {
     .slice(0, 40)
     .replace(/-+$/g, '');
   return `nvime/big/${slug === '' ? sessionId : slug}`;
+}
+
+/** Git's soft subject limit; a longer one is cut on a word boundary. */
+const MAX_SUBJECT_CHARS = 72;
+
+/**
+ * The commit a change lands as. The subject is the spec's one-line goal —
+ * what the change was FOR — because the title is the reader's first prompt
+ * clipped to 80 characters, which ends mid-clause and is permanent once it is
+ * on their branch. The body keeps the provenance the subject dropped.
+ */
+export function commitMessageFor(session: { title: string; spec: BigSpec | null }): string {
+  const goal = oneLine(session.spec?.goal ?? '');
+  const title = oneLine(session.title);
+  const subject = clipSubject(goal === '' ? title : goal);
+  const approach = oneLine(session.spec?.approach ?? '');
+  const body = approach === '' ? title : approach;
+  if (subject === '' || body === '' || body === subject) return subject;
+  return `${subject}\n\n${body}`;
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/** Trailing punctuation off, cut on a word boundary rather than mid-word. */
+function clipSubject(text: string): string {
+  const trimmed = text.replace(/[.\s]+$/, '');
+  if (trimmed.length <= MAX_SUBJECT_CHARS) return trimmed;
+  const cut = trimmed.slice(0, MAX_SUBJECT_CHARS);
+  const lastSpace = cut.lastIndexOf(' ');
+  return (lastSpace > MAX_SUBJECT_CHARS / 2 ? cut.slice(0, lastSpace) : cut).replace(/[.,;:\s]+$/, '');
 }
 
 /**

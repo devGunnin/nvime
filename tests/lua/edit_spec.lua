@@ -205,6 +205,34 @@ describe('edit: live application', function()
     cleanup()
   end)
 
+  it('reports a conflicted file once per run, however many writes it takes', function()
+    local _, path = sandbox()
+    open_on(path)
+    edit.send('add a lock')
+    vim.cmd('wincmd p')
+    vim.cmd('edit ' .. vim.fn.fnameescape(path))
+    local buf = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_set_lines(buf, 1, 2, false, { '    mine' })
+
+    -- Three writes the agent makes to the same file in one run, each landing
+    -- on disk and each refused in the buffer for the same reason.
+    for _ = 1, 3 do
+      local handle = assert(io.open(path, 'wb'))
+      handle:write('def drain():\n    pass\n')
+      handle:close()
+      agent_edits(path, 'def drain():\n    pass\n', 'def drain():\n    lock()\n')
+    end
+    local said = 0
+    for _, line in ipairs(scrollback()) do
+      if line:find('(conflict) has unsaved edits', 1, true) ~= nil then
+        said = said + 1
+      end
+    end
+    eq(1, said, 'three writes to one dirty buffer are one fact, not three blocks')
+    eq(3, edit.state().tally.conflicts, 'and every one still reaches the run summary')
+    cleanup()
+  end)
+
   it('does not blame the user when a shell step, not they, changed the file', function()
     local _, path = sandbox()
     open_on(path)
@@ -312,6 +340,31 @@ describe('edit: approvals', function()
     fake.subscriber('edit.approval_settled', { id = id, approvalId = 'r1:t1', allowed = false })
     eq(nil, approval.current())
     eq(nil, sent('edit.answer'), 'and no answer is invented for it')
+    cleanup()
+  end)
+
+  it('marks an ask nobody answered as denied, not as still pending', function()
+    local _, path = sandbox()
+    open_on(path)
+    edit.send('go')
+    local id = edit.state().request_id
+    fake.subscriber(
+      'edit.approval',
+      { id = id, approvalId = 'r1:t1', tool = 'Bash', summary = 'running find .', reason = 'y' }
+    )
+    fake.subscriber('edit.approval_settled', { id = id, approvalId = 'r1:t1', allowed = false, cause = 'timeout' })
+    ok(has_line('denied (timed out)'), 'a pending ask and a timed-out one must not look identical')
+    cleanup()
+  end)
+
+  it('says nothing extra when the answer was an allow', function()
+    local _, path = sandbox()
+    open_on(path)
+    edit.send('go')
+    local id = edit.state().request_id
+    fake.subscriber('edit.approval', { id = id, approvalId = 'r1:t1', tool = 'Bash', summary = 'x', reason = 'y' })
+    fake.subscriber('edit.approval_settled', { id = id, approvalId = 'r1:t1', allowed = true, cause = 'answered' })
+    ok(not has_line('denied'), 'an allowed tool call is not reported as a denial')
     cleanup()
   end)
 

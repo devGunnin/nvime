@@ -9,8 +9,16 @@
  * holding a write nobody sanctioned.
  */
 
+/**
+ * How an ask ended. The editor renders a deny the user never saw differently
+ * from one they typed, so the cause travels with the outcome rather than
+ * being guessed at from `reason`'s wording.
+ */
+export type ApprovalCause = 'answered' | 'timeout' | 'aborted';
+
 export interface ApprovalOutcome {
   allowed: boolean;
+  cause: ApprovalCause;
   /** Why, in the words the editor shows when the answer was not a plain yes. */
   reason: string;
 }
@@ -53,14 +61,14 @@ export class ApprovalGate {
    */
   request(approvalId: string, signal?: AbortSignal): Promise<ApprovalOutcome> {
     if (this.#waiting.has(approvalId)) {
-      return Promise.resolve({ allowed: false, reason: `approval ${approvalId} is already pending` });
+      return Promise.resolve({ allowed: false, cause: 'aborted', reason: `approval ${approvalId} is already pending` });
     }
     if (signal?.aborted === true) {
-      return Promise.resolve({ allowed: false, reason: 'the run was cancelled' });
+      return Promise.resolve({ allowed: false, cause: 'aborted', reason: 'the run was cancelled' });
     }
     return new Promise<ApprovalOutcome>((resolve) => {
       const onAbort = (): void => {
-        this.#settle(approvalId, { allowed: false, reason: 'the run was cancelled' });
+        this.#settle(approvalId, { allowed: false, cause: 'aborted', reason: 'the run was cancelled' });
       };
       const settle = (outcome: ApprovalOutcome): void => {
         signal?.removeEventListener('abort', onAbort);
@@ -69,6 +77,7 @@ export class ApprovalGate {
       const timer = setTimeout(() => {
         this.#settle(approvalId, {
           allowed: false,
+          cause: 'timeout',
           reason: `no answer from the editor within ${this.#timeoutMs}ms`,
         });
       }, this.#timeoutMs);
@@ -81,6 +90,7 @@ export class ApprovalGate {
   answer(approvalId: string, allowed: boolean): boolean {
     return this.#settle(approvalId, {
       allowed,
+      cause: 'answered',
       reason: allowed ? 'allowed in the editor' : 'denied in the editor',
     });
   }
@@ -90,7 +100,7 @@ export class ApprovalGate {
    * cancelled run leaves none behind. False when nothing was waiting.
    */
   deny(approvalId: string, reason: string): boolean {
-    return this.#settle(approvalId, { allowed: false, reason });
+    return this.#settle(approvalId, { allowed: false, cause: 'aborted', reason });
   }
 
   #settle(approvalId: string, outcome: ApprovalOutcome): boolean {

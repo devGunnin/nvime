@@ -504,12 +504,13 @@ Off until `keymaps.enabled = true`.
 | `<leader>nB` | normal | open a big change |
 | `<CR>` | prompt, normal | send |
 | `<C-s>` | prompt, insert | send (so `<CR>` still inserts a newline) |
-| `<C-n>` / `<C-r>` | chat panel | new conversation · list past ones |
+| `<C-n>` / `<C-r>` / `<C-c>` | chat panel, both modes | new conversation · list past ones · stop the turn |
 | `<CR>` / `d` / `q` | session picker | open · delete (y/n confirm) · close |
 | `<C-c>` | panel | stop the running turn |
 | `]o` | chat/big panel | jump to the pending choice |
 | `q` | scrollback | close |
 | `y` / `n` / `<Esc>` | approval float | allow once / deny / deny |
+| `<Esc>` | compose float, both modes | cancel, on one press |
 | `<CR>` / `r` / `d` | changeset | open the file · revert the hunk · unified diff |
 | `<C-n>` / `<C-r>` / `<C-t>` | big panel | new change · resume one · open the review threads |
 | `]t` / `[t` | review | next · previous thread |
@@ -595,8 +596,9 @@ require('nvime').setup({
 })
 ```
 
-Every value is validated at `setup()`; a bad one raises with the path that was
-wrong rather than being silently coerced.
+Every key and every value is validated at `setup()`; an unknown key
+(`pannel`, `panel.widht`, `models.bigg`) and a bad value both raise with the
+path that was wrong rather than being silently ignored or coerced.
 
 ## Managed GitHub assurance
 
