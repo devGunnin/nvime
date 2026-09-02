@@ -101,11 +101,11 @@ describe('index: debug.set mirrors the sidecar into the plugin log', () => {
   });
 
   it('takes a level and a path, and records what it handled there', async () => {
-    const logPath = join(dir, 'nvime.log');
+    const logPath = join(dir, 'nvime-4242.log');
     const env = { NVIME_SESSION_STORE: join(dir, 'sessions.json') };
     const run = await runSidecar(
       [
-        `{"id":1,"method":"debug.set","params":{"level":"info","path":${JSON.stringify(logPath)}}}`,
+        `{"id":1,"method":"debug.set","params":{"level":"info","dir":${JSON.stringify(dir)},"pid":4242}}`,
         '{"id":2,"method":"ping","params":{}}',
         '{"id":3,"method":"shutdown","params":{}}',
       ],
@@ -117,16 +117,31 @@ describe('index: debug.set mirrors the sidecar into the plugin log', () => {
     assert.ok(body.includes('ping'), `the sidecar must record what it handled: ${body}`);
   });
 
+  // G5: `requireAbsolutePath` checks only `isAbsolute`, so any path the peer
+  // named was written to — `..` segments included. The sidecar builds the path
+  // itself now, from a directory and the editor's pid.
+  it('builds the path itself and refuses a directory it cannot trust', async () => {
+    const cases = [
+      `{"id":1,"method":"debug.set","params":{"level":"info","dir":${JSON.stringify(join(dir, 'logs', '..', 'elsewhere'))},"pid":11}}`,
+      `{"id":1,"method":"debug.set","params":{"level":"info","dir":"relative/logs","pid":11}}`,
+      `{"id":1,"method":"debug.set","params":{"level":"info","dir":${JSON.stringify(dir)},"pid":0}}`,
+    ];
+    for (const line of cases) {
+      const run = await runSidecar([line, '{"id":2,"method":"shutdown","params":{}}'], {}, DRAIN_TIMEOUT_MS + 5000);
+      assert.match(run.stdout, /"id":1,"ok":false/, `must be refused: ${line}\n${run.stdout}`);
+    }
+  });
+
   it('refuses a level it does not know rather than writing anywhere', async () => {
     const run = await runSidecar(
       [
-        `{"id":1,"method":"debug.set","params":{"level":"loud","path":${JSON.stringify(join(dir, 'x.log'))}}}`,
+        `{"id":1,"method":"debug.set","params":{"level":"loud","dir":${JSON.stringify(dir)},"pid":11}}`,
         '{"id":2,"method":"shutdown","params":{}}',
       ],
       { NVIME_SESSION_STORE: join(dir, 'sessions.json') },
       DRAIN_TIMEOUT_MS + 5000,
     );
     assert.match(run.stdout, /"id":1,"ok":false/, run.stdout);
-    assert.equal(existsSync(join(dir, 'x.log')), false);
+    assert.equal(existsSync(join(dir, 'nvime-11.log')), false);
   });
 });

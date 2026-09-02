@@ -11,13 +11,15 @@
   `setup()`, or `:Nvime debug on|off|toggle` for the session. At `info` it
   records one line per RPC request, reply and event, plus every state
   transition in big/edit/chat (display and phase changes, approvals, steers,
-  the merge precondition check); `debug` adds the streamed deltas. It goes to
-  `stdpath('log')/nvime.log`, append-only, rotated at 5 MB keeping one `.1`,
-  and the sidecar mirrors its own half into the same file through a new
-  `debug.set` so both ends of a stuck run read as one timeline. Your prompts
-  and your files' contents never reach it: a content-bearing field is recorded
-  as a size, a secret-named one as `<redacted>`, and every payload is clipped —
-  which is what makes the log safe to paste into a public issue.
+  the merge precondition check); `debug` adds the streamed deltas, on both
+  halves. It goes to `stdpath('log')/nvime-<pid>.log`, append-only, rotated at
+  5 MB keeping one `.1`, and the sidecar mirrors its own half into its editor's
+  file through a new `debug.set`, so both ends of a stuck run read as one
+  timeline — except a detached build's runner, which is a separate process and
+  does not mirror. What you typed does not reach it: content-bearing fields are
+  recorded as a size, secret-named ones as `<redacted>`, title-derived names (a
+  big change's `title`, `branch` or `slug`) as a size too, and every payload is
+  clipped — which is what makes the log safe to paste into a public issue.
 
   **`:Nvime log`** shows the last 200 lines in a readonly split parked at the
   newest line (`q` closes it); `:Nvime log clear` empties the file. `:Nvime
@@ -28,8 +30,8 @@
   Neovim, OS, node and claude versions, the configuration with secrets
   redacted, the doctor output, the last 200 log lines and — when a big change
   is selected — its session and the last 50 events from its build log, through
-  a new read-only `big.runlog`. Nothing blocks the editor: the version probes
-  run off the main thread with a 3 s deadline and print `(timed out)` rather
+  a new read-only `big.runlog`. Nothing blocks the editor: every probe it makes
+  runs off the main thread with a 3 s deadline and prints `(timed out)` rather
   than waiting, and the bundle never starts a second sidecar.
 
   **The bundle prints what it names, never what it is handed.** Every section

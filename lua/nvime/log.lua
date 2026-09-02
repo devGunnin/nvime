@@ -42,9 +42,12 @@ M.REDACTED = '<redacted>'
 --- the bundle built from it carries the git identity as well.
 local OWNER_ONLY = 384
 
---- `2026-01-01T00:00:00Z` — the prefix every line starts with, and the key the
---- multi-process merge sorts on.
-local TIMESTAMP_BYTES = 20
+--- `2026-01-01T00:00:00.000Z` — the prefix every line starts with, and the key
+--- the multi-process merge sorts on. Milliseconds are not decoration: the
+--- sidecar writes `toISOString()` into the SAME file, and a narrower key made
+--- `.` (0x2E) beat `Z` (0x5A), hoisting every agent line above every editor
+--- line that shared a second.
+local TIMESTAMP_BYTES = 24
 
 --- Another process's log is pruned once it is this old AND its pid is gone.
 local PRUNE_AFTER_SECONDS = 7 * 24 * 60 * 60
@@ -52,8 +55,12 @@ local PRUNE_AFTER_SECONDS = 7 * 24 * 60 * 60
 --- Fields that carry what the user wrote or what their files hold. Recorded as
 --- a size, never as text — a log that quotes a prompt cannot be pasted into an
 --- issue, which is the only reason this log exists.
+--- A big change's `branch` is `nvime/big/<slug of its title>`, and its title
+--- is the first 80 characters of what the user typed — so a branch name is
+--- the reader's own words, and so is any slug built from one.
 local CONTENT_KEYS = {
   answers = true,
+  branch = true,
   comment = true,
   content = true,
   context = true,
@@ -61,6 +68,7 @@ local CONTENT_KEYS = {
   message = true,
   prompt = true,
   rationale = true,
+  slug = true,
   spec = true,
   summary = true,
   text = true,
@@ -68,7 +76,10 @@ local CONTENT_KEYS = {
 }
 
 --- Substrings that make a field name secret wherever they appear in it.
-local SECRET_PARTS = { 'token', 'secret', 'password', 'passwd', 'authorization', 'credential' }
+--- `socket` is here because the runner's control socket plus its token are a
+--- live channel into a running build; the bundle's session section already
+--- refuses to print either.
+local SECRET_PARTS = { 'token', 'secret', 'password', 'passwd', 'authorization', 'credential', 'socket' }
 
 --- How deep `redact` walks before it stops describing and starts eliding.
 local MAX_DEPTH = 8
@@ -80,9 +91,11 @@ local state = {
   path = nil,
   handle = nil,
   bytes = 0,
-  --- The path whose open failed, or nil. Keeps "the user asked for off" apart
-  --- from "the log could not be written", which the doctor row must not blur.
+  --- The path the log gave up on, and why, or nil. Keeps "the user asked for
+  --- off" apart from "the log could not be written", which the doctor must not
+  --- blur — including when the failure happens mid-session.
   broken = nil,
+  broken_reason = nil,
   --- Set once a write path gave up, so it complains once and then stays quiet.
   said = false,
 }
@@ -208,6 +221,7 @@ end
 --- @param reason string
 local function give_up(reason)
   state.level = 'off'
+  state.broken, state.broken_reason = M.path(), reason
   if state.handle ~= nil then
     state.handle:close()
     state.handle = nil
@@ -217,6 +231,9 @@ local function give_up(reason)
   end
   state.said = true
   vim.schedule(function()
+    -- The sidecar is still appending to a file this half has abandoned; half a
+    -- timeline is worse than none, and `set_debug_level` is main-loop only.
+    require('nvime.agent').set_debug_level('off')
     vim.notify('nvime: the debug log stopped — ' .. reason, vim.log.levels.WARN)
   end)
 end
@@ -241,7 +258,9 @@ local function open_handle(path)
 end
 
 --- @param pid integer
---- @return boolean whether a process with that id is still running
+--- @return boolean whether this user still has an nvime running under that id.
+--- EPERM (a live process now owned by somebody else) counts as gone, which is
+--- the answer this wants: a recycled pid is not the nvime that wrote the log.
 local function pid_alive(pid)
   local signalled, result = pcall(vim.uv.kill, pid, 0)
   return signalled and result ~= nil
@@ -294,6 +313,14 @@ local function rotate()
   return true
 end
 
+--- The instant, in the sidecar's exact format. `vim.uv.gettimeofday` and
+--- `os.date` are both safe in a fast event context; `vim.fn.strftime` is not.
+--- @return string 24 bytes, `2026-01-01T00:00:00.000Z`
+local function stamp()
+  local seconds, micros = vim.uv.gettimeofday()
+  return string.format('%s.%03dZ', os.date('!%Y-%m-%dT%H:%M:%S', seconds), math.floor((micros or 0) / 1000))
+end
+
 --- Writes one already-formatted line. The LEVEL IS NOT CHECKED HERE — every
 --- caller checks it before building the line, which is what makes `off` free.
 --- @param line string one formatted line, without its newline
@@ -302,7 +329,7 @@ local function emit(line)
     give_up('its file is not open')
     return
   end
-  local record = os.date('!%Y-%m-%dT%H:%M:%SZ') .. ' ' .. line .. '\n'
+  local record = stamp() .. ' ' .. line .. '\n'
   if state.bytes + #record > M.MAX_BYTES and not rotate() then
     return
   end
@@ -322,7 +349,7 @@ function M.set_level(level, path)
     error('nvime: debug.level must be one of: ' .. table.concat(M.LEVELS, ', '), 0)
   end
   M.close()
-  state.broken, state.said = nil, false
+  state.broken, state.broken_reason, state.said = nil, nil, false
   if path ~= nil then
     assert(type(path) == 'string' and path ~= '', 'log.set_level needs a real path')
     state.path = path
@@ -338,6 +365,7 @@ function M.set_level(level, path)
   end
   -- Turning the log on is a main-loop action, so this one is said directly.
   state.level, state.broken = 'off', M.path()
+  state.broken_reason = 'the file could not be opened (' .. tostring(err) .. ')'
   vim.notify(string.format('nvime: could not open the debug log %s (%s)', M.path(), err), vim.log.levels.WARN)
 end
 
@@ -363,6 +391,7 @@ function M.status()
     path = M.path(),
     size = stat ~= nil and stat.size or 0,
     broken = state.broken,
+    broken_reason = state.broken_reason,
   }
 end
 
@@ -435,11 +464,19 @@ function M.files()
   local path = M.path()
   local dir = vim.fs.dirname(path)
   local seen, out = {}, {}
+  --- Dedup by inode, not by name: another editor rotating between the scan and
+  --- the read makes one file readable as both `nvime-X.log` and `.log.1`.
   local function add(candidate)
-    if not seen[candidate] and vim.uv.fs_stat(candidate) ~= nil then
-      seen[candidate] = true
-      out[#out + 1] = candidate
+    local stat = vim.uv.fs_stat(candidate)
+    if stat == nil then
+      return
     end
+    local identity = string.format('%s:%s', tostring(stat.dev), tostring(stat.ino))
+    if seen[identity] then
+      return
+    end
+    seen[identity] = true
+    out[#out + 1] = candidate
   end
   local names = {}
   local listed, iter = pcall(vim.fs.dir, dir)
@@ -544,6 +581,7 @@ function M.clear()
     local opened, err = open_handle(path)
     if not opened then
       state.level, state.broken = 'off', path
+      state.broken_reason = 'the file could not be opened (' .. tostring(err) .. ')'
       vim.notify(string.format('nvime: could not reopen %s (%s)', path, err), vim.log.levels.WARN)
     end
   end

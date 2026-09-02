@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join, normalize } from 'node:path';
 import { promisify } from 'node:util';
 import { deleteSession, getSessionMessages, listSessions, query } from '@anthropic-ai/claude-agent-sdk';
 import { BigService } from './big.js';
@@ -44,6 +44,21 @@ const run = promisify(execFile);
  */
 let unflushed = 0;
 
+/**
+ * One pushed event, mirrored by SIZE at `debug` before it goes on the wire.
+ * The plugin logs what it receives; this says what the sidecar sent, which is
+ * the difference that matters when a stream is stuck.
+ */
+function emitter(debugLog: DebugLog): (event: string, params: Record<string, unknown>) => void {
+  return (event, params) => {
+    if (debugLog.enabled('debug')) {
+      const text = typeof params.text === 'string' ? params.text : '';
+      debugLog.detail(event.endsWith('.delta') ? `sent ${event} ${text.length} bytes` : `sent ${event}`);
+    }
+    write({ event, params });
+  };
+}
+
 function write(frame: OutgoingFrame): void {
   const line = encodeFrame(frame);
   unflushed += 1;
@@ -53,6 +68,8 @@ function write(frame: OutgoingFrame): void {
 }
 
 function main(): void {
+  const debugLog = new DebugLog();
+  const emit = emitter(debugLog);
   const claudePath = resolveClaudeExecutable(process.env);
   const store = new SessionStore(process.env.NVIME_SESSION_STORE ?? defaultStorePath(process.env));
   const chat =
@@ -63,7 +80,7 @@ function main(): void {
           store,
           claudePath,
           env: process.env,
-          emit: (event, params) => write({ event, params }),
+          emit: emit,
         });
 
   const edit =
@@ -73,7 +90,7 @@ function main(): void {
           sdk: { query },
           claudePath,
           env: process.env,
-          emit: (event, params) => write({ event, params }),
+          emit: emit,
           approvalTimeoutMs: readApprovalTimeout(process.env.NVIME_APPROVAL_TIMEOUT_MS),
         });
 
@@ -86,7 +103,7 @@ function main(): void {
           store: bigStore,
           claudePath,
           env: process.env,
-          emit: (event, params) => write({ event, params }),
+          emit: emit,
         });
 
   const detached =
@@ -96,12 +113,10 @@ function main(): void {
           big,
           store: bigStore,
           env: process.env,
-          emit: (event, params) => write({ event, params }),
+          emit: emit,
         });
 
   const organization = createCertificationService(process.env);
-
-  const debugLog = new DebugLog();
   const dispatcher = new Dispatcher(write, debugLog);
   registerHandlers(dispatcher, { chat, edit, big, detached, organization }, claudePath, store.path);
   registerDiagnosticHandlers(dispatcher, debugLog, bigStore);
@@ -118,7 +133,7 @@ function registerDiagnosticHandlers(dispatcher: Dispatcher, debugLog: DebugLog, 
     if (!isDebugLevel(level)) {
       throw new ProtocolError('bad_request', 'params.level must be off, info or debug');
     }
-    debugLog.setLevel(level, level === 'off' ? null : requireAbsolutePath(params, 'path'));
+    debugLog.setLevel(level, level === 'off' ? null : logPathFrom(params));
     return { level, path: debugLog.path };
   });
 
@@ -511,6 +526,24 @@ function registerBigHandlers(
     if (detached !== null && (await detached.cancel(target))) return { cancelled: true };
     return { cancelled: present(big).cancel(target) };
   });
+}
+
+/**
+ * The mirror's file, built HERE from a directory and the editor's pid rather
+ * than taken as a path. The plugin names one file per process; accepting an
+ * arbitrary absolute path made this the only place the sidecar wrote wherever
+ * a peer pointed it, `..` segments included.
+ */
+function logPathFrom(params: Record<string, unknown>): string {
+  const dir = requireAbsolutePath(params, 'dir');
+  if (normalize(dir) !== dir) {
+    throw new ProtocolError('bad_request', 'params.dir must be a normalized absolute path');
+  }
+  const pid = params.pid;
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1) {
+    throw new ProtocolError('bad_request', 'params.pid must be the editor process id');
+  }
+  return join(dir, `nvime-${pid}.log`);
 }
 
 /** The `after` cursor an attach resumes from. 0 means "replay everything". */

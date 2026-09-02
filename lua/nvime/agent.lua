@@ -164,7 +164,10 @@ function M.set_debug_level(level)
   if state.client == nil or not state.client:is_running() then
     return
   end
-  state.client:request('debug.set', { level = level, path = log.path() }, function(err)
+  -- A directory and this process's id, never a path: the sidecar builds the
+  -- file name itself so it can refuse anything but its own.
+  local params = { level = level, dir = vim.fs.dirname(log.path()), pid = vim.uv.os_getpid() }
+  state.client:request('debug.set', params, function(err)
     if err ~= nil then
       vim.notify('nvime: the sidecar refused the debug level: ' .. tostring(err.message), vim.log.levels.WARN)
     end

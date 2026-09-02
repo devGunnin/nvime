@@ -91,7 +91,9 @@ describe('bundle: the session section is an allow-list', function()
 
   it('prints exactly the fields a bug report needs, and no others', function()
     local text = rendered()
-    for _, needle in ipairs({ 'e3a1b2c4', 'building', 'aa9fb774', '/home/me/.local/share/nvime/big/wt' }) do
+    -- The directory, not the clone path: the parent already says which session
+    -- this is, and the full path carries a name derived from the repo.
+    for _, needle in ipairs({ 'e3a1b2c4', 'building', 'aa9fb774', '/home/me/.local/share/nvime/big' }) do
       ok(text:find(needle, 1, true) ~= nil, 'the bundle must still report ' .. needle)
     end
     ok(text:find('pid 4242', 1, true) ~= nil, 'the runner is named by pid and liveness, never by record')
@@ -228,6 +230,49 @@ describe('bundle: gathering never blocks the editor on a hung binary', function(
       'the probe must answer well inside the old 10 s wait'
     )
     ok(vim.uv.now() - started < 6000, 'it took ' .. (vim.uv.now() - started) .. 'ms')
+  end)
+
+  -- G2 HIGH: the round-1 test above drove `probe_versions` directly and never
+  -- touched `gather()`, which is where the blocking half lived: `gather` ran
+  -- `diagnostics.run` synchronously, and `SystemObj:wait` answers nil on a
+  -- missed deadline — so the editor froze for 6 s and then the command threw,
+  -- writing no bundle at all, in exactly the hung-binary case it exists for.
+  it('writes a bundle without blocking, even when node never answers', function()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local shim = dir .. '/node'
+    local handle = assert(io.open(shim, 'w'))
+    handle:write('#!/bin/sh\nsleep 45\necho v22.0.0\n')
+    handle:close()
+    vim.uv.fs_chmod(shim, 493)
+
+    local config = require('nvime.config')
+    local written, done = nil, false
+    local finished, err = pcall(function()
+      config.setup({ agent = { node = shim, claude = shim } })
+      local started = vim.uv.hrtime()
+      require('nvime.bundle').write(function(path)
+        written, done = path, true
+      end)
+      local blocked_ms = (vim.uv.hrtime() - started) / 1000000
+      ok(blocked_ms < 100, 'the call itself must not block the editor: ' .. blocked_ms .. 'ms')
+      ok(
+        vim.wait(9000, function()
+          return done
+        end, 20),
+        'the bundle must be written despite the hung binaries'
+      )
+    end)
+    config.setup()
+    if not finished then
+      error(err, 0)
+    end
+    ok(written ~= nil, 'a bundle is written even when every probe times out')
+    local file = assert(io.open(written, 'r'))
+    local body = file:read('*a')
+    file:close()
+    os.remove(written)
+    ok(body:find('(timed out)', 1, true) ~= nil, 'a probe that missed its deadline is named, not blank')
   end)
 
   it('does not spawn a second sidecar when the bundle asks for the checks', function()

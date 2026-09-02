@@ -226,7 +226,11 @@ export class DetachedService {
    */
   #announceView(requestId: number, params: { root: string; id: string }): void {
     try {
-      this.#emit('big.view', { id: requestId, session: this.#big.open(params.root, params.id) });
+      const session = this.#big.open(params.root, params.id);
+      // The runner record is the control socket AND its token; the editor only
+      // needs to know which process it is and whether it is still there.
+      const runner = session.runner === null ? null : { pid: session.runner.pid, alive: session.runnerLive };
+      this.#emit('big.view', { id: requestId, session: { ...session, runner } });
     } catch (cause) {
       process.stderr.write(`nvime: could not report the running build's view: ${messageOf(cause)}\n`);
     }

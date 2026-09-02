@@ -926,7 +926,10 @@ local function begin_activity(label)
     session_id = session_id,
     started_ms = vim.uv.now(),
   }
-  require('nvime.log').state_change('review', 'started', { op = label, session = session_id })
+  local log = require('nvime.log')
+  if log.enabled('info') then
+    log.state_change('review', 'started', { op = label, session = session_id })
+  end
   arm_timer(activity, false)
 end
 
@@ -962,10 +965,10 @@ local function end_activity()
   if live == nil then
     return
   end
-  require('nvime.log').state_change('review', 'settled', {
-    op = live.label,
-    ms = vim.uv.now() - live.started_ms,
-  })
+  local log = require('nvime.log')
+  if log.enabled('info') then
+    log.state_change('review', 'settled', { op = live.label, ms = vim.uv.now() - live.started_ms })
+  end
   if live.timer ~= nil then
     live.timer:stop()
     live.timer:close()

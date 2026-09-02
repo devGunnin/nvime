@@ -695,12 +695,16 @@ It goes to `stdpath('log')/nvime-<pid>.log` — one file per process, because tw
 editors sharing one file rotate over each other's history silently. Append-only,
 rotated at 5 MB keeping one `.1`, created 0600, and pruned once a week-old file
 belongs to an editor that is gone. The sidecar mirrors its own half into its
-editor's file, so both ends of a stuck run read as one timeline.
+editor's file, so both ends of a stuck run read as one timeline — with one
+exception: a detached build's runner is a separate process and does not mirror.
 
-Your prompts and your files' contents never reach it. A content-bearing field
-is recorded as a size (`<412 chars>`), a secret-named one as `<redacted>`, and
-every payload is clipped at a character boundary. That is what makes the log
-safe to paste in public.
+What you typed does not reach it. A content-bearing field is recorded as a size
+(`<412 chars>`), a secret-named one as `<redacted>`, and a title-derived name —
+a big change's `title`, its `branch`, any `slug` of one — as a size too, since
+a branch is `nvime/big/<slug of the title>` and a title is the first 80
+characters of your prompt. Every payload is clipped at a character boundary.
+That is what makes the log safe to paste in public, and it has to hold at the
+log line: `:Nvime bundle` attaches the tail verbatim.
 
 **`:Nvime log`** opens the last 200 lines in a readonly split parked at the
 newest line; `q` closes it. Every process's log is merged by timestamp, the
@@ -712,8 +716,9 @@ and copies its path to the `+` and `"` registers: nvime version and git sha,
 Neovim, OS, node and claude versions, your config with secrets redacted, the
 doctor output, the last 200 log lines, and — when a big change is selected —
 its session and the last 50 events from its build log. Nothing blocks the
-editor: the version probes run off the main thread with a 3 s deadline and
-print `(timed out)` rather than waiting, and no second sidecar is started.
+editor: every probe it makes — node, git, the claude version — runs off the
+main thread with a 3 s deadline and prints `(timed out)` rather than waiting,
+and no second sidecar is started.
 
 **The bundle prints what it names, never what it is handed.** Every section is
 an allow-list. The session the sidecar sends carries the runner's control token

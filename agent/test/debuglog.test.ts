@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { DebugLog, MAX_BYTES, MAX_PAYLOAD_CHARS, REDACTED, isSecretKey, renderParams } from '../src/debuglog.js';
+import { ProtocolError } from '../src/protocol.js';
 
 function scratch(): string {
   return join(mkdtempSync(join(tmpdir(), 'nvime-debuglog-')), 'nvime.log');
@@ -25,11 +26,14 @@ describe('DebugLog level', () => {
     log.setLevel('info', path);
     log.request('big.merge', 7, { root: '/repo' });
     log.reply('big.merge', 7, 1234);
+    // The first line is `setLevel`'s trial append, which is how a mirror that
+    // cannot write is refused rather than latched silently.
     const written = readFileSync(path, 'utf8').trim().split('\n');
-    assert.equal(written.length, 2);
-    assert.ok(written[0]?.includes('big.merge'), written.join('\n'));
-    assert.ok(written[1]?.includes('1234ms'), written.join('\n'));
-    assert.ok(written[1]?.includes('ok'), written.join('\n'));
+    assert.equal(written.length, 3, written.join('\n'));
+    assert.ok(written[0]?.includes('mirror on at info'), written.join('\n'));
+    assert.ok(written[1]?.includes('big.merge'), written.join('\n'));
+    assert.ok(written[2]?.includes('1234ms'), written.join('\n'));
+    assert.ok(written[2]?.includes('ok'), written.join('\n'));
   });
 
   it('names the failure on a reply that carried one', () => {
@@ -157,5 +161,65 @@ describe('DebugLog round-1 regressions', () => {
     log.setLevel('info', path);
     log.note('one');
     assert.equal(statSync(path).mode & 0o777, 0o600, 'the shared log must be owner-only');
+  });
+});
+
+describe('DebugLog round-2 regressions', () => {
+  // G1: a big change's branch is `nvime/big/<slug of the title>`, and the
+  // title is the first 80 characters of what the user typed. Recorded by size
+  // on both halves, so the wire may carry it as its own named field.
+  it('treats title-derived names as content on this half too', () => {
+    for (const key of ['branch', 'title', 'slug']) {
+      const rendered = renderParams({ [key]: 'nvime/big/fix-the-hunter2-staging-password' });
+      assert.ok(!rendered.includes('hunter2'), `${key} reached the log: ${rendered}`);
+      assert.ok(rendered.includes('chars>'), `${key} should be recorded as a size: ${rendered}`);
+    }
+  });
+
+  // G7: the runner's socket and its token together are a live control channel.
+  it('redacts the runner control socket', () => {
+    const rendered = renderParams({ runner: { pid: 4242, socket: '/run/user/1000/nvime/SECRET.sock' } });
+    assert.ok(!rendered.includes('SECRET.sock'), rendered);
+    assert.ok(rendered.includes(REDACTED), rendered);
+    assert.ok(rendered.includes('4242'), 'the pid is the diagnostic signal and is kept');
+  });
+
+  // G6: a failed mirror latched and wrote one line to stderr, which the plugin
+  // only ever sees after the sidecar dies. `debug.set` had already said ok.
+  it('refuses a level it cannot actually write, instead of answering ok', () => {
+    const log = new DebugLog();
+    assert.throws(
+      () => log.setLevel('info', join(mkdtempSync(join(tmpdir(), 'nvime-dl-')), 'gone', 'nvime-1.log')),
+      (error: unknown) => error instanceof ProtocolError,
+    );
+    assert.equal(log.level, 'off', 'a mirror that cannot write is off, not silently broken');
+  });
+
+  // G5: `#append` chmodded only when it had created the file, so pointing the
+  // mirror at a pre-existing 0644 file left it world-readable.
+  it('tightens a pre-existing file to 0600 on its first append', () => {
+    const path = scratch();
+    writeFileSync(path, 'already here\n');
+    chmodSync(path, 0o644);
+    const log = new DebugLog();
+    log.setLevel('info', path);
+    log.note('one');
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+  });
+
+  // G8: `detail()` had no caller, so `:Nvime debug debug` cost a round trip
+  // and changed nothing on this half.
+  it('mirrors a streamed delta by size at debug level, and not at info', () => {
+    const quiet = scratch();
+    const atInfo = new DebugLog();
+    atInfo.setLevel('info', quiet);
+    atInfo.detail('big.delta 41 bytes');
+    assert.ok(!readFileSync(quiet, 'utf8').includes('big.delta'), 'info keeps the per-token detail out');
+
+    const loud = scratch();
+    const atDebug = new DebugLog();
+    atDebug.setLevel('debug', loud);
+    atDebug.detail('big.delta 41 bytes');
+    assert.ok(readFileSync(loud, 'utf8').includes('big.delta 41 bytes'), 'debug takes it');
   });
 });

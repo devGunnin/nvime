@@ -71,7 +71,7 @@ describe('nvime.bundle rendering', function()
 
   it('carries the big-change session view when there is one', function()
     local text = rendered()
-    for _, needle in ipairs({ 'reviewing', 'aaa', 'bbb', 'steerable', '/tmp/wt' }) do
+    for _, needle in ipairs({ 'reviewing', 'aaa', 'bbb', 'steerable', '/tmp' }) do
       ok(text:find(needle, 1, true) ~= nil, 'the session view must report ' .. needle)
     end
   end)

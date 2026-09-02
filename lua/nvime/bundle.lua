@@ -124,7 +124,7 @@ local function session_lines(session)
     '- steerable: ' .. scalar(session.steerable),
     '- base sha: ' .. scalar(base.commit) .. ' (branch ' .. scalar(base.branch) .. ')',
     '- head sha: ' .. scalar(merge.commit),
-    '- worktree: ' .. scalar(worktree.path),
+    '- worktree dir: ' .. scalar(worktree.path ~= nil and vim.fs.dirname(worktree.path) or nil),
     runner_line(session.runner),
     '- created: ' .. moment(session.createdAt),
     '- updated: ' .. moment(session.updatedAt),
@@ -297,33 +297,44 @@ function M.probe_versions(claude, root, cb)
   diagnostics.probe_async({ claude, '--version' }, M.PROBE_TIMEOUT_MS, answer('claude'))
 end
 
---- Everything the bundle needs, gathered without a second sidecar and without
---- a second `node` probe: `diagnostics.run` already pays for those, and its
---- own probes are bounded down to the bundle's deadline.
+--- Everything the bundle needs, with NOTHING on the main thread: the checks
+--- and the two extra version probes run at the same time, each bounded, and
+--- `cb` fires when the slower of the two groups has answered. No second
+--- sidecar and no second `node` probe — `diagnostics.run_async` pays for that
+--- one and hands back what it found.
 --- @param cb fun(parts: table)
 local function gather(cb)
   local config = require('nvime.config').get()
   local agent = require('nvime.agent')
   local uname = vim.uv.os_uname()
-  local entries, facts = diagnostics.run(nil, {
-    skip_sidecar = true,
-    probe_timeout_ms = M.PROBE_TIMEOUT_MS,
-  })
-  local status = log.status()
-  status.tail = log.tail(M.LOG_LINES)
-  M.probe_versions(config.agent.claude or 'claude', agent.plugin_root(), function(probed)
+  local checks, probed, outstanding = nil, nil, 2
+  local function ready()
+    outstanding = outstanding - 1
+    if outstanding > 0 then
+      return
+    end
+    local status = log.status()
+    status.tail = log.tail(M.LOG_LINES)
     cb({
       environment = {
         { label = 'nvime', value = string.format('%s (%s)', require('nvime.version'), probed.sha) },
         { label = 'neovim', value = tostring(vim.version()) },
         { label = 'os', value = string.format('%s %s %s', uname.sysname, uname.release, uname.machine) },
-        { label = 'node', value = facts.node or '(not found)' },
+        { label = 'node', value = checks.facts.node or '(timed out)' },
         { label = 'claude', value = probed.claude },
       },
       config = config,
-      doctor = entries,
+      doctor = checks.entries,
       log = status,
     })
+  end
+  diagnostics.run_async(nil, M.PROBE_TIMEOUT_MS, function(entries, facts)
+    checks = { entries = entries, facts = facts }
+    ready()
+  end)
+  M.probe_versions(config.agent.claude or 'claude', agent.plugin_root(), function(facts)
+    probed = facts
+    ready()
   end)
 end
 

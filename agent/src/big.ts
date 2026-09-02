@@ -794,7 +794,10 @@ export class BigService {
         tree: await expectedTree({ repoRoot: held.repoRoot, baseCommit: base.commit, patchPath, indexFile }),
       };
       this.#store.save(held);
-      this.#emit('big.state', { id: requestId, session: held.id, state: 'reviewing', note: `landing on ${branch}` });
+      // The branch is its OWN field, never inside the note: it is a slug of the
+      // title, which is the first 80 chars of what the user typed, and the
+      // plugin's debug log redacts by field name.
+      this.#emit('big.state', { id: requestId, session: held.id, state: 'reviewing', note: 'landing', branch });
       const landed = await landDiff({
         repoRoot: held.repoRoot,
         branch,

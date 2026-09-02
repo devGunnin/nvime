@@ -1,4 +1,4 @@
-import { appendFileSync, chmodSync, existsSync, statSync } from 'node:fs';
+import { appendFileSync, chmodSync, statSync } from 'node:fs';
 import { ProtocolError } from './protocol.js';
 
 /**
@@ -38,8 +38,12 @@ export const MAX_PAYLOAD_CHARS = 200;
  */
 export const MAX_BYTES = 5 * 1024 * 1024;
 
-/** Substrings that make a field name secret wherever they appear in it. */
-const SECRET_PARTS = ['token', 'secret', 'password', 'passwd', 'authorization', 'credential'];
+/**
+ * Substrings that make a field name secret wherever they appear in it.
+ * `socket` is here because the runner's control socket plus its token are a
+ * live channel into a running build.
+ */
+const SECRET_PARTS = ['token', 'secret', 'password', 'passwd', 'authorization', 'credential', 'socket'];
 
 /**
  * Fields carrying what the user wrote or what their files hold. Recorded as a
@@ -47,6 +51,10 @@ const SECRET_PARTS = ['token', 'secret', 'password', 'passwd', 'authorization', 
  */
 const CONTENT_KEYS = new Set([
   'answers',
+  // A big change's branch is `nvime/big/<slug of its title>`, and its title is
+  // the first 80 characters of what the user typed.
+  'branch',
+  'slug',
   'comment',
   'content',
   'context',
@@ -132,6 +140,8 @@ export class DebugLog {
   #broken = false;
   /** Set once the cap notice has been written, so it is written only once. */
   #atCap = false;
+  /** Set once this level's file has been chmodded, so it is done once. */
+  #tightened = false;
 
   get level(): DebugLevel {
     return this.#level;
@@ -157,7 +167,19 @@ export class DebugLog {
     this.#path = path;
     this.#broken = false;
     this.#atCap = false;
+    this.#tightened = false;
     this.#bytes = level === 'off' || path === null ? 0 : sizeOf(path);
+    if (level === 'off' || path === null) return;
+    // One trial line, so a mirror that cannot write is a refusal the plugin
+    // sees now. Latching on stderr instead left `debug.set` answering ok while
+    // half the "one timeline" quietly went missing. Deliberately past the cap
+    // check: a full log must read as full, never as broken.
+    this.#append(path, `${new Date().toISOString()} agent note  mirror on at ${level}\n`);
+    if (this.#broken) {
+      this.#level = 'off';
+      this.#path = null;
+      throw new ProtocolError('agent_error', `the debug log ${path} could not be written`);
+    }
   }
 
   /** Whether a line at `level` would be written. Checked BEFORE the caller
@@ -226,11 +248,14 @@ export class DebugLog {
 
   #append(path: string, record: string): void {
     try {
-      const fresh = !existsSync(path);
       appendFileSync(path, record, 'utf8');
-      // Owner-only, before anything but the first line: the shared log carries
-      // project paths and session ids.
-      if (fresh) chmodSync(path, 0o600);
+      // Owner-only on the first append of a session, whether this half created
+      // the file or found it: a file left 0644 by anything else is still ours
+      // to tighten, and the log carries project paths and session ids.
+      if (!this.#tightened) {
+        chmodSync(path, 0o600);
+        this.#tightened = true;
+      }
       this.#bytes += record.length;
     } catch (cause) {
       this.#broken = true;
