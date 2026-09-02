@@ -86,6 +86,17 @@ local function win_valid(win)
   return win ~= nil and vim.api.nvim_win_is_valid(win)
 end
 
+local function buf_valid(buf)
+  return buf ~= nil and vim.api.nvim_buf_is_valid(buf)
+end
+
+--- The panel's live windows, as a dense list. `tbl_filter` iterates with
+--- `pairs`, so a prompt-less panel's nil is skipped rather than truncating
+--- the list the way `ipairs` over the literal would.
+local function live_wins(self)
+  return vim.tbl_filter(win_valid, { self.win, self.prompt_win })
+end
+
 --- How far from the last line still counts as "reading the tail".
 local FOLLOW_SLACK = 2
 
@@ -300,11 +311,8 @@ local function ensure_windows(self)
     return
   end
   local stale = nil
-  -- `self.win` first: `ipairs` stops at the first hole, and a prompt-less
-  -- panel's `prompt_win` is nil — leading with it would skip `self.win`
-  -- entirely rather than just skipping the absent prompt window.
-  for _, win in ipairs({ self.win, self.prompt_win }) do
-    if win_valid(win) and not pcall(vim.api.nvim_win_close, win, true) then
+  for _, win in ipairs(live_wins(self)) do
+    if not pcall(vim.api.nvim_win_close, win, true) then
       stale = win
     end
   end
@@ -476,19 +484,11 @@ function Panel:close()
     self.on_close()
   end
   self:stop_activity()
-  -- `self.win`/`self.buf` first in both loops below: neither is ever nil,
-  -- while `prompt_win`/`prompt_buf` are nil on a prompt-less panel — and
-  -- `ipairs` stops at the first hole, so leading with the possibly-nil one
-  -- would skip the guaranteed one right behind it, leaking it forever.
-  for _, win in ipairs({ self.win, self.prompt_win }) do
-    if win_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
-    end
+  for _, win in ipairs(live_wins(self)) do
+    pcall(vim.api.nvim_win_close, win, true)
   end
-  for _, buf in ipairs({ self.buf, self.prompt_buf }) do
-    if buf ~= nil and vim.api.nvim_buf_is_valid(buf) then
-      pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    end
+  for _, buf in ipairs(vim.tbl_filter(buf_valid, { self.buf, self.prompt_buf })) do
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
   end
 end
 
