@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## 3.1.0 - 2026-09-02
+
+- Review threads open the clone's real, read-only file with diff annotations,
+  Treesitter, diagnostics, and LSP navigation; unverifiable drift falls back to
+  the unified diff.
+- Chat and Big Change start fresh by default while explicit resume and guarded
+  session deletion keep history under the developer's control.
+- Agent questions render as selectable single- or multiple-choice blocks, and
+  every panel uses one theme-derived text and surface system in light and dark.
+- Every surface now enters the input mode its advertised keys require. Compose
+  cancellation preserves the draft, and completion-sensitive keys defer to
+  Neovim instead of stealing native editing behavior.
+- A running detached build can be steered from its prompt when its live control
+  channel says it is steerable; refused input is returned instead of discarded.
+- Merge subjects use the approved specification goal, configuration rejects
+  unknown keys by exact path, and edit approvals report timeout and duplicate
+  outcomes precisely.
+
+## 3.0.0 - 2026-09-02
+
+- Introduced managed organization policy, native Ed25519 workstation identity,
+  signed exact-commit evidence, and automatic post-merge certification.
+- Made fresh sessions the default, added theme-derived speaker and gate bands,
+  and kept long rebase and merge work visible and recoverable.
+- Added detached durable Big Change builds, authenticated steering, immutable
+  review gates, and explicit conflict-safe merge behavior.
+
+## Detailed 3.x changes
+
 - **Input modes are fundamentals now.** Every surface driven by normal-mode
   keys — panels without a prompt, pickers, the dashboard, the doctor, the
   enrollment and explain floats, the confirm and approval floats, the review
