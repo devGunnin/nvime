@@ -75,9 +75,19 @@ if big.state().request_id == nil then
 end
 lib.say('SUBMITTED request=' .. tostring(big.state().request_id))
 
--- 2. i_<C-c> stops it — and the proof is the sidecar's own answer. `M.cancel`
--- says "it had already finished" when there was nothing live to stop, so a
--- cancel that hit a real, running turn is one that never says it.
+-- 2. i_<C-c> stops it. Three things have to hold together, because a turn that
+-- simply RAN TO COMPLETION satisfies any one of them on its own — and a
+-- completed turn clears `request_id` exactly like a cancelled one does:
+--   the turn is still live when the key is pressed,
+--   it settles within seconds (a cancel is near-instant, an intake is not),
+--   and the sidecar's own record shows no spec, so the intake never finished.
+local SETTLE_MS = 4000
+local CANCEL_MS = 8000
+
+--- What `M.cancel` says when there was nothing live to stop. Either message
+--- means the key proved nothing.
+local NOTHING_TO_STOP = { 'already finished', 'no big change is running' }
+
 local notices = {}
 local real_notify = vim.notify
 vim.notify = function(message, level)
@@ -85,28 +95,43 @@ vim.notify = function(message, level)
   return real_notify(message, level)
 end
 
--- Let the turn get properly under way first: cancelling the same millisecond
--- it was sent would prove the wire, not the run.
-vim.wait(10000, function()
-  return false
-end, 500)
-type_into_prompt('i<C-c>')
-local stopped = vim.wait(180000, function()
+-- Let the turn get properly under way — but not past its own end.
+if vim.wait(SETTLE_MS, function()
   return big.state().request_id == nil
-end, 200)
-if not stopped then
-  lib.die('i_<C-c> did not stop the run')
+end, 200) then
+  lib.die('the intake turn ended inside ' .. SETTLE_MS .. 'ms — there was nothing left to cancel')
+end
+
+local session = big.state().session
+if session == nil then
+  lib.die('the panel never adopted a session to cancel')
+end
+
+type_into_prompt('i<C-c>')
+if not vim.wait(CANCEL_MS, function()
+  return big.state().request_id == nil
+end, 100) then
+  lib.die('i_<C-c> did not stop the run within ' .. CANCEL_MS .. 'ms')
 end
 for _, message in ipairs(notices) do
-  if message:find('already finished', 1, true) ~= nil then
-    lib.die('i_<C-c> found no running turn to stop')
+  for _, nothing in ipairs(NOTHING_TO_STOP) do
+    if message:find(nothing, 1, true) ~= nil then
+      lib.die('i_<C-c> found no running turn to stop: ' .. message)
+    end
   end
   if message:find('nvime: error', 1, true) ~= nil then
     lib.die('the cancel failed: ' .. message)
   end
 end
-lib.say('CANCELLED after a live turn, ' .. #notices .. ' notice(s)')
 vim.notify = real_notify
+
+-- The sidecar's own account, not the editor's: a completed intake leaves a
+-- spec on the session, a cancelled one leaves none.
+local after = lib.call('big.open', { root = repo, sessionId = session.id }, 60000)
+if after.session.spec ~= nil then
+  lib.die('the turn completed rather than being cancelled — it left a spec behind')
+end
+lib.say(('CANCELLED inside %dms, display=%s, no spec written'):format(CANCEL_MS, tostring(after.session.display)))
 
 -- 3. i_<C-r> on an empty box opens the history picker.
 local function floats()
