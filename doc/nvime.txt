@@ -154,6 +154,8 @@ Big-change panel ~
 
 Review threads ~
     ]t, [t                      next / previous thread
+    ]c, [c                      next / previous hunk in this thread
+    t                           toggle the unified diff
     a                           defend this thread (the gate)
     e                           explain a cleared thread
     r                           request changes on this thread
@@ -163,7 +165,8 @@ Review threads ~
     <C-c>                       give up waiting on a wedged request (does not
                                  stop it — unlike the panel's <C-c>, which
                                  reaches the runner and actually stops the run)
-    <CR>                        open this file in the build clone
+    <CR>                        open this file in the build clone (refused
+                                 while the pane already is that file)
     q                           close the review
 
 Dashboard ~
@@ -314,6 +317,22 @@ Triage ~
     open `unsorted` thread, and a failed triage falls back to one substantial
     thread per file and says so. Trivia auto-resolves but stays visible with
     an `auto` chip, and `X` re-opens it.
+
+The review pane ~
+    Selecting a thread opens the build clone's own copy of the changed file as
+    an ordinary buffer: real path, real filetype, treesitter highlighting, and
+    your own LSP attaching as it would to any file you opened. It is
+    `nomodifiable` — the clone is a sandbox to read, not to edit.
+
+    The diff is extmarks over that buffer, never text: changed and added rows
+    carry a band, removed lines render as dim virtual lines above whatever
+    replaced them, and the thread's question and graded rounds hang at its
+    first hunk. `]c`/`[c` walk the thread's hunks, switching file when it
+    spans more than one.
+
+    `t` toggles the plain unified diff for pure patch reading. A thread with
+    no file to annotate — binary content, a deleted file — falls back to it on
+    its own, and so does a build clone that is gone, which says so once.
 
 The gate ~
     `a` on an open substantial thread opens an answer box that takes typed

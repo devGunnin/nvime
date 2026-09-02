@@ -9,8 +9,10 @@
 --- the next answer has to address. There is no override, and `M` will not
 --- merge while anything is open.
 local agent = require('nvime.agent')
+local annotate = require('nvime.annotate')
 local models = require('nvime.models')
 local panel = require('nvime.panel')
+local reviewbuf = require('nvime.reviewbuf')
 local shape = require('nvime.text')
 
 local M = {}
@@ -76,7 +78,32 @@ local view = {
   tree_buf = nil,
   pane_win = nil,
   pane_buf = nil,
+  --- What the pane is ASKED for (`t` toggles it) and what it could actually
+  --- give: a thread with no patch to lay over a file — binary, a deleted
+  --- file, a clone that is gone — falls back to the unified render.
+  --- @type 'file'|'unified'
+  mode = 'file',
+  --- @type 'file'|'unified'|nil
+  showing = nil,
+  --- The selected thread's hunks that CAN be shown on a real file, in order,
+  --- and which of them the pane is parked on. The location is the single
+  --- source of truth for which file the pane shows.
+  --- @type table[] each { id, file, path, row, marks }
+  locations = {},
+  location = 1,
+  --- The thread `locations` were computed for, so a new selection restarts at
+  --- its first hunk rather than inheriting the last one's position.
+  block_id = nil,
+  --- Whether the missing-clone notice has already been given, so a redraw per
+  --- cursor move does not repeat it.
+  degraded = false,
 }
+
+--- Forward declaration. The key table is defined beside the functions it
+--- fires, well below the rendering that has to install it on a file buffer;
+--- it is only ever read at call time.
+--- @type table[]
+local KEYS
 
 --- @param block table
 --- @return table the chip for this block's state
@@ -246,6 +273,51 @@ function M.hunk_fg(line)
   return 'NvimeDim'
 end
 
+--- Appends `more` and its marks to `lines`/`marks`, shifting every mark row by
+--- where the block landed.
+local function extend(lines, marks, more, more_marks)
+  local offset = #lines
+  vim.list_extend(lines, more)
+  for _, mark in ipairs(more_marks) do
+    marks[#marks + 1] = { row = mark.row + offset, col = mark.col, end_col = mark.end_col, hl = mark.hl }
+  end
+end
+
+--- A thread's own head: what it is called, and why the agent says it exists.
+--- @param block table
+--- @return string[] lines
+--- @return table[] marks
+local function head_lines(block)
+  local lines = { block.title }
+  local marks = { { row = 0, col = 0, end_col = #block.title, hl = 'NvimeHeading' } }
+  if block.rationale ~= nil and block.rationale ~= '' then
+    -- `why · ` rather than the old `# `: a hash right above a diff reads as
+    -- part of it, and the label says whose note this is.
+    local label = 'why · '
+    lines[2] = label .. block.rationale
+    marks[#marks + 1] = { row = 1, col = 0, end_col = #label, hl = 'NvimeDim' }
+    marks[#marks + 1] = { row = 1, col = #label, end_col = #lines[2], hl = 'NvimeBody' }
+  end
+  return lines, marks
+end
+
+--- The thread's words as the file pane shows them: its head and the gate
+--- exchange, anchored at the hunk instead of stacked above a rendered diff.
+--- @param block table
+--- @return string[] lines
+--- @return table[] marks
+function M.overlay_lines(block)
+  assert(type(block) == 'table', 'threads.overlay_lines needs a block')
+  local lines, marks = head_lines(block)
+  local gate, gate_marks = M.gate_lines(block)
+  if #gate == 0 then
+    lines[#lines + 1] = ''
+    return lines, marks
+  end
+  extend(lines, marks, gate, gate_marks)
+  return lines, marks
+end
+
 --- The hunks of one thread, sliced out of the captured diff, then its gate.
 --- @param block table
 --- @return string[] lines
@@ -254,16 +326,8 @@ function M.pane_lines(block)
   if block == nil then
     return { 'no thread selected.' }, { { row = 0, col = 0, end_col = 19, hl = 'NvimeDim' } }
   end
-  local lines = { block.title, '' }
-  local marks = { { row = 0, col = 0, end_col = #block.title, hl = 'NvimeHeading' } }
-  if block.rationale ~= nil and block.rationale ~= '' then
-    -- `why · ` rather than the old `# `: a hash right above a diff reads as
-    -- part of it, and the label says whose note this is.
-    local label = 'why · '
-    lines = { block.title, label .. block.rationale, '' }
-    marks[#marks + 1] = { row = 1, col = 0, end_col = #label, hl = 'NvimeDim' }
-    marks[#marks + 1] = { row = 1, col = #label, end_col = #lines[2], hl = 'NvimeBody' }
-  end
+  local lines, marks = head_lines(block)
+  lines[#lines + 1] = ''
   local shown_file = nil
   for _, id in ipairs(block.hunkIds or {}) do
     local hunk = view.hunks[id]
@@ -293,12 +357,7 @@ function M.pane_lines(block)
       lines[#lines + 1] = ''
     end
   end
-  local gate, gate_marks = M.gate_lines(block)
-  local offset = #lines
-  vim.list_extend(lines, gate)
-  for _, mark in ipairs(gate_marks) do
-    marks[#marks + 1] = { row = mark.row + offset, col = mark.col, end_col = mark.end_col, hl = mark.hl }
-  end
+  extend(lines, marks, M.gate_lines(block))
   return lines, marks
 end
 
@@ -312,6 +371,10 @@ end
 
 local function win_valid(win)
   return win ~= nil and vim.api.nvim_win_is_valid(win)
+end
+
+local function notify(message, level)
+  vim.notify('nvime: ' .. message, level or vim.log.levels.INFO)
 end
 
 local function write(buf, lines)
@@ -347,17 +410,20 @@ function M.gate_status(session)
   return string.format('%s · M merges into your branch', defended)
 end
 
---- What the reader can press, given where the review is. A landed change
---- offers none of the review keys — they would all refuse.
+--- What the reader can press, given where the review is and which pane they
+--- are looking at. A landed change offers none of the review keys — they
+--- would all refuse.
 --- @param session table|nil
+--- @param showing 'file'|'unified'|nil which render the pane settled on
 --- @return string
-function M.keys_hint(session)
+function M.keys_hint(session, showing)
   if (session or {}).display == 'merged' then
     return '<CR> open a file · q close'
   end
   -- `R rebase` is deliberately absent: it only applies once the base has
   -- moved, and the merge refusal names it at exactly that moment.
-  return 'a answer · e explain · r changes · X re-open · ]t/[t · M merge · <C-c> give up on a wedged request'
+  local walk = showing == 'file' and ']c/[c hunks · ]t/[t threads · t unified' or ']t/[t · t file'
+  return 'a answer · e explain · r changes · X re-open · ' .. walk .. ' · M merge · <C-c> give up'
 end
 
 local function paint(buf, marks)
@@ -431,10 +497,10 @@ local function status()
     -- already was; the static keys hint below is short enough it never needed this.
     keys = shape.ellipsise(((current.detail or ''):gsub('%s+', ' ')), math.max(pane_width - PANE_TITLE_ROOM - 4, 8))
   else
-    keys = M.keys_hint(view.session)
+    keys = M.keys_hint(view.session, view.showing)
   end
   local room = pane_width - vim.fn.strdisplaywidth(keys) - 4
-  local title = shape.ellipsise((view.session or {}).title or 'big change', math.max(room, PANE_TITLE_ROOM))
+  local title = shape.ellipsise(M.pane_title(), math.max(room, PANE_TITLE_ROOM))
   vim.wo[view.pane_win].winbar = '%#NvimeBar# '
     .. M.escape_winbar(title)
     .. ' %=%#NvimeBarDim#'
@@ -442,13 +508,198 @@ local function status()
     .. ' '
 end
 
-local function draw_pane()
-  local lines, marks = M.pane_lines(current_block())
+--- The `@@` header and body of `hunk`, sliced out of the captured diff. Nil for
+--- a synthetic hunk (a binary file, a rename): there is no patch to lay over
+--- anything.
+--- @param hunk table|nil
+--- @return string|nil header
+--- @return string[]|nil body
+local function hunk_body(hunk)
+  if hunk == nil or (hunk.offset or -1) < 0 or (hunk.lineCount or 0) < 2 then
+    return nil, nil
+  end
+  local body = {}
+  for at = hunk.offset + 2, hunk.offset + hunk.lineCount do
+    body[#body + 1] = view.diff_lines[at] or ''
+  end
+  return view.diff_lines[hunk.offset + 1], body
+end
+
+--- True while the build clone this review reads from is still on disk. A clone
+--- that vanished mid-review is what sends the pane back to the unified diff.
+local function clone_present()
+  local session = view.session or {}
+  if session.worktreeExists == false then
+    return false
+  end
+  local root = (session.worktree or {}).path
+  return type(root) == 'string' and root ~= '' and vim.fn.isdirectory(root) == 1
+end
+
+--- Every hunk of `block` that can be shown on a real file, in the thread's own
+--- order. A hunk with no patch, or whose file is not in the clone (deleted,
+--- renamed away), has no place in a real buffer and is left out; an empty
+--- result is what sends the pane back to the unified diff.
+--- @param block table|nil
+--- @return table[] each { id, file, path, row, marks }
+local function locations(block)
+  local out = {}
+  local root = ((view.session or {}).worktree or {}).path
+  if block == nil or type(root) ~= 'string' or root == '' then
+    return out
+  end
+  local readable = {}
+  for _, id in ipairs(block.hunkIds or {}) do
+    local hunk = view.hunks[id]
+    local header, body = hunk_body(hunk)
+    local marks = header ~= nil and annotate.hunk_marks(header, body) or nil
+    if marks ~= nil then
+      local path = root .. '/' .. hunk.file
+      if readable[path] == nil then
+        readable[path] = vim.fn.filereadable(path) == 1
+      end
+      if readable[path] then
+        out[#out + 1] = { id = id, file = hunk.file, path = path, row = marks.row, marks = marks }
+      end
+    end
+  end
+  return out
+end
+
+--- The pane window's chrome, which differs by render: a real file wants its
+--- line numbers, a sign column for the LSP's diagnostics and no wrapping; the
+--- unified render wants the review's own flat gutter and wrapped prose.
+local function pane_chrome(file_mode)
+  if not win_valid(view.pane_win) then
+    return
+  end
+  local win = view.pane_win
+  vim.wo[win].number = file_mode
+  vim.wo[win].relativenumber = false
+  vim.wo[win].signcolumn = file_mode and 'yes' or 'no'
+  vim.wo[win].statuscolumn = file_mode and '' or string.rep(' ', GUTTER)
+  vim.wo[win].wrap = not file_mode
+  vim.wo[win].cursorline = file_mode
+  -- Neovim keeps window options per (window, buffer), so swapping the pane to
+  -- a file buffer drops what `build_tab` set — these two have to be re-applied
+  -- or the pane grows a `~` column and loses its cursor-line colour.
+  vim.wo[win].fillchars = 'eob: '
+  vim.wo[win].winhighlight = 'CursorLine:NvimeCursorLine'
+end
+
+--- Puts the scratch buffer back in the pane window, so a file buffer can be
+--- wiped without nvim picking an arbitrary replacement for the window.
+local function restore_scratch_pane()
+  if not win_valid(view.pane_win) or view.pane_buf == nil or not vim.api.nvim_buf_is_valid(view.pane_buf) then
+    return
+  end
+  if vim.api.nvim_win_get_buf(view.pane_win) ~= view.pane_buf then
+    vim.api.nvim_win_set_buf(view.pane_win, view.pane_buf)
+  end
+end
+
+--- Says once, per fall back to the unified diff, why the file is not there.
+local function degrade(message)
+  if view.degraded then
+    return
+  end
+  view.degraded = true
+  notify(message, vim.log.levels.WARN)
+end
+
+local function show_unified(block)
+  restore_scratch_pane()
+  pane_chrome(false)
+  local lines, marks = M.pane_lines(block)
   write(view.pane_buf, lines)
   paint(view.pane_buf, marks)
   if win_valid(view.pane_win) then
     pcall(vim.api.nvim_win_set_cursor, view.pane_win, { 1, 0 })
   end
+  view.showing = 'unified'
+end
+
+--- Parks the cursor on the hunk the reader was sent to, centred, so the change
+--- is what they land on rather than line 1 of the file.
+local function park_cursor(buf, row)
+  if not win_valid(view.pane_win) then
+    return
+  end
+  local count = vim.api.nvim_buf_line_count(buf)
+  pcall(vim.api.nvim_win_set_cursor, view.pane_win, { math.max(1, math.min(row + 1, count)), 0 })
+  pcall(vim.api.nvim_win_call, view.pane_win, function()
+    vim.cmd('normal! zz')
+  end)
+end
+
+--- Shows `found[index]`'s file, annotated with every hunk of the thread that
+--- lands in it. The thread's overlay anchors at the first of them, so the
+--- exchange is always beside a change it is about.
+--- @return boolean whether the file could be shown
+local function show_file(found, index, block)
+  local here = found[index]
+  local buf, why = reviewbuf.open(here.path, KEYS)
+  if buf == nil then
+    degrade((why or 'could not open ' .. here.file) .. ' — showing the unified diff')
+    return false
+  end
+  if win_valid(view.pane_win) and vim.api.nvim_win_get_buf(view.pane_win) ~= buf then
+    vim.api.nvim_win_set_buf(view.pane_win, buf)
+  end
+  pane_chrome(true)
+  local spec = { bands = {}, removals = {} }
+  for _, location in ipairs(found) do
+    if location.path == here.path then
+      vim.list_extend(spec.bands, location.marks.bands)
+      vim.list_extend(spec.removals, location.marks.removals)
+      if spec.overlay == nil then
+        local lines, marks = M.overlay_lines(block)
+        spec.overlay = { row = location.row, lines = lines, marks = marks }
+      end
+    end
+  end
+  reviewbuf.paint(buf, spec)
+  park_cursor(buf, here.row)
+  view.showing = 'file'
+  view.degraded = false
+  return true
+end
+
+--- The pane: the thread's own file where there is one, the unified diff where
+--- there is not.
+local function draw_pane()
+  local block = current_block()
+  if block ~= nil and block.id ~= view.block_id then
+    view.block_id, view.location = block.id, 1
+  end
+  view.locations = {}
+  if view.mode == 'file' and block ~= nil then
+    if not clone_present() then
+      degrade('the build clone is gone — showing the unified diff')
+    else
+      local found = locations(block)
+      view.locations = found
+      view.location = math.max(1, math.min(view.location, math.max(#found, 1)))
+      if #found > 0 and show_file(found, view.location, block) then
+        status()
+        return
+      end
+    end
+  end
+  show_unified(block)
+  status()
+end
+
+--- The pane's own title: which file is under review, then the change it
+--- belongs to — the file first, since that is what the pane just gained.
+--- @return string
+function M.pane_title()
+  local title = (view.session or {}).title or 'big change'
+  local here = view.locations[view.location]
+  if view.showing ~= 'file' or here == nil then
+    return title
+  end
+  return here.file .. ' · ' .. title
 end
 
 local function draw_tree()
@@ -502,10 +753,6 @@ local function adopt(session)
     view.on_update(session)
   end
   draw()
-end
-
-local function notify(message, level)
-  vim.notify('nvime: ' .. message, level or vim.log.levels.INFO)
 end
 
 --- Renders a sidecar refusal as its message, then its detail line if any — the
@@ -1059,11 +1306,47 @@ function M.reload_current()
   end)
 end
 
+--- `t`: the unified diff, demoted to a toggle now that the pane is the file
+--- itself. An explicit press that cannot be honoured says so — unlike a
+--- redraw, which falls back quietly.
+local function toggle_mode()
+  view.mode = view.mode == 'file' and 'unified' or 'file'
+  view.degraded = false
+  draw_pane()
+  if view.mode == 'file' and view.showing ~= 'file' then
+    notify('no file to show for this thread — the unified diff stands in')
+  end
+end
+
+--- `]c` / `[c`: the next or previous hunk of this thread, switching the pane's
+--- file when the thread spans more than one.
+--- @param delta integer
+local function hunk_jump(delta)
+  local total = #view.locations
+  if view.showing ~= 'file' or total == 0 then
+    return
+  end
+  local target = math.max(1, math.min(view.location + delta, total))
+  if target == view.location then
+    return
+  end
+  view.location = target
+  draw_pane()
+end
+
 --- `<CR>`: open the build clone's copy of this thread's first file.
+---
+--- Refused while the pane already IS that file: opening it a second time would
+--- carry the review's buffer-local keys into an ordinary tab, where `a` and
+--- `q` mean something else entirely.
 local function open_file()
   local block = current_block()
   local worktree = (view.session or {}).worktree
   if block == nil or worktree == nil then
+    return
+  end
+  if view.showing == 'file' then
+    notify('this pane is the file — ]c/[c walk its hunks, t shows the unified diff')
     return
   end
   local file = (block.files or {})[1]
@@ -1076,6 +1359,19 @@ local function open_file()
     return
   end
   vim.cmd('tabedit ' .. vim.fn.fnameescape(path))
+end
+
+--- Gives back everything the pane holds: its own scratch buffer and every
+--- clone file it opened. Idempotent, and safe to run after the tab is already
+--- gone — every teardown path ends here.
+local function release_pane_buffers()
+  if view.pane_buf ~= nil and vim.api.nvim_buf_is_valid(view.pane_buf) then
+    pcall(vim.api.nvim_buf_delete, view.pane_buf, { force = true })
+  end
+  view.pane_buf = nil
+  -- A review must not leave the sandbox's files sitting in the buffer list.
+  reviewbuf.drop(KEYS)
+  view.locations, view.location, view.showing, view.block_id = {}, 1, nil, nil
 end
 
 function M.close()
@@ -1094,15 +1390,14 @@ function M.close()
     pcall(vim.api.nvim_set_current_tabpage, tab)
     pcall(vim.cmd, 'tabclose')
   end
-  for _, buf in ipairs({ view.tree_buf, view.pane_buf }) do
-    if buf ~= nil and vim.api.nvim_buf_is_valid(buf) then
-      pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    end
+  if view.tree_buf ~= nil and vim.api.nvim_buf_is_valid(view.tree_buf) then
+    pcall(vim.api.nvim_buf_delete, view.tree_buf, { force = true })
   end
-  view.tree_buf, view.pane_buf = nil, nil
+  view.tree_buf = nil
+  release_pane_buffers()
 end
 
-local KEYS = {
+KEYS = {
   {
     lhs = ']t',
     fn = function()
@@ -1117,6 +1412,21 @@ local KEYS = {
     end,
     desc = 'nvime: previous thread',
   },
+  {
+    lhs = ']c',
+    fn = function()
+      hunk_jump(1)
+    end,
+    desc = 'nvime: next hunk in this thread',
+  },
+  {
+    lhs = '[c',
+    fn = function()
+      hunk_jump(-1)
+    end,
+    desc = 'nvime: previous hunk in this thread',
+  },
+  { lhs = 't', fn = toggle_mode, desc = 'nvime: toggle the unified diff' },
   { lhs = 'X', fn = toggle, desc = 'nvime: re-open or clear a trivial thread' },
   { lhs = 'r', fn = request_changes, desc = 'nvime: request changes' },
   { lhs = '<CR>', fn = open_file, desc = 'nvime: open this file in the build clone' },
@@ -1178,6 +1488,10 @@ local function build_tab()
   -- default tabline renders their name as the tab's label.
   view.tree_buf = make_buffer('nvime-review', 'nvimethreads')
   view.pane_buf = make_buffer('nvime-review-diff', 'diff')
+  -- The pane is hidden every time the reader looks at a real file, and a
+  -- wiped-on-hide scratch buffer would not survive the first `t` back. It is
+  -- deleted explicitly instead, on every teardown path.
+  vim.bo[view.pane_buf].bufhidden = 'hide'
 
   view.tree_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(view.tree_win, view.tree_buf)
@@ -1232,8 +1546,20 @@ local function build_tab()
   vim.api.nvim_create_autocmd('BufWipeout', {
     group = group,
     buffer = view.tree_buf,
-    desc = 'nvime: stop the indicator timer when the review tab is torn down',
-    callback = pause_activity,
+    desc = 'nvime: stop the indicator timer and give back the review’s buffers',
+    callback = function()
+      pause_activity()
+      -- Deferred: buffers cannot be deleted from inside a wipeout, and the tab
+      -- is going regardless — the pane and the clone's files go with it. The
+      -- guard is for a review that has meanwhile reopened, which owns them now.
+      local tab = view.tab
+      vim.schedule(function()
+        if view.tab ~= nil and view.tab ~= tab and vim.api.nvim_tabpage_is_valid(view.tab) then
+          return
+        end
+        release_pane_buffers()
+      end)
+    end,
   })
   vim.api.nvim_set_current_win(view.tree_win)
   -- Every key here is a normal-mode-only mapping (`KEYS`), but the caller can
@@ -1256,6 +1582,12 @@ function M.reload(session)
   if view.on_update ~= nil then
     view.on_update(session)
   end
+  -- A revision or a rebase rewrites the clone under the review, so the pane's
+  -- file buffers are stale the moment a new capture arrives: they are dropped
+  -- here and re-read from disk by the redraw the new diff triggers.
+  restore_scratch_pane()
+  reviewbuf.drop(KEYS)
+  view.locations, view.location, view.showing, view.degraded = {}, 1, nil, false
   agent.request('big.diff', { root = view.root, sessionId = session.id }, function(err, result)
     -- Shape-checked, not assumed: a sidecar built from another revision answers
     -- with something else, and that has to read as a named failure rather than
@@ -1294,6 +1626,9 @@ function M.open(root, session, on_update)
   view.root = root
   view.on_update = on_update
   view.selected = 1
+  -- Every review opens on the real file; `t` is the reader's own choice, and
+  -- it is not carried over from the last change they looked at.
+  view.mode, view.degraded, view.block_id = 'file', false, nil
   build_tab()
   -- Re-adopts a request that was already in flight when the tab last closed
   -- (a plain reopen, or `<C-t>` from the big panel) rather than orphaning it:
