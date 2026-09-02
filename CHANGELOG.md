@@ -20,8 +20,9 @@
 - **Speaker surfaces that survive light and dark themes (#9).** User prose,
   agent prose and tool activity now occupy distinct, subtle full-width bands
   blended from the active colorscheme. The same visual grammar reaches the
-  comprehension gate, while fenced code keeps its stronger code background
-  and syntax colours.
+  comprehension gate, while fenced code keeps its code background; syntax
+  colours inside fences are currently off in panels because colours never
+  change after a line is read, and will return painted-once-at-commit (planned).
 
 - **The review tab says what it is doing.** `R`, `M`, `a`, `r`, `e` and `X` all
   run through one indicator: past ~300ms the left bar spins with what is
