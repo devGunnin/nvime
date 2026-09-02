@@ -51,7 +51,8 @@ const SECRET_PARTS = ['token', 'secret', 'password', 'passwd', 'authorization', 
  *
  * `context` is deliberately absent: it is a block list in an RPC payload and a
  * settings object in the config the bundle renders, so naming it meant one of
- * the two was always wrong. Its children answer for themselves instead.
+ * the two was always wrong. Its children — `text`, `entries` — answer for
+ * themselves instead, which is what an attached `dir` block needs anyway.
  */
 const CONTENT_KEYS = new Set([
   'answers',
@@ -75,6 +76,16 @@ const CONTENT_KEYS = new Set([
   'summary',
   'text',
   'title',
+  // The clip is a budget, not a redactor: a short unnamed field fits inside it
+  // and is written out whole. A `dir` block's listing of the reader's disk, a
+  // defence, the grader's follow-up, an offered choice, a hunk's own lines.
+  'entries',
+  'lines',
+  'answer',
+  'followup',
+  'ungraded',
+  'label',
+  'detail',
 ]);
 
 /** How deep redaction walks before it stops describing and starts eliding. */

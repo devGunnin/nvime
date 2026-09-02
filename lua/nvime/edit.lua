@@ -365,6 +365,15 @@ function M.send(text)
   surface():begin_stream('claude', 'NvimeAgentBody')
   surface():start_activity()
 
+  -- `scope` is a content key — BigSpec's scope lines are the reader's own
+  -- words — so the RPC line collapses this run's target too. Named here in
+  -- fields of its own, rather than loosening a key two meanings share.
+  local log = require('nvime.log')
+  if log.enabled('info') then
+    local range = scope.startLine ~= nil and string.format('%d-%d', scope.startLine, scope.endLine) or nil
+    log.state_change('edit', 'start', { kind = scope.kind, file = scope.path, range = range })
+  end
+
   local dial = models.dial('edit')
   agent.request('edit.start', {
     root = state.root,

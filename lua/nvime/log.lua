@@ -63,16 +63,29 @@ local PRUNE_AFTER_SECONDS = 7 * 24 * 60 * 60
 ---
 --- `context` is deliberately NOT here. It is a block list in an RPC payload and
 --- a settings table in the config the bundle renders; naming it meant one of
---- the two was always wrong. Its children answer for themselves instead.
+--- the two was always wrong. Its children — `text`, `entries` — answer for
+--- themselves instead, which is what an attached `dir` block needs anyway.
+---
+--- The clip is a budget, not a redactor: a short unnamed field fits inside it
+--- and is written out whole. So every field the reader authors is named here,
+--- however small — a defence (`answer`), the grader's follow-up, an offered
+--- choice (`label`/`detail`), a listing of their disk (`entries`), a hunk's
+--- own lines.
 local CONTENT_KEYS = {
   acceptance = true,
+  answer = true,
   answers = true,
   approach = true,
   branch = true,
   comment = true,
   content = true,
+  detail = true,
   diff = true,
+  entries = true,
+  followup = true,
   goal = true,
+  label = true,
+  lines = true,
   message = true,
   outOfScope = true,
   prompt = true,
@@ -83,6 +96,7 @@ local CONTENT_KEYS = {
   summary = true,
   text = true,
   title = true,
+  ungraded = true,
 }
 
 --- Substrings that make a field name secret wherever they appear in it.

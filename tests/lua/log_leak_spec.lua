@@ -179,6 +179,83 @@ describe('a content key never recurses', function()
   end)
 end)
 
+describe('a list the user authored is content too', function()
+  -- R1 MEDIUM: dropping `context` from CONTENT_KEYS in round 3 was right — it
+  -- is a settings table in the config and a block list on the wire — but it
+  -- had been covering the `dir` block's `entries`, which is a listing of the
+  -- reader's own disk. Nothing else named it, so 400 of 400 file names went
+  -- into the log and into the bundle.
+  local BLOCKS = {
+    { type = 'file', path = '/home/me/proj/a.md', text = 'the hunter2 note' },
+    { type = 'dir', path = '/home/me/notes', entries = { 'acme-hunter2.md', 'b.md' } },
+    { type = 'selection', path = '/home/me/proj/c.rs', startLine = 1, endLine = 2, text = 'hunter2' },
+  }
+
+  it('keeps an attached directory listing out of the log and the bundle', function()
+    local bytes, rendered = capture(function()
+      log.request('chat.send', 1, { root = '/home/me/proj', prompt = 'look', context = BLOCKS })
+    end)
+    ok(bytes:find(MARKER, 1, true) == nil, 'MEDIUM: an attached listing is the reader’s disk: ' .. bytes)
+    ok(rendered:find(MARKER, 1, true) == nil, 'MEDIUM: and the bundle attaches the log verbatim')
+    ok(bytes:find('items>', 1, true) ~= nil, 'the listing is still recorded as a size: ' .. bytes)
+  end)
+
+  it('holds for every context block variant, whichever order they arrive in', function()
+    for _ = 1, 20 do
+      local bytes = capture(function()
+        log.request('chat.send', 1, { context = { BLOCKS[3], BLOCKS[2], BLOCKS[1] } })
+        log.event('edit.started', { context = BLOCKS })
+      end)
+      ok(bytes:find(MARKER, 1, true) == nil, bytes)
+    end
+  end)
+
+  it('keeps diff line arrays out too', function()
+    local bytes = capture(function()
+      log.event('big.diff', { hunks = { { file = 'a.rs', lines = { '-old hunter2', '+new' } } } })
+    end)
+    ok(bytes:find(MARKER, 1, true) == nil, 'a hunk’s lines are the file’s contents: ' .. bytes)
+  end)
+end)
+
+describe('the clip is a budget, not a redactor', function()
+  -- A short field that nobody named simply fits inside the 200-byte clip and
+  -- is written out whole. Each name gets its own line here, so the clip cannot
+  -- hide one behind another.
+  local NAMED = {
+    answer = 'my hunter2 defence of this thread',
+    followup = 'what about hunter2 in the retry path?',
+    ungraded = 'could not grade the hunter2 thread',
+    label = 'use the hunter2 staging credential',
+    detail = 'reads /etc/hunter2.conf',
+    entries = { 'hunter2.md' },
+  }
+
+  it('records each user-authored field by size, one probe per name', function()
+    for key, value in pairs(NAMED) do
+      local bytes = capture(function()
+        log.event('big.view', { [key] = value })
+      end)
+      ok(bytes:find(MARKER, 1, true) == nil, key .. ' was written out whole: ' .. bytes)
+    end
+  end)
+
+  it('holds where they really live — inside a session view', function()
+    local bytes, rendered = capture(function()
+      log.event('big.view', {
+        session = {
+          id = 'sess',
+          blocks = { { id = 'b1', rounds = { { answer = NAMED.answer, result = { followup = NAMED.followup } } } } },
+          conversation = { { role = 'agent', options = { { label = NAMED.label, detail = NAMED.detail } } } },
+          ungraded = NAMED.ungraded,
+        },
+      })
+    end)
+    ok(bytes:find(MARKER, 1, true) == nil, bytes)
+    ok(rendered:find(MARKER, 1, true) == nil, 'bundle')
+  end)
+end)
+
 describe('the merged timeline keeps the order the file has', function()
   -- G3 HIGH: the plugin stamped 20 bytes ending `Z`, the sidecar 24 ending
   -- `.123Z`, and the merge sorted on a 20-byte key — so `.` (0x2E) beat `Z`

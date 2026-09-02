@@ -21,7 +21,9 @@
   big change's `title`, `branch` or `slug`) and the approved spec (`spec` and
   each of its fields) as a size too, and every payload is clipped — which is
   what makes the log safe to paste into a public issue. A field named as
-  content is recorded by its size whatever it holds, never walked into.
+  content is recorded by its size whatever it holds, never walked into — down to
+  the small ones (`answer`, `followup`, `label`, `detail`, an attached
+  directory's `entries`), since the clip is a budget and not a redactor.
 
   **`:Nvime log`** shows the last 200 lines in a readonly split parked at the
   newest line (`q` closes it); `:Nvime log clear` empties the file. `:Nvime

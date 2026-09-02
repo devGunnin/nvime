@@ -265,3 +265,36 @@ describe('DebugLog round-3 regressions', () => {
     assert.ok(!rendered.includes('secret'), `and the text inside it still is: ${rendered}`);
   });
 });
+
+describe('DebugLog round-4 regressions', () => {
+  // R1: round 3 dropped `context` from the content keys — correctly, it means
+  // two different things — but nothing else named the `dir` block's `entries`,
+  // which is a listing of the reader's own disk.
+  it('records an attached directory listing by size, not by name', () => {
+    const rendered = renderParams({
+      context: [
+        { type: 'file', path: '/home/me/a.md', text: 'the hunter2 note' },
+        { type: 'dir', path: '/home/me/notes', entries: ['acme-hunter2.md', 'b.md'] },
+      ],
+    });
+    assert.ok(!rendered.includes('hunter2'), rendered);
+    assert.ok(rendered.includes('items>'), `still recorded as a size: ${rendered}`);
+  });
+
+  // A short field nobody named fits inside the clip and is written out whole.
+  it('records each user-authored field by size, one probe per name', () => {
+    const named: Record<string, unknown> = {
+      answer: 'my hunter2 defence of this thread',
+      followup: 'what about hunter2 in the retry path?',
+      ungraded: 'could not grade the hunter2 thread',
+      label: 'use the hunter2 staging credential',
+      detail: 'reads /etc/hunter2.conf',
+      entries: ['hunter2.md'],
+      lines: ['-old hunter2', '+new'],
+    };
+    for (const [key, value] of Object.entries(named)) {
+      const rendered = renderParams({ [key]: value });
+      assert.ok(!rendered.includes('hunter2'), `${key} was written out whole: ${rendered}`);
+    }
+  });
+});

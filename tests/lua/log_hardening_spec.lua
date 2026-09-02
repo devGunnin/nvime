@@ -299,25 +299,54 @@ describe('a probe that timed out says so', function()
   -- D2 LOW: `report_node` kept its probe error, `report_git_identity` did not
   -- — so a slow or hung `git` was reported as "git has no identity
   -- configured", which is a different problem with a different fix.
-  it('reports a hung git as a timeout, not as a missing identity', function()
+  --- A `git` that never answers, in a directory that is a repository.
+  local function hung_git()
     local dir = scratch_dir()
     local shim = dir .. '/git'
     local handle = assert(io.open(shim, 'w'))
     handle:write('#!/bin/sh\nsleep 30\n')
     handle:close()
     vim.uv.fs_chmod(shim, 493)
-    local diagnostics = require('nvime.diagnostics')
-    local entries = diagnostics.run(vim.uv.cwd(), {
-      skip_sidecar = true,
-      probe_timeout_ms = 300,
-      git = shim,
-    })
-    local said = nil
+    return shim
+  end
+
+  --- The git row from a set of diagnostic entries.
+  local function git_row(entries)
     for _, entry in ipairs(entries) do
       if entry.message:find('git ', 1, true) == 1 then
-        said = entry.message
+        return entry.message
       end
     end
+    return nil
+  end
+
+  -- Round 4: the blocking path was fixed, the ASYNC one was not — and the
+  -- async one is what `:Nvime bundle` runs. `probe_async` signals a deadline
+  -- as `cb(nil, nil)`, so the error the git branch looked for was never there.
+  it('reports a hung git as a timeout on the path the bundle actually runs', function()
+    local settled, said = false, nil
+    require('nvime.diagnostics').run_async(vim.uv.cwd(), 300, function(entries)
+      said = git_row(entries)
+      settled = true
+    end, { git = hung_git() })
+    ok(
+      vim.wait(5000, function()
+        return settled
+      end, 20),
+      'run_async must answer inside its own deadline'
+    )
+    ok(said ~= nil, 'the git identity check must report something')
+    ok(said:find('timed out', 1, true) ~= nil, said)
+    ok(said:find('no identity configured', 1, true) == nil, 'a timeout is not a missing identity: ' .. said)
+  end)
+
+  it('reports a hung git as a timeout on the blocking path too', function()
+    local entries = require('nvime.diagnostics').run(vim.uv.cwd(), {
+      skip_sidecar = true,
+      probe_timeout_ms = 300,
+      git = hung_git(),
+    })
+    local said = git_row(entries)
     ok(said ~= nil, 'the git identity check must report something: ' .. vim.inspect(entries))
     ok(said:find('timed out', 1, true) ~= nil, said)
     ok(said:find('no identity configured', 1, true) == nil, 'a timeout is not a missing identity: ' .. said)

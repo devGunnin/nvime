@@ -706,7 +706,11 @@ title>` and a title is the first 80 characters of your prompt. So does the
 approved spec, as `spec` and as each of its fields (`goal`, `approach`,
 `scope`, `acceptance`, `outOfScope`), since a spec can arrive unwrapped.
 **A field named as content is recorded by its size whatever it holds — never
-walked into.** Every payload is clipped at a character boundary. That is what
+walked into.** So do the smaller things you write: a defence (`answer`), the
+grader's `followup`, an offered choice's `label`/`detail`, and the `entries` of
+a directory you attach — the clip is a budget, not a redactor, and a short
+field nobody named would fit inside it whole. Every payload is clipped at a
+character boundary. That is what
 makes the log safe to paste in public, and it has to hold at the log line:
 `:Nvime bundle` attaches the tail verbatim.
 

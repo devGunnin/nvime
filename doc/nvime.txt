@@ -704,8 +704,11 @@ The debug log ~
     your prompt. The approved spec goes the same way, as `spec` and as each of
     its fields (`goal`, `approach`, `scope`, `acceptance`, `outOfScope`), since
     a spec can arrive unwrapped. A field named as content is recorded by its
-    size WHATEVER it holds — never walked into. Every payload is clipped at a
-    character boundary. That is what makes the log safe to paste into a public
+    size WHATEVER it holds — never walked into. So do the smaller things you
+    write: `answer`, `followup`, an offered choice's `label`/`detail`, and the
+    `entries` of a directory you attach — the clip is a budget, not a
+    redactor, and a short field nobody named would fit inside it whole. Every
+    payload is clipped at a character boundary. That is what makes the log safe to paste into a public
     issue, and it has to hold at the log line: `:Nvime bundle` attaches the
     tail verbatim.
 

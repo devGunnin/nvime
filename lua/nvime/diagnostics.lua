@@ -442,10 +442,11 @@ local function probe_machine_async(root, timeout_ms, cb, git)
   for _, probe in ipairs(wanted) do
     M.probe_async(probe.cmd, timeout_ms, function(output, err)
       probe.into[probe.key] = output
-      if probe.key == 'version' then
-        probe.into.err = err or 'timed out'
-      elseif output == nil then
-        probe.into.err = probe.into.err or timeout_error(err) or nil
+      -- `probe_async` signals a DEADLINE as `cb(nil, nil)`, so an absent error
+      -- is the timeout, not the absence of one. Both branches say so the same
+      -- way; the git branch used to look for an error that was never there.
+      if output == nil then
+        probe.into.err = probe.into.err or err or string.format('timed out after %dms', timeout_ms)
       end
       outstanding = outstanding - 1
       if outstanding == 0 then
@@ -515,11 +516,12 @@ end
 --- @param root string|nil
 --- @param timeout_ms integer
 --- @param cb fun(entries: DiagnosticEntry[], facts: table)
-function M.run_async(root, timeout_ms, cb)
+--- @param opts table|nil `git` (the binary to ask, so a test can use a shim)
+function M.run_async(root, timeout_ms, cb, opts)
   assert(type(cb) == 'function', 'diagnostics.run_async needs a callback')
   probe_machine_async(root or vim.uv.cwd(), timeout_ms, function(probed)
     cb(assemble(probed, true))
-  end, 'git')
+  end, (opts or {}).git or 'git')
 end
 
 return M
