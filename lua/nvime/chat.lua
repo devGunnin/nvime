@@ -48,6 +48,10 @@ local state = {
   -- `restored` goes true. At most one: a second send while still restoring
   -- replaces it, since only the latest prompt matters.
   pending_send = nil,
+  -- Bumped whenever the panel walks away from a restore (reopen, <C-n>,
+  -- deleting the live session). A reply carrying an older token is dropped
+  -- instead of splicing a dead transcript into the current panel.
+  restore_token = 0,
   -- The choice the last reply offered, while it is still unanswered:
   -- { block, handle }. At most one — a new turn retires the old question.
   offer = nil,
@@ -139,9 +143,20 @@ local function finish_restore()
   M.send(pending.text, pending.extra, pending.echo)
 end
 
+--- Abandons whatever restore is in flight: its reply is dropped rather than
+--- replayed into a panel that has moved on. A send queued behind it survives —
+--- only the paths that really discard the user's prompt clear `pending_send`.
+local function abandon_restore()
+  state.restore_token = state.restore_token + 1
+end
+
 --- Renders the resumed transcript so a reopened panel is not mysteriously empty.
-local function load_history(session_id)
+--- @param token integer the restore generation this reply belongs to
+local function load_history(session_id, token)
   agent.request('chat.history', { root = state.root, sessionId = session_id, limit = 40 }, function(err, result)
+    if token ~= state.restore_token then
+      return
+    end
     if err ~= nil then
       -- A missing transcript is not fatal: the session still resumes.
       surface():append('  could not load the earlier turns: ' .. (err.message or '?'), 'NvimeDim')
@@ -162,8 +177,18 @@ end
 local function render_fresh_start()
   surface():append('new conversation', 'NvimeSession')
   surface():append('Ask about the project, reference @files, or select code and send it here.', 'NvimeDim')
-  surface():append('<C-r> resumes earlier conversations. <C-n> always starts clean.', 'NvimeDim')
+  surface():append('<C-r> lists past conversations: resume, delete, or start fresh.', 'NvimeDim')
+  surface():append('<C-n> always starts clean.', 'NvimeDim')
   surface():blank()
+end
+
+--- Puts the panel in the clean "nothing resumed" state and releases a send
+--- that queued behind the restore this abandons.
+local function begin_fresh_start()
+  state.explicit_new = true
+  refresh_status(nil)
+  render_fresh_start()
+  finish_restore()
 end
 
 --- Loads `session_id` as the panel's current conversation and replays its
@@ -173,24 +198,32 @@ end
 --- @param session_id string
 --- @param note string|nil status suffix; nil for a plain resume on open
 local function resume(session_id, note)
+  abandon_restore()
   state.session_id = session_id
   state.explicit_new = false
-  state.pending_send = nil
   state.restored = false
   refresh_status(note)
-  load_history(session_id)
+  load_history(session_id, state.restore_token)
 end
 
 --- `chat.default = 'resume-last'`: looks up this project's stored session and
 --- resumes it; falls back to a fresh start when there is none.
-local function open_resume_last()
+--- @param token integer the restore generation this lookup belongs to
+local function open_resume_last(token)
   agent.request('chat.list', { root = state.root, limit = 1 }, function(err, result)
-    local current = (err == nil and result ~= nil) and result.current or nil
+    if token ~= state.restore_token then
+      return
+    end
+    if err ~= nil then
+      -- Never downgrade a failed lookup into "this project has no history":
+      -- the user opted into resuming and has to know it did not happen.
+      show_error(err)
+      begin_fresh_start()
+      return
+    end
+    local current = result ~= nil and result.current or nil
     if current == nil then
-      state.explicit_new = true
-      state.restored = true
-      refresh_status(nil)
-      render_fresh_start()
+      begin_fresh_start()
       return
     end
     resume(current, nil)
@@ -226,10 +259,17 @@ function M.open()
     },
   })
   if not existed then
+    abandon_restore()
     state.session_id = nil
     state.pending_send = nil
     if opts.chat.default == 'resume-last' then
-      open_resume_last()
+      -- The lookup is async and `state` outlives the panel: without resetting
+      -- these here, a send in the gap escapes the gate on stale flags and goes
+      -- out as a brand-new conversation the resume then lands on top of.
+      state.explicit_new = false
+      state.restored = false
+      refresh_status(nil)
+      open_resume_last(state.restore_token)
     else
       state.explicit_new = true
       state.restored = true
@@ -394,10 +434,18 @@ local function delete_session(session_id, done)
       return
     end
     if state.session_id == session_id then
+      -- Its transcript is gone: clear the surface and drop any restore still
+      -- in flight, so the dead conversation cannot replay after the notice.
+      abandon_restore()
       state.session_id = nil
       state.explicit_new = true
+      state.restored = true
+      state.pending_send = nil
+      surface():replace({}, {})
       surface():append('— that conversation was deleted —', 'NvimeDim')
       surface():blank()
+      refresh_status(nil)
+      render_fresh_start()
     end
     done(true)
   end)
@@ -452,10 +500,11 @@ function M.new_session()
     return
   end
   surface():replace({}, {})
+  abandon_restore()
   state.session_id = nil
   state.explicit_new = true
-  state.pending_send = nil
   state.restored = true
+  state.pending_send = nil
   refresh_status('fresh')
   render_fresh_start()
 end

@@ -70,7 +70,6 @@ local function open_on(dir)
   fake.replies = { ['chat.list'] = { err = nil, result = { current = nil, sessions = {} } } }
   local live = chat.state()
   live.request_id, live.session_id, live.root, live.pending_send = nil, nil, nil, nil
-  live.restored = false
   config.setup({})
   palette.apply()
   vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/a.lua'))
@@ -315,7 +314,6 @@ local function open_resuming(dir)
   fake.deferred = {}
   local live = chat.state()
   live.request_id, live.session_id, live.root, live.pending_send = nil, nil, nil, nil
-  live.restored = false
   config.setup({ chat = { default = 'resume-last' } })
   palette.apply()
   vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/a.lua'))
@@ -348,6 +346,51 @@ describe("chat.default = 'resume-last'", function()
     eq(nil, chat.state().session_id)
     chat.send('hello')
     eq(true, sent('chat.send').params.new)
+    panel.close('chat')
+    config.setup({})
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('queues a send that lands while the lookup is still in flight, on a reopened panel', function()
+    local dir = sandbox()
+    fake.replies['chat.list'] = { defer = true }
+    fake.replies['chat.history'] = { defer = true }
+    open_resuming(dir)
+    fake.answer('chat.list', nil, { current = 'sess-1', sessions = {} })
+    fake.answer('chat.history', nil, { turns = {} })
+
+    -- <C-n> leaves explicit_new/restored set; `state` outlives the panel, so a
+    -- reopen that does not reset them sends on the previous panel's flags.
+    chat.new_session()
+    panel.close('chat')
+    vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/a.lua'))
+    fake.requests = {}
+    -- The one path that opens and sends in a single tick: no race to win.
+    chat.send_selection()
+    eq(nil, sent('chat.send'), 'nothing may go out while the stored session is still unknown')
+
+    fake.answer('chat.list', nil, { current = 'sess-1', sessions = {} })
+    fake.answer('chat.history', nil, { turns = {} })
+    local send = sent('chat.send')
+    ok(send ~= nil, 'the queued prompt is replayed once the restore lands')
+    eq('sess-1', send.params.sessionId)
+    eq(false, send.params.new, 'the replayed prompt must not fork a brand-new conversation')
+    panel.close('chat')
+    config.setup({})
+    fake.replies['chat.history'] = nil
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('surfaces a failed lookup instead of silently starting fresh', function()
+    local dir = sandbox()
+    fake.replies['chat.list'] = { err = { message = 'sidecar exploded' }, result = nil }
+    open_resuming(dir)
+    local rendered = table.concat(scrollback(), '\n')
+    ok(rendered:find('sidecar exploded', 1, true) ~= nil, 'the user opted into resuming and must hear it failed')
+    ok(rendered:find('new conversation', 1, true) ~= nil, 'and is left in a usable, explicitly fresh state')
+    eq(true, chat.state().explicit_new)
+    chat.send('hello')
+    eq(true, sent('chat.send').params.new, 'a failed lookup must not leave the send guessing at a session')
     panel.close('chat')
     config.setup({})
     vim.fn.delete(dir, 'rf')
@@ -411,6 +454,37 @@ describe('chat.pick_session: the new-conversation row and delete', function()
     eq(nil, live.session_id, 'the panel drops the id of the conversation it just deleted')
     eq(true, live.explicit_new, 'the next send must not try to resume what no longer exists')
     panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('clears the deleted conversation off the panel and drops its in-flight restore', function()
+    local dir = sandbox()
+    open_on(dir)
+    local one = { { sessionId = 'sess-1', title = 'earlier', lastModified = 0 } }
+    fake.replies['chat.list'] = { err = nil, result = { current = 'sess-1', sessions = one } }
+    fake.replies['chat.history'] = { defer = true }
+    fake.replies['chat.forget'] = { err = nil, result = { forgotten = true } }
+
+    chat.pick_session()
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, true, true), 'x', false)
+    eq('sess-1', chat.state().session_id, 'the session is live, its history still loading')
+
+    chat.pick_session()
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    vim.api.nvim_feedkeys('d', 'x', false)
+    vim.api.nvim_feedkeys('y', 'x', false)
+    local after_delete = table.concat(scrollback(), '\n')
+    ok(after_delete:find('that conversation was deleted', 1, true) ~= nil)
+    ok(after_delete:find('new conversation', 1, true) ~= nil, 'the panel says how to start again')
+    ok(after_delete:find('switched to', 1, true) == nil, 'the dead conversation is off the surface')
+
+    fake.answer('chat.history', nil, { turns = { { role = 'user', text = 'ghost turn' } } })
+    local settled = table.concat(scrollback(), '\n')
+    ok(settled:find('ghost turn', 1, true) == nil, 'a deleted transcript must not replay after its own notice')
+    ok(settled:find('— resumed —', 1, true) == nil)
+    panel.close('chat')
+    fake.replies['chat.history'] = nil
     vim.fn.delete(dir, 'rf')
   end)
 end)
