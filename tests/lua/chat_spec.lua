@@ -217,6 +217,8 @@ describe('resuming conversations', function()
       }
       fake.replies['chat.history'] = { defer = true }
       chat.pick_session()
+      -- Row 1 is the picker's own "new conversation" entry; row 2 is sess-1.
+      vim.api.nvim_win_set_cursor(0, { 2, 0 })
       vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, true, true), 'x', false)
 
       chat.send('explain this')
@@ -262,6 +264,36 @@ describe('resuming conversations', function()
     vim.fn.delete(dir, 'rf')
   end)
 
+  it('tells the sidecar new:true, so it cannot fall back to a session on record', function()
+    -- issue #11: a nil sessionId alone is not "start fresh" — the sidecar
+    -- reads an absent one as "resume whatever this project last used" unless
+    -- told otherwise. `open_on` already leaves the panel in the fresh state.
+    local dir = sandbox()
+    open_on(dir)
+    chat.send('hello')
+    local request = sent('chat.send')
+    eq(nil, request.params.sessionId)
+    eq(true, request.params.new, 'a fresh conversation must refuse the stored-session fallback')
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('stops asking for new:true once the fresh conversation has a session id', function()
+    local dir = sandbox()
+    open_on(dir)
+    fake.replies['chat.send'] = { err = nil, result = { sessionId = 'sess-new', usage = { output = 1 }, costUsd = 0 } }
+    chat.send('hello')
+    eq(true, sent('chat.send').params.new)
+
+    fake.requests = {}
+    chat.send('carry on')
+    local second = sent('chat.send')
+    eq('sess-new', second.params.sessionId, 'the second turn continues the session the first one opened')
+    eq(false, second.params.new)
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
   it('does not abandon a running turn to start another conversation', function()
     local dir = sandbox()
     open_on(dir)
@@ -271,6 +303,113 @@ describe('resuming conversations', function()
     chat.new_session()
     eq('sess-live', live.session_id)
     ok(live.request_id ~= nil, 'the active request remains owned and cancellable')
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
+--- Opens chat under `chat.default = 'resume-last'`, otherwise like `open_on`.
+local function open_resuming(dir)
+  panel.close('chat')
+  fake.requests = {}
+  fake.deferred = {}
+  local live = chat.state()
+  live.request_id, live.session_id, live.root, live.pending_send = nil, nil, nil, nil
+  live.restored = false
+  config.setup({ chat = { default = 'resume-last' } })
+  palette.apply()
+  vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/a.lua'))
+  chat.open()
+end
+
+describe("chat.default = 'resume-last'", function()
+  it('resumes this project’s last conversation on open instead of starting fresh', function()
+    local dir = sandbox()
+    fake.replies['chat.list'] = {
+      err = nil,
+      result = { current = 'sess-1', sessions = { { sessionId = 'sess-1', title = 'earlier', lastModified = 0 } } },
+    }
+    fake.replies['chat.history'] = { err = nil, result = { turns = { { role = 'user', text = 'earlier' } } } }
+    open_resuming(dir)
+    ok(sent('chat.list') ~= nil, 'resume-last looks up the stored session on open')
+    ok(table.concat(scrollback(), '\n'):find('— resumed —', 1, true) ~= nil, 'the stored conversation is replayed')
+    eq('sess-1', chat.state().session_id)
+    eq(false, chat.state().explicit_new, 'a resumed session must not ask the sidecar for a fresh one')
+    panel.close('chat')
+    config.setup({})
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('falls back to a fresh start when this project has no stored session', function()
+    local dir = sandbox()
+    fake.replies['chat.list'] = { err = nil, result = { current = nil, sessions = {} } }
+    open_resuming(dir)
+    ok(table.concat(scrollback(), '\n'):find('new conversation', 1, true) ~= nil)
+    eq(nil, chat.state().session_id)
+    chat.send('hello')
+    eq(true, sent('chat.send').params.new)
+    panel.close('chat')
+    config.setup({})
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
+describe('chat.pick_session: the new-conversation row and delete', function()
+  it('starts fresh from the picker’s top row instead of only listing past sessions', function()
+    local dir = sandbox()
+    open_on(dir)
+    fake.replies['chat.list'] = {
+      err = nil,
+      result = { current = 'sess-1', sessions = { { sessionId = 'sess-1', title = 'earlier', lastModified = 0 } } },
+    }
+    local live = chat.state()
+    live.session_id = 'sess-1'
+    chat.pick_session()
+    -- Row 1 is the picker's own "new conversation" entry.
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, true, true), 'x', false)
+    eq(nil, live.session_id, 'the top row started a clean conversation')
+    eq(nil, sent('chat.history'), 'picking "new conversation" never resumes an existing one')
+    ok(table.concat(scrollback(), '\n'):find('new conversation', 1, true) ~= nil)
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('deletes a session through chat.forget, after the picker’s own confirm', function()
+    local dir = sandbox()
+    open_on(dir)
+    fake.replies['chat.list'] = {
+      err = nil,
+      result = { current = nil, sessions = { { sessionId = 'sess-1', title = 'earlier', lastModified = 0 } } },
+    }
+    fake.replies['chat.forget'] = { err = nil, result = { forgotten = true } }
+    chat.pick_session()
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    vim.api.nvim_feedkeys('d', 'x', false)
+    vim.api.nvim_feedkeys('y', 'x', false)
+    local request = sent('chat.forget')
+    ok(request ~= nil, 'd, then y, deletes the session under the cursor')
+    eq('sess-1', request.params.sessionId)
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('drops back to fresh when the session deleted is the one live in the panel', function()
+    local dir = sandbox()
+    open_on(dir)
+    local live = chat.state()
+    live.session_id = 'sess-1'
+    live.explicit_new = false
+    fake.replies['chat.list'] = {
+      err = nil,
+      result = { current = 'sess-1', sessions = { { sessionId = 'sess-1', title = 'earlier', lastModified = 0 } } },
+    }
+    fake.replies['chat.forget'] = { err = nil, result = { forgotten = true } }
+    chat.pick_session()
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    vim.api.nvim_feedkeys('d', 'x', false)
+    vim.api.nvim_feedkeys('y', 'x', false)
+    eq(nil, live.session_id, 'the panel drops the id of the conversation it just deleted')
+    eq(true, live.explicit_new, 'the next send must not try to resume what no longer exists')
     panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)

@@ -103,11 +103,16 @@ on, not Neovim's cwd. Bad, binary or oversized paths are reported in the panel,
 never silently dropped. `<leader>ns` sends a visual selection with its file and
 line range.
 
-**Fresh by default, resumable by choice.** Opening chat always starts a new
-conversation, so yesterday's context cannot silently leak into today's task.
-`<C-r>` lists the project's past sessions by title and age; `<C-n>` clears the
-surface for another new conversation without deleting history. Resume survives
-Neovim restarts, and several Neovim instances share the session file without
+**Fresh by default, resumable by choice.** Opening chat starts a new
+conversation, so yesterday's context cannot silently leak into today's task —
+this is `chat.default = 'new'`; set it to `'resume-last'` to pick this
+project's most recent conversation back up on open instead. Either way,
+`<C-r>` opens a picker whose first row is "new conversation" and whose
+remaining rows are past sessions by title and age — a session with no prompt
+yet reads as `(new)` rather than a raw id. `d` on a row deletes that session
+and its history, after a y/n float, never a modal. `<C-n>` clears the surface
+for another new conversation without deleting history. Resume survives Neovim
+restarts, and several Neovim instances share the session file without
 overwriting each other. A running turn must be stopped before switching, so its
 stream and cancellation handle cannot be orphaned.
 
@@ -208,6 +213,11 @@ The spec comes back as schema-enforced structured output, so nvime never scrapes
 it out of prose; if the turn answers with something unusable, the prose is shown
 as the next question and **no spec is invented**, because a fabricated spec is
 one you would approve without noticing. Answer, revise, or type `approve`.
+
+**Starting fresh never costs you an existing change.** Opening the panel
+starts a new change, and `<C-r>`'s picker leads with "start a new change" —
+existing sessions and their clones are kept until you explicitly `discard`
+one. `<C-n>` starts another new change from inside the panel the same way.
 
 ### Build
 
@@ -461,6 +471,7 @@ Off until `keymaps.enabled = true`.
 | `<CR>` | prompt, normal | send |
 | `<C-s>` | prompt, insert | send (so `<CR>` still inserts a newline) |
 | `<C-n>` / `<C-r>` | chat panel | new conversation · resume one |
+| `<CR>` / `d` / `q` | session picker | open · delete (y/n confirm) · close |
 | `<C-c>` | panel | stop the running turn |
 | `]o` | chat/big panel | jump to the pending choice |
 | `q` | scrollback | close |
@@ -497,6 +508,9 @@ require('nvime').setup({
     edit = '<leader>ne',
     changeset = '<leader>nd',
     big = '<leader>nB',
+  },
+  chat = {
+    default = 'new',             -- or 'resume-last' to pick this project's last conversation back up on open
   },
   edit = {
     fade_ms = 1500,              -- how long a fresh hunk stays lit
@@ -743,7 +757,7 @@ payload, so there is one completion path rather than a separate done event.
 Events carry no `id` field of their own — they carry the originating request's
 id in `params.id`.
 
-Methods: `chat.send`, `chat.list`, `chat.history`, `chat.cancel`,
+Methods: `chat.send`, `chat.list`, `chat.history`, `chat.forget`, `chat.cancel`,
 `edit.start`, `edit.cancel`, `edit.answer`, `edit.list_changes`, `big.create`,
 `big.list`, `big.open`, `big.diff`, `big.intake`, `big.approve`, `big.build`,
 `big.capture`, `big.revise`, `big.toggle`, `big.answer`, `big.difficulty`,

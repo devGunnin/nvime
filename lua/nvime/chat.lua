@@ -26,9 +26,18 @@ local function surface()
   return panel.get(PANEL) or NOOP
 end
 
+--- The session picker's "start a fresh conversation" row. A table, not a
+--- string, so it can never collide with a real (SDK-issued) session id.
+local NEW_SESSION = {}
+
 local state = {
   root = nil,
   session_id = nil,
+  -- True when the next `chat.send` must not fall back to this project's
+  -- stored session even though `session_id` is nil — set on every path that
+  -- means "start clean" (a fresh open, <C-n>, the picker's new-conversation
+  -- row) and cleared once a real session (fresh or resumed) is established.
+  explicit_new = true,
   request_id = nil,
   subscribed = false,
   -- False until the project's stored session and its history have both
@@ -157,6 +166,37 @@ local function render_fresh_start()
   surface():blank()
 end
 
+--- Loads `session_id` as the panel's current conversation and replays its
+--- transcript. Shared by the picker's resume choice and `chat.default =
+--- 'resume-last'`'s open path — the only two places a specific past session
+--- becomes the live one.
+--- @param session_id string
+--- @param note string|nil status suffix; nil for a plain resume on open
+local function resume(session_id, note)
+  state.session_id = session_id
+  state.explicit_new = false
+  state.pending_send = nil
+  state.restored = false
+  refresh_status(note)
+  load_history(session_id)
+end
+
+--- `chat.default = 'resume-last'`: looks up this project's stored session and
+--- resumes it; falls back to a fresh start when there is none.
+local function open_resume_last()
+  agent.request('chat.list', { root = state.root, limit = 1 }, function(err, result)
+    local current = (err == nil and result ~= nil) and result.current or nil
+    if current == nil then
+      state.explicit_new = true
+      state.restored = true
+      refresh_status(nil)
+      render_fresh_start()
+      return
+    end
+    resume(current, nil)
+  end)
+end
+
 --- Opens (or focuses) a fresh chat panel for this project.
 --- The root is captured once per panel, from the buffer the user was in — a
 --- second `M.open()` from inside the panel must not re-root the session on the
@@ -188,9 +228,14 @@ function M.open()
   if not existed then
     state.session_id = nil
     state.pending_send = nil
-    state.restored = true
-    refresh_status(nil)
-    render_fresh_start()
+    if opts.chat.default == 'resume-last' then
+      open_resume_last()
+    else
+      state.explicit_new = true
+      state.restored = true
+      refresh_status(nil)
+      render_fresh_start()
+    end
   end
 end
 
@@ -240,6 +285,7 @@ function M.send(text, extra, echo)
     prompt = text,
     context = blocks,
     sessionId = state.session_id,
+    new = state.explicit_new,
     projectInstructions = context.project_instructions(state.root),
     model = dial.model,
     effort = dial.effort,
@@ -252,6 +298,7 @@ function M.send(text, extra, echo)
       return
     end
     state.session_id = result.sessionId
+    state.explicit_new = false
     refresh_status(string.format('%d out · $%.4f', result.usage.output, result.costUsd))
     M.offer(result.options)
   end, {
@@ -333,7 +380,30 @@ local function age(ms)
   return string.format('%dd ago', math.floor(seconds / 86400))
 end
 
---- `<C-r>`: pick a past session for this project and continue it.
+--- Deletes a stored session and its history. Called from the picker's `d`,
+--- after its own y/n confirm. Drops the panel back to fresh if the deleted
+--- session is the one currently live — its transcript is gone, so nothing
+--- here could still resume it.
+--- @param session_id string
+--- @param done fun(ok: boolean) picker.open's on_delete callback
+local function delete_session(session_id, done)
+  agent.request('chat.forget', { root = state.root, sessionId = session_id }, function(err)
+    if err ~= nil then
+      show_error(err)
+      done(false)
+      return
+    end
+    if state.session_id == session_id then
+      state.session_id = nil
+      state.explicit_new = true
+      surface():append('— that conversation was deleted —', 'NvimeDim')
+      surface():blank()
+    end
+    done(true)
+  end)
+end
+
+--- `<C-r>`: start fresh, or pick a past session for this project and continue it.
 function M.pick_session()
   -- Only reachable from a panel keybind, so the panel's root is already captured.
   assert(type(state.root) == 'string', 'chat.pick_session needs an open panel')
@@ -346,7 +416,7 @@ function M.pick_session()
       show_error(err)
       return
     end
-    local items = {}
+    local items = { { label = 'new conversation', value = NEW_SESSION, deletable = false } }
     for _, session in ipairs(result.sessions or {}) do
       items[#items + 1] = {
         -- The age is metadata, the prompt is the thing being chosen: the
@@ -360,15 +430,16 @@ function M.pick_session()
     picker.open(items, {
       title = ' sessions ',
       on_choice = function(session_id)
+        if session_id == NEW_SESSION then
+          M.new_session()
+          return
+        end
         surface():replace({}, {})
-        state.session_id = session_id
-        state.pending_send = nil
-        state.restored = false
-        refresh_status('switched')
         surface():append('— switched to ' .. short(session_id) .. ' —', 'NvimeDim')
         surface():blank()
-        load_history(session_id)
+        resume(session_id, 'switched')
       end,
+      on_delete = delete_session,
     })
   end)
 end
@@ -382,6 +453,7 @@ function M.new_session()
   end
   surface():replace({}, {})
   state.session_id = nil
+  state.explicit_new = true
   state.pending_send = nil
   state.restored = true
   refresh_status('fresh')

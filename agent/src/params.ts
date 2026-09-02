@@ -45,6 +45,13 @@ export function requireBoolean(params: Record<string, unknown>, key: string): bo
   return value;
 }
 
+export function optionalBoolean(params: Record<string, unknown>, key: string): boolean | undefined {
+  const value = params[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'boolean') reject(`params.${key} must be a boolean`);
+  return value;
+}
+
 export function requireArray(params: Record<string, unknown>, key: string): unknown[] {
   const value = params[key];
   if (value === undefined || value === null) return [];

@@ -130,6 +130,11 @@ Prompt buffer ~
     <C-c>           normal      stop the running turn
     ]o              normal      jump to the pending choice
 
+Session / change picker ~
+    <CR>                        open the row under the cursor
+    d                           delete this row (y/n float, chat sessions only)
+    q, <Esc>                    close
+
 Scrollback ~
     q                           close the panel
 
@@ -215,12 +220,17 @@ Context ~
     dropped. `@` completion is gitignore-aware.
 
 Sessions ~
-    Opening chat starts a fresh conversation. <C-r> lists nvime's past
-    sessions for that project root by title and age; <C-n> starts another
-    clean conversation without deleting history. Resume survives Neovim
-    restarts, and several Neovim instances share the session file without
-    overwriting each other. Switching is refused while a turn is running, so
-    its stream and cancellation handle cannot be orphaned.
+    Opening chat starts a fresh conversation — `chat.default = 'new'`, the
+    default; set it to `'resume-last'` to pick this project's most recent
+    conversation back up on open instead. <C-r> opens a picker whose first
+    row is "new conversation" and whose remaining rows are past sessions by
+    title and age (a session with no prompt yet reads as `(new)`, not a raw
+    id); <C-n> starts another clean conversation without deleting history.
+    `d` on a picker row deletes that session and its history, after a y/n
+    float — never a modal. Resume survives Neovim restarts, and several
+    Neovim instances share the session file without overwriting each other.
+    Switching is refused while a turn is running, so its stream and
+    cancellation handle cannot be orphaned.
 
 Chat can never touch your code: it gets Read, Glob, Grep, WebFetch and
 WebSearch, and file mutation and shell are denied through SDK options rather
@@ -276,6 +286,13 @@ Intake ~
 
     A question with discrete alternatives arrives as a numbered choice you
     pick from with a keypress; see |nvime-options|.
+
+Sessions ~
+    Opening the panel starts a new change. <C-r> opens a picker whose first
+    row is "start a new change" and whose remaining rows are existing
+    sessions; <C-n> does the same from inside the panel. Starting fresh never
+    discards an existing session or its build clone — `discard` from the
+    picked session's own panel is what throws one away.
 
 Build ~
     Approving records HEAD and returns; the build then makes a local clone of
@@ -362,6 +379,9 @@ Defaults: >
         changeset = '<leader>nd',
         big = '<leader>nB',
       },
+      chat = {
+        default = 'new',  -- or 'resume-last'
+      },
       edit = {
         fade_ms = 1500,
         nofade = false,
@@ -414,6 +434,10 @@ keymaps.send_selection string, `<leader>ns` by default.
 keymaps.edit           string, `<leader>ne` by default.
 keymaps.changeset      string, `<leader>nd` by default.
 keymaps.big            string, `<leader>nB` by default.
+
+chat.default            'new' (default) or 'resume-last'. What opening chat
+                       with no prior selection does: start clean, or pick
+                       this project's last conversation back up.
 
 edit.fade_ms           number >= 100. How long a fresh hunk stays lit.
 edit.nofade            boolean. Keep the highlight until the next change.

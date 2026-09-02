@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
-import { getSessionMessages, listSessions, query } from '@anthropic-ai/claude-agent-sdk';
+import { deleteSession, getSessionMessages, listSessions, query } from '@anthropic-ai/claude-agent-sdk';
 import { BigService } from './big.js';
 import { BigStore, defaultBigRoot } from './bigstore.js';
 import { CertificationService } from './certification.js';
@@ -14,6 +14,7 @@ import { EditService, parseScope } from './edit.js';
 import { resolveClaudeExecutable, strippedNames } from './env.js';
 import { DEFAULT_DIFFICULTY, DIFFICULTIES, isDifficulty, type Difficulty } from './gate.js';
 import {
+  optionalBoolean,
   optionalPositiveInt,
   optionalString,
   requireAbsolutePath,
@@ -55,7 +56,7 @@ function main(): void {
     claudePath === null
       ? null
       : new ChatService({
-          sdk: { query, listSessions, getSessionMessages },
+          sdk: { query, listSessions, getSessionMessages, deleteSession },
           store,
           claudePath,
           env: process.env,
@@ -249,6 +250,7 @@ function registerChatHandlers(dispatcher: Dispatcher, chat: ChatService | null):
       prompt: requireString(params, 'prompt'),
       context: parseContextBlocks(requireArray(params, 'context')),
       sessionId: optionalString(params, 'sessionId'),
+      new: optionalBoolean(params, 'new'),
       projectInstructions: parseProjectInstructions(params.projectInstructions),
       ...parseDial(params),
     }),
@@ -268,6 +270,11 @@ function registerChatHandlers(dispatcher: Dispatcher, chat: ChatService | null):
       optionalPositiveInt(params, 'limit', 500) ?? 100,
     ),
   }));
+
+  dispatcher.register('chat.forget', async (_id, params) => {
+    await present(chat).forget(requireAbsolutePath(params, 'root'), requireString(params, 'sessionId'));
+    return { forgotten: true };
+  });
 
   dispatcher.register('chat.cancel', async (_id, params) => ({
     cancelled: present(chat).cancel(requireTarget(params)),

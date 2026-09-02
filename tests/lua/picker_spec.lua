@@ -61,6 +61,105 @@ describe('picker.open', function()
   end)
 end)
 
+describe('picker.open: deleting a row', function()
+  local function feed(keys)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, true, true), 'x', false)
+  end
+
+  it('confirms with a y/n float, never a blocking modal, before deleting', function()
+    local deleted = {}
+    local win = picker.open(items(2), {
+      on_choice = function() end,
+      on_delete = function(value, done)
+        deleted[#deleted + 1] = value
+        done(true)
+      end,
+    })
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    feed('d')
+    ok(#vim.api.nvim_list_wins() >= 2, 'the confirm prompt is a real float, not a blocking vim.fn.confirm')
+    eq({}, deleted, 'nothing is deleted until the float is answered')
+
+    feed('y')
+    eq({ 'id-1' }, deleted)
+    ok(vim.api.nvim_win_is_valid(win), 'the picker stays open after one deletion')
+    local remaining = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false)
+    eq(1, #remaining, 'the deleted row is gone')
+    vim.api.nvim_win_close(win, true)
+  end)
+
+  it('leaves the row alone on n, q, or <Esc>', function()
+    local deleted = {}
+    for _, dismiss_key in ipairs({ 'n', 'q', '<Esc>' }) do
+      local win = picker.open(items(1), {
+        on_choice = function() end,
+        on_delete = function(value, done)
+          deleted[#deleted + 1] = value
+          done(true)
+        end,
+      })
+      vim.api.nvim_win_set_cursor(win, { 1, 0 })
+      feed('d')
+      feed(dismiss_key)
+      eq({}, deleted, dismiss_key .. ' must not delete')
+      ok(vim.api.nvim_win_is_valid(win), dismiss_key .. ' must not close the picker itself')
+      vim.api.nvim_win_close(win, true)
+    end
+  end)
+
+  it('closes the picker instead of leaving an empty list once the last row goes', function()
+    local win = picker.open(items(1), {
+      on_choice = function() end,
+      on_delete = function(_, done)
+        done(true)
+      end,
+    })
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    feed('d')
+    feed('y')
+    ok(not vim.api.nvim_win_is_valid(win), 'no rows left to show')
+  end)
+
+  it('opts an item out of deletion with deletable = false', function()
+    local deleted = {}
+    local win = picker.open({ { label = 'new conversation', value = 'new', deletable = false } }, {
+      on_choice = function() end,
+      on_delete = function(value, done)
+        deleted[#deleted + 1] = value
+        done(true)
+      end,
+    })
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    feed('d')
+    eq({}, deleted, 'a non-deletable row ignores d entirely — no confirm float either')
+    ok(vim.api.nvim_win_is_valid(win))
+    vim.api.nvim_win_close(win, true)
+  end)
+
+  it('keeps the row when the deletion itself fails', function()
+    local win = picker.open(items(1), {
+      on_choice = function() end,
+      on_delete = function(_, done)
+        done(false)
+      end,
+    })
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    feed('d')
+    feed('y')
+    ok(vim.api.nvim_win_is_valid(win))
+    eq(1, #vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false), 'the row survives a failed delete')
+    vim.api.nvim_win_close(win, true)
+  end)
+
+  it('does nothing on d when the picker was not given on_delete', function()
+    local win = picker.open(items(1), { on_choice = function() end })
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    feed('d')
+    ok(vim.api.nvim_win_is_valid(win), 'd is inert without on_delete, not an error')
+    vim.api.nvim_win_close(win, true)
+  end)
+end)
+
 describe('picker highlighting', function()
   it('dims the metadata column and marks the session already resumed', function()
     local win = picker.open({

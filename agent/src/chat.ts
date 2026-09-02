@@ -5,6 +5,7 @@ import type {
   SDKMessage,
   SDKSessionInfo,
   SessionMessage,
+  SessionMutationOptions,
 } from '@anthropic-ai/claude-agent-sdk';
 import {
   composePrompt,
@@ -46,6 +47,7 @@ export interface SdkBindings {
     sessionId: string,
     options?: GetSessionMessagesOptions,
   ) => Promise<SessionMessage[]>;
+  deleteSession: (sessionId: string, options?: SessionMutationOptions) => Promise<void>;
 }
 
 export type EmitEvent = (event: string, params: Record<string, unknown>) => void;
@@ -55,6 +57,10 @@ export interface SendParams extends Dial {
   prompt: string;
   context: ContextBlock[];
   sessionId?: string | undefined;
+  /** Skips the stored "current" session fallback below — a deliberate fresh
+   *  start even when this project has one on record. An explicit `sessionId`
+   *  still wins over this: it only changes what an absent one falls back to. */
+  new?: boolean | undefined;
   /** The project's CLAUDE.md/AGENTS.md/.nvime/instructions.md, or null when
    *  none was found or the feature is off. */
   projectInstructions?: ProjectInstructions | null | undefined;
@@ -116,7 +122,7 @@ export class ChatService {
     if (this.#runningByRoot.has(params.root)) {
       throw new ProtocolError('busy', 'a chat run is already in flight for this project');
     }
-    const resume = params.sessionId ?? this.#store.get(params.root).current ?? undefined;
+    const resume = params.sessionId ?? (params.new === true ? undefined : this.#store.get(params.root).current ?? undefined);
     const abort = new AbortController();
     this.#running.set(requestId, abort);
     this.#runningByRoot.set(params.root, requestId);
@@ -153,6 +159,12 @@ export class ChatService {
       .slice(0, limit)
       .map(toSummary);
     return { current: entry.current, sessions };
+  }
+
+  /** Deletes a stored session and its transcript, and drops it from the project's list. */
+  async forget(root: string, sessionId: string): Promise<void> {
+    await this.#sdk.deleteSession(sessionId, { dir: root });
+    this.#store.forget(root, sessionId);
   }
 
   async history(root: string, sessionId: string, limit: number): Promise<
@@ -278,8 +290,10 @@ export class ChatService {
   }
 }
 
+/** A session with no title yet (created, but no prompt has landed) reads as
+ *  "(new)" rather than its raw id — the id is meaningless to a reader. */
 function toSummary(info: SDKSessionInfo): SessionSummary {
-  const title = info.customTitle ?? info.firstPrompt ?? info.summary ?? info.sessionId;
+  const title = info.customTitle ?? info.firstPrompt ?? info.summary ?? '(new)';
   return { sessionId: info.sessionId, title, lastModified: info.lastModified };
 }
 
