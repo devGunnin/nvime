@@ -233,6 +233,33 @@ describe('edit: live application', function()
     cleanup()
   end)
 
+  it('reports every third-party write, unlike the one-per-run conflict line', function()
+    -- `external-change` is a distinct event each time: something else wrote
+    -- the file again, and the second one must not be silent.
+    local _, path = sandbox()
+    open_on(path)
+    edit.send('reformat it')
+    local said = 0
+    for _ = 1, 3 do
+      fake.subscriber('edit.applied', {
+        id = edit.state().request_id,
+        runId = 'r1',
+        index = 0,
+        path = path,
+        tool = 'Edit',
+        before = { kind = 'text', text = 'nothing like what is on disk\n' },
+        after = { kind = 'text', text = 'def drain():\n    lock()\n' },
+      })
+    end
+    for _, line in ipairs(scrollback()) do
+      if line:find('something else wrote this file', 1, true) ~= nil then
+        said = said + 1
+      end
+    end
+    eq(3, said, 'each third-party write is its own event')
+    cleanup()
+  end)
+
   it('does not blame the user when a shell step, not they, changed the file', function()
     local _, path = sandbox()
     open_on(path)
@@ -354,6 +381,18 @@ describe('edit: approvals', function()
     )
     fake.subscriber('edit.approval_settled', { id = id, approvalId = 'r1:t1', allowed = false, cause = 'timeout' })
     ok(has_line('denied (timed out)'), 'a pending ask and a timed-out one must not look identical')
+    cleanup()
+  end)
+
+  it('names a duplicate ask as a duplicate, not as a stopped run', function()
+    local _, path = sandbox()
+    open_on(path)
+    edit.send('go')
+    local id = edit.state().request_id
+    fake.subscriber('edit.approval', { id = id, approvalId = 'r1:t1', tool = 'Bash', summary = 'x', reason = 'y' })
+    fake.subscriber('edit.approval_settled', { id = id, approvalId = 'r1:t1', allowed = false, cause = 'duplicate' })
+    ok(has_line('denied (duplicate request)'), 'the run is fine and the first ask is still on screen')
+    ok(not has_line('run stopped'), 'so it must not read as an abort')
     cleanup()
   end)
 

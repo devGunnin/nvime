@@ -429,4 +429,49 @@ describe('the approval float is tall enough for what it shows', function()
     )
     ok(body:find('the exact contents', 1, true) ~= nil, 'the line breaks are part of what is consented to')
   end)
+
+  it('never suppresses a payload whose whitespace the summary flattened', function()
+    -- The summary is rendered through `text.wrap`, which collapses runs of
+    -- whitespace: consenting to it would be consenting to a different command.
+    local text = 'grep -n\t--color=never  needle .'
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Bash',
+        summary = 'running ' .. text,
+        reason = 'runs a shell command',
+        detail = { kind = 'command', text = text, bytes = #text },
+      }, 72),
+      '\n'
+    )
+    ok(body:find('the exact command', 1, true) ~= nil, 'the aligned command is shown verbatim')
+  end)
+
+  it('never suppresses a payload short enough to appear in prose by accident', function()
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Bash',
+        summary = 'running the release script',
+        reason = 'runs a shell command',
+        detail = { kind = 'command', text = 'rm', bytes = 2 },
+      }, 72),
+      '\n'
+    )
+    ok(body:find('the exact command', 1, true) ~= nil, 'a two-character payload is not "already shown"')
+  end)
+
+  it('suppresses only when the summary carries the payload as a whole', function()
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Bash',
+        summary = 'running find . -name *.pyc -delete',
+        reason = 'runs a shell command',
+        detail = { kind = 'command', text = 'find . -name *.py', bytes = 17 },
+      }, 72),
+      '\n'
+    )
+    ok(body:find('the exact command', 1, true) ~= nil, 'a prefix of the summary is not the whole command')
+  end)
 end)

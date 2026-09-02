@@ -500,9 +500,13 @@ describe('when the runner cannot start', () => {
     inlineTurns.push([init(), result('built it')]);
     inlineTurns.push([init(), result('triaged', { blocks: [] })]);
 
-    await inline.start(1, 'build', { root: repo, id: session.id });
+    const view = await inline.start(1, 'build', { root: repo, id: session.id });
     assert.equal(events.some((entry) => entry.event === 'big.notice'), false);
     assert.equal(existsSync(store.logPathFor(repo, session.id)), false, 'and writes no run log');
+    // No runner, so no control socket: the editor reads this as unsteerable
+    // rather than offering a steer every attempt would refuse.
+    assert.equal(view.runner, null);
+    assert.equal(view.runnerLive, false);
   });
 
   it('refuses to start a second build over a live one', async () => {

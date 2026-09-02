@@ -1,7 +1,7 @@
 local t = require('harness')
 local config = require('nvime.config')
 
-local describe, it, eq = t.describe, t.it, t.eq
+local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
 
 describe('config.setup', function()
   it('returns the defaults when given nothing', function()
@@ -214,15 +214,41 @@ describe('unknown keys', function()
 end)
 
 describe('agent.node', function()
-  it('refuses a binary that is not there, at setup rather than at the first turn', function()
-    t.throws(function()
-      config.setup({ agent = { node = '/nonexistent/bin/node' } })
-    end, 'agent%.node is not an executable')
+  --- `setup` with `vim.notify` captured.
+  local function setup_saying(user)
+    local said = {}
+    local real = vim.notify
+    vim.notify = function(message, level)
+      said[#said + 1] = { message = message, level = level }
+    end
+    local ok_run, result = pcall(config.setup, user)
+    vim.notify = real
+    if not ok_run then
+      error(result, 0)
+    end
+    return result, said
+  end
+
+  it('warns about a binary that is not there, and leaves the config standing', function()
+    local opts, said = setup_saying({ agent = { node = '/nonexistent/bin/node' } })
+    eq('/nonexistent/bin/node', opts.agent.node, 'setup returns normally — doctor is the authority')
+    eq(1, #said, vim.inspect(said))
+    ok(said[1].message:find('/nonexistent/bin/node', 1, true) ~= nil, said[1].message)
+    ok(said[1].message:find(':Nvime doctor', 1, true) ~= nil, said[1].message)
+    eq(vim.log.levels.WARN, said[1].level)
     config.setup()
   end)
 
-  it('accepts one that resolves on PATH', function()
-    eq('node', config.setup({ agent = { node = 'node' } }).agent.node)
+  it('expands a ~ path rather than spawning it verbatim', function()
+    local opts = setup_saying({ agent = { node = '~/.nvm/versions/node/v20/bin/node' } })
+    eq(vim.fn.expand('~') .. '/.nvm/versions/node/v20/bin/node', opts.agent.node)
+    config.setup()
+  end)
+
+  it('accepts one that resolves on PATH without a word', function()
+    local opts, said = setup_saying({ agent = { node = 'node' } })
+    eq('node', opts.agent.node, 'a bare name is left for PATH to resolve')
+    eq(0, #said, vim.inspect(said))
     config.setup()
   end)
 end)

@@ -65,13 +65,13 @@ describe('normal mode on focus', function()
     panel.close('changeset')
   end)
 
-  it('keeps insert mode in a prompt panel, which is there to be typed in', function()
+  it('never forces normal mode on a prompt panel, which is there to be typed in', function()
     setup()
     panel.close('chat')
     local left = opened_from_insert(function()
       panel.open({ name = 'chat', width = 40, on_submit = function() end })
     end)
-    eq(false, left, 'the prompt box opens ready to type')
+    eq(false, left, 'no stopinsert is issued for a prompt box')
     panel.close('chat')
   end)
 
@@ -127,35 +127,126 @@ describe('normal mode on focus', function()
     ok(opened_from_insert(modes.normal))
     eq('n', vim.fn.mode(), 'and a reader already in normal mode is left alone')
   end)
+
+  --- What `modes.normal()` does in one reported mode: the ex-commands it runs
+  --- and the keys it feeds, with `mode()` answering `reported`.
+  local function acts_in(reported)
+    local real_mode, real_cmd, real_feed = vim.fn.mode, vim.cmd, vim.api.nvim_feedkeys
+    local did = {}
+    vim.fn.mode = function()
+      return reported
+    end
+    vim.cmd = function(command)
+      did[#did + 1] = command
+      return nil
+    end
+    vim.api.nvim_feedkeys = function(keys)
+      did[#did + 1] = 'feed:' .. vim.fn.keytrans(keys)
+    end
+    local ran, err = pcall(modes.normal)
+    vim.fn.mode, vim.cmd, vim.api.nvim_feedkeys = real_mode, real_cmd, real_feed
+    if not ran then
+      error(err, 0)
+    end
+    return table.concat(did, ' ')
+  end
+
+  it('leaves the insert-adjacent modes a surface must never inherit', function()
+    eq('stopinsert', acts_in('i'), 'insert')
+    eq('stopinsert', acts_in('R'), 'replace')
+    eq('stopinsert', acts_in('niI'), 'normal-from-insert (i_CTRL-O) returns to insert without this')
+    ok(acts_in('s'):find('feed:<Esc>', 1, true) ~= nil, 'select mode: a printable key replaces the selection')
+    ok(acts_in('S'):find('feed:<Esc>', 1, true) ~= nil, 'select by line')
+    eq('', acts_in('n'), 'normal mode is left alone')
+    eq('', acts_in('v'), 'visual mode ends on its own when the window changes')
+  end)
 end)
 
-describe('prompt keys work in both modes', function()
-  it('binds a control chord in insert as well, and a literal key only in normal', function()
+describe('the keys a prompt box answers in insert', function()
+  --- The chat prompt, wired exactly as `chat.open` wires it (completion and
+  --- all), without needing the chat module's sidecar stub.
+  local function chat_prompt(root)
+    setup()
+    panel.close('chat')
+    return panel.open({
+      name = 'chat',
+      width = 40,
+      root = root,
+      on_submit = function() end,
+      keys = {
+        { mode = 'n', lhs = '<C-n>', fn = function() end, where = 'both' },
+        { mode = 'n', lhs = '<C-r>', fn = function() end, where = 'both', insert = 'when-empty' },
+        { mode = 'n', lhs = '<C-c>', fn = function() end, where = 'both', insert = true },
+        { mode = 'n', lhs = ']o', fn = function() end, where = 'both' },
+      },
+    })
+  end
+
+  it('never binds the completion keys in insert on a box that has completion', function()
+    local view = chat_prompt(vim.fn.getcwd())
+    eq(
+      "v:lua.require('nvime.completion').completefunc",
+      vim.bo[view.prompt_buf].completefunc,
+      'the box under test is the one with @-path completion'
+    )
+    local insert = keys_in(view.prompt_buf, 'i')
+    eq(nil, insert['<C-N>'], 'i_CTRL-N walks the completion popup — nvime must not take it')
+    eq(nil, insert['<C-T>'], 'i_CTRL-T indents the line')
+    eq(nil, insert[']o'], 'a literal key in insert would shadow the reader’s own typing')
+    ok(insert['<C-C>'], 'stop is reachable from the mode a send leaves you in')
+    ok(insert['<C-R>'])
+    ok(insert['<C-S>'])
+    for _, lhs in ipairs({ '<C-N>', ']o' }) do
+      ok(keys_in(view.prompt_buf, 'n')[lhs], lhs .. ' stays a normal-mode key')
+    end
+    panel.close('chat')
+  end)
+
+  it('is opt-in per key, never inferred from the key’s shape', function()
     setup()
     panel.close('chat')
     local view = panel.open({
       name = 'chat',
       width = 40,
       on_submit = function() end,
-      keys = {
-        { mode = 'n', lhs = '<C-r>', fn = function() end, where = 'both' },
-        { mode = 'n', lhs = ']o', fn = function() end, where = 'both' },
-      },
+      keys = { { mode = 'n', lhs = '<C-b>', fn = function() end, where = 'both' } },
     })
-    local insert = keys_in(view.prompt_buf, 'i')
-    ok(insert['<C-R>'], '<C-r> must not open Vim’s register prompt in the box that advertises it')
-    ok(insert['<C-S>'], 'and <C-s> still sends')
-    eq(nil, insert[']o'], 'a literal key in insert would shadow the reader’s own typing')
-    ok(keys_in(view.prompt_buf, 'n')[']o'], 'it stays a normal-mode key')
+    eq(nil, keys_in(view.prompt_buf, 'i')['<C-B>'], 'a control chord alone does not earn an insert binding')
+    ok(keys_in(view.prompt_buf, 'n')['<C-B>'])
     panel.close('chat')
   end)
 
-  it('decides that by the shape of the key, not by a list', function()
-    eq({ 'n', 'i' }, panel.prompt_modes('<C-c>'))
-    eq({ 'n', 'i' }, panel.prompt_modes('<C-t>'))
-    eq({ 'n' }, panel.prompt_modes('s'))
-    eq({ 'n' }, panel.prompt_modes(']o'))
-    eq({ 'n' }, panel.prompt_modes('<CR>'))
+  --- The <expr> callback of one insert mapping, with `pumvisible()` answering
+  --- `open`. What it RETURNS is what nvim types: the native key, or nothing.
+  local function insert_expr(buf, lhs, open)
+    local real = vim.fn.pumvisible
+    vim.fn.pumvisible = function()
+      return open and 1 or 0
+    end
+    local produced = nil
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, 'i')) do
+      if map.lhs == lhs then
+        ok(map.expr == 1, lhs .. ' must be an <expr> map so the native key can win')
+        produced = map.callback()
+      end
+    end
+    vim.fn.pumvisible = real
+    return produced
+  end
+
+  it('hands the key back to Vim while the completion popup is up', function()
+    local view = chat_prompt(vim.fn.getcwd())
+    eq('<C-c>', insert_expr(view.prompt_buf, '<C-C>', true), 'the popup owns the key first')
+    eq('', insert_expr(view.prompt_buf, '<C-C>', false), 'otherwise nvime acts')
+    panel.close('chat')
+  end)
+
+  it('opens the session picker on <C-r> only when the box is empty', function()
+    local view = chat_prompt(vim.fn.getcwd())
+    eq('', insert_expr(view.prompt_buf, '<C-R>', false), 'an empty box has nothing to paste into')
+    vim.api.nvim_buf_set_lines(view.prompt_buf, 0, -1, false, { 'the retry helper in ' })
+    eq('<C-r>', insert_expr(view.prompt_buf, '<C-R>', false), 'i_CTRL-R stays the register paste mid-prompt')
+    panel.close('chat')
   end)
 
   it('says in the hint that <CR> sends from normal and <C-s> from insert', function()
@@ -168,6 +259,86 @@ describe('prompt keys work in both modes', function()
 end)
 
 describe('the compose float cancels on one <Esc>', function()
+  --- The <expr> callback of the float's insert-mode <Esc>, with `pumvisible()`
+  --- answering `open`.
+  local function esc_expr(buf, open)
+    local real = vim.fn.pumvisible
+    vim.fn.pumvisible = function()
+      return open and 1 or 0
+    end
+    local produced = nil
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, 'i')) do
+      if map.lhs == '<Esc>' then
+        produced = map.callback()
+      end
+    end
+    vim.fn.pumvisible = real
+    return produced
+  end
+
+  it('dismisses the completion popup instead of the box when one is up', function()
+    compose.dismiss()
+    compose.open({ title = ' defend ', no_paste = true, on_submit = function() end })
+    local float = compose.current()
+    eq('<C-e>', esc_expr(float.buf, true), 'the popup is what <Esc> closes while it is open')
+    ok(compose.current() ~= nil, 'and the answer is still on screen')
+    eq('', esc_expr(float.buf, false), 'with no popup, <Esc> is the cancel the footer promises')
+    compose.dismiss()
+  end)
+
+  it('hands a discarded draft back through the unnamed register', function()
+    compose.dismiss()
+    vim.fn.setreg('"', 'something else entirely')
+    compose.open({ title = ' defend ', no_paste = true, on_submit = function() end })
+    local float = compose.current()
+    local buf = float.buf
+    local answer = 'the retry helper already backs off, so the new branch would double it'
+    -- Typed, not written: this box refuses a paste, and a set_lines of a whole
+    -- sentence IS a paste to the guard.
+    vim.api.nvim_set_current_win(float.win)
+    vim.api.nvim_feedkeys('i' .. answer, 'x', false)
+    eq({ answer }, vim.api.nvim_buf_get_lines(buf, 0, -1, false), 'the answer is in the box')
+    local said = {}
+    local real_notify = vim.notify
+    vim.notify = function(message)
+      said[#said + 1] = message
+    end
+    local ran, err = pcall(function()
+      -- The cancel itself, through the mapping the reader presses: the <expr>
+      -- map schedules it, so the wait is what runs it.
+      eq('', esc_expr(buf, false))
+      vim.wait(200, function()
+        return compose.current() == nil
+      end)
+    end)
+    vim.notify = real_notify
+    if not ran then
+      error(err, 0)
+    end
+    eq(nil, compose.current(), 'one <Esc> from insert closes it')
+    eq(answer, vim.fn.getreg('"'), 'a paste-blocked answer must be recoverable after a cancel')
+    ok(table.concat(said, ' '):find('"p" pastes it back', 1, true) ~= nil, table.concat(said, ' '))
+  end)
+
+  it('stashes the draft on the normal-mode cancels too', function()
+    for _, key in ipairs({ 'q', '<C-c>' }) do
+      compose.dismiss()
+      vim.fn.setreg('"', '')
+      compose.open({ title = ' defend ', no_paste = true, on_submit = function() end })
+      local float = compose.current()
+      vim.api.nvim_buf_set_lines(float.buf, 0, -1, false, { 'a defence worth keeping' })
+      vim.api.nvim_set_current_win(float.win)
+      local real_notify = vim.notify
+      vim.notify = function() end
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(key, true, false, true), 'x', false)
+      vim.notify = real_notify
+      eq(nil, compose.current(), key .. ' cancels')
+      eq('a defence worth keeping', vim.fn.getreg('"'), key .. ' keeps the draft')
+    end
+  end)
+end)
+
+describe('the compose float’s advertised keys', function()
   it('is bound in insert too — the float opens there', function()
     compose.dismiss()
     compose.open({ title = ' steer ', hint = 'one nudge', on_submit = function() end })

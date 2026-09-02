@@ -162,9 +162,11 @@ describe('chat.open', function()
       for _, map in ipairs(vim.api.nvim_buf_get_keymap(view.prompt_buf, 'i')) do
         insert[map.lhs] = true
       end
-      for _, lhs in ipairs({ '<C-N>', '<C-R>', '<C-C>', '<C-S>' }) do
+      for _, lhs in ipairs({ '<C-R>', '<C-C>', '<C-S>' }) do
         ok(insert[lhs], lhs .. ' is advertised on a box that opens in insert mode')
       end
+      eq(nil, insert['<C-N>'], 'i_CTRL-N belongs to this box’s own completion popup')
+      ok(hint:find('n_<C-n>', 1, true) ~= nil, 'so the hint marks it normal-only: ' .. hint)
     end)
     panel.close('chat')
     vim.fn.delete(dir, 'rf')

@@ -90,22 +90,24 @@ local function show_error(err)
   surface():blank()
 end
 
---- Whether this run has already said that `path` is unapplied. Every write to
---- a file the reader has unsaved edits in reports the same three lines, so a
---- run that touches it five times floods the panel with one fact. The count
---- still reaches the run summary.
+--- Whether this run has already said that the reader's unsaved edits are why
+--- `path` was left alone. Every write to that buffer reports the same three
+--- lines, so a run that touches it five times floods the panel with one fact;
+--- the count still reaches the run summary.
+---
+--- `conflict` only: `stale-buffer` and `external-change` are a fresh event
+--- each time — something else wrote the file AGAIN — and stay reported.
 --- @param status string
 --- @param path string
 --- @return boolean
 local function said_already(status, path)
-  if not UNAPPLIED[status] or state.tally == nil then
+  if status ~= 'conflict' or state.tally == nil then
     return false
   end
-  local key = status .. '\0' .. path
-  if state.tally.said[key] then
+  if state.tally.said[path] then
     return true
   end
-  state.tally.said[key] = true
+  state.tally.said[path] = true
   return false
 end
 
@@ -182,7 +184,7 @@ local function on_approval_settled(params)
   if params.allowed then
     return
   end
-  local why = { timeout = ' (timed out)', aborted = ' (run stopped)' }
+  local why = { timeout = ' (timed out)', aborted = ' (run stopped)', duplicate = ' (duplicate request)' }
   surface():interject('  ' .. icons.get().fail .. ' denied' .. (why[params.cause] or ''), 'NvimeError')
 end
 

@@ -125,15 +125,21 @@ Global ~
 Prompt buffer ~
     <CR>            normal      send the prompt
     <C-s>           insert      send the prompt (<CR> still inserts a newline)
-    <C-n>           both        start a new conversation / big change
-    <C-r>           both        session / change picker
-    <C-t>           both        open the review threads (big panel)
     <C-c>           both        stop the running turn
+    <C-r>           both        session / change picker — in insert only while
+                                 the box is EMPTY; with anything typed it is
+                                 |i_CTRL-R|, the register paste, as always
+    <C-n>           normal      start a new conversation / big change
+    <C-t>           normal      open the review threads (big panel)
     ]o              normal      jump to the pending choice
 
-    Every control chord the prompt advertises is bound in insert mode too: the
-    box is left in insert after a send, which is exactly when they are wanted.
-    A literal key is never bound there — it would shadow your own typing.
+    Which keys reach into insert mode is decided key by key, never by the
+    key's shape. The box is left in insert after every send, so `<C-c>` and
+    `<C-r>` answer there; `<C-n>` and `<C-t>` do NOT, because insert mode
+    already owns them (|i_CTRL-N| walks the @-path completion popup this very
+    box offers, |i_CTRL-T| indents the line). The hint marks a normal-only key
+    `n_<key>`. While the completion popup is up, every insert mapping hands the
+    key back to Neovim.
 
 Session / change picker ~
     <CR>                        open the row under the cursor
@@ -191,8 +197,10 @@ Dashboard ~
 Answer box (paste-blocked) ~
     <CR>                        submit
     <C-s>            insert     submit
-    <Esc>            both       cancel (one press, from insert too)
-    q                           cancel
+    <Esc>            both       cancel (one press, from insert too); with the
+                                 completion popup up it closes the popup only
+    q, <C-c>         normal      cancel
+    A cancelled draft is put in the unnamed register: "p pastes it back.
     p, P, gp, gP, ]p, [p, ]P, [P, i_<C-r>   refused: type it
 
 ==============================================================================
@@ -493,7 +501,9 @@ big.cleanup_on_merge   boolean. Throw the build clone away once the change
                        lands. Off by default: the clone is the only place the
                        build's own history still exists.
 
-agent.node             string. The node binary. Must exist at setup().
+agent.node             string. The node binary; `~` is expanded. Not
+                       executable? setup() warns and carries on — `:Nvime
+                       doctor` is where that is diagnosed.
 agent.claude           string or nil. Absolute path to `claude`; nil resolves
                        it from PATH.
 agent.request_timeout_ms

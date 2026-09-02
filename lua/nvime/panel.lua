@@ -241,18 +241,40 @@ local function bind(buf, mode, lhs, fn, desc)
   vim.keymap.set(mode, lhs, fn, { buffer = buf, nowait = true, silent = true, desc = desc })
 end
 
---- Which modes a prompt key is bound in. The prompt is left in insert after
---- every send, so a key advertised on that window has to answer there too —
---- but only a control chord may: binding a literal key (`]o`, `s`) in insert
---- would shadow the user's own typing.
---- @param lhs string
---- @return string[]
-function M.prompt_modes(lhs)
-  assert(type(lhs) == 'string' and lhs ~= '', 'panel.prompt_modes needs a key')
-  if lhs:match('^<[Cc]%-[^>]+>$') == nil then
-    return { 'n' }
+--- Whether the prompt box is empty. What `<C-r>` decides on: an empty box has
+--- nothing to paste into, a box with a half-written prompt in it does.
+local function prompt_is_empty(self)
+  if self.prompt_buf == nil or not vim.api.nvim_buf_is_valid(self.prompt_buf) then
+    return true
   end
-  return modes.PROMPT
+  return vim.trim(table.concat(vim.api.nvim_buf_get_lines(self.prompt_buf, 0, -1, false), '\n')) == ''
+end
+
+--- One insert-mode mapping for a prompt key, opt-in per key (`insert = true`,
+--- or `'when-empty'`). Never inferred from the key's shape: that swept in
+--- `<C-n>` and took the panel's own completion popup with it.
+---
+--- Vim owns every key that gets here, so the native key wins whenever nvime's
+--- action would surprise — the completion popup is up, or the box already has
+--- text and `<C-r>` is the register paste it has always been. `<expr>`, so the
+--- action runs on `vim.schedule`: an expression mapping may not open a window.
+local function bind_prompt_insert(self, key)
+  assert(key.insert == true or key.insert == 'when-empty', 'a prompt key’s insert binding must be true or when-empty')
+  local only_when_empty = key.insert == 'when-empty'
+  vim.keymap.set('i', key.lhs, function()
+    if vim.fn.pumvisible() == 1 or (only_when_empty and not prompt_is_empty(self)) then
+      return key.lhs
+    end
+    vim.schedule(key.fn)
+    return ''
+  end, {
+    buffer = self.prompt_buf,
+    expr = true,
+    replace_keycodes = true,
+    nowait = true,
+    silent = true,
+    desc = key.desc,
+  })
 end
 
 --- Prompt text, then clear it ready for the next message.
@@ -442,8 +464,10 @@ function M.open(opts)
   end
   for _, key in ipairs(opts.keys or {}) do
     for _, buf in ipairs(self:_key_buffers(key.where)) do
-      local mode = buf == self.prompt_buf and M.prompt_modes(key.lhs) or key.mode
-      bind(buf, mode, key.lhs, key.fn, key.desc)
+      bind(buf, key.mode, key.lhs, key.fn, key.desc)
+      if key.insert ~= nil and buf == self.prompt_buf then
+        bind_prompt_insert(self, key)
+      end
     end
   end
   bind(self.buf, 'n', 'q', function()

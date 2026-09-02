@@ -80,4 +80,14 @@ describe('ApprovalGate', () => {
   it('refuses a nonsensical deadline instead of never timing out', () => {
     assert.throws(() => new ApprovalGate(0), /positive timeout/);
   });
+  it('names a duplicate id as a duplicate, not as an abort', async () => {
+    const gate = new ApprovalGate(50);
+    const first = gate.request('r1:t1');
+    const second = await gate.request('r1:t1');
+    assert.equal(second.cause, 'duplicate', 'the run is fine and the first ask is still on screen');
+    assert.equal(second.allowed, false);
+    gate.answer('r1:t1', true);
+    await first;
+  });
+
 });

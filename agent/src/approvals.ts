@@ -14,7 +14,7 @@
  * from one they typed, so the cause travels with the outcome rather than
  * being guessed at from `reason`'s wording.
  */
-export type ApprovalCause = 'answered' | 'timeout' | 'aborted';
+export type ApprovalCause = 'answered' | 'timeout' | 'aborted' | 'duplicate';
 
 export interface ApprovalOutcome {
   allowed: boolean;
@@ -61,7 +61,13 @@ export class ApprovalGate {
    */
   request(approvalId: string, signal?: AbortSignal): Promise<ApprovalOutcome> {
     if (this.#waiting.has(approvalId)) {
-      return Promise.resolve({ allowed: false, cause: 'aborted', reason: `approval ${approvalId} is already pending` });
+      // Its own cause: the run is fine and the first ask is still on screen,
+      // so the editor must not render this as an abort.
+      return Promise.resolve({
+        allowed: false,
+        cause: 'duplicate',
+        reason: `approval ${approvalId} is already pending`,
+      });
     }
     if (signal?.aborted === true) {
       return Promise.resolve({ allowed: false, cause: 'aborted', reason: 'the run was cancelled' });

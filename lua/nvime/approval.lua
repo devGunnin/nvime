@@ -193,10 +193,17 @@ function M.render(request, width)
   return page.lines, page.alerts, page.marks
 end
 
---- Whether the summary at the top already shows the whole payload, so
---- repeating it verbatim below would only say the same short command twice.
---- Single-line payloads only: the summary collapses whitespace, and a file's
---- contents must never be consented to with its line breaks flattened.
+--- The shortest payload that may be treated as "already shown". Below it, a
+--- payload can appear inside ordinary prose by accident (`rm`, `.`).
+local MIN_SUMMARISED = 8
+
+--- Whether the summary at the top already shows the whole payload VERBATIM, so
+--- repeating it below would only say the same short command twice.
+---
+--- The summary is rendered through `text.wrap`, which collapses runs of
+--- whitespace — so a payload whose own whitespace would not survive that is
+--- never treated as shown: what the reader consented to has to be the bytes
+--- the tool will run, tabs and alignment included.
 --- @param summary string|nil
 --- @param detail table|nil kind, text, bytes, truncated
 --- @return boolean
@@ -204,10 +211,16 @@ function M.summarised(summary, detail)
   if type(summary) ~= 'string' or type(detail) ~= 'table' or type(detail.text) ~= 'string' then
     return false
   end
-  if detail.truncated or detail.text:find('\n') ~= nil then
+  local payload = detail.text
+  if detail.truncated or #payload < MIN_SUMMARISED then
     return false
   end
-  return summary:find(detail.text, 1, true) ~= nil
+  if payload ~= payload:gsub('%s+', ' ') then
+    return false
+  end
+  -- The whole payload, and the summary is that payload plus a lead-in — not
+  -- some prefix of it that happens to match.
+  return vim.endswith(summary, payload)
 end
 
 --- Opens the float for `ask` and wires the approval keys to `answer`.

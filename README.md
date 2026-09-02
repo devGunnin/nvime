@@ -504,13 +504,15 @@ Off until `keymaps.enabled = true`.
 | `<leader>nB` | normal | open a big change |
 | `<CR>` | prompt, normal | send |
 | `<C-s>` | prompt, insert | send (so `<CR>` still inserts a newline) |
-| `<C-n>` / `<C-r>` / `<C-c>` | chat panel, both modes | new conversation · list past ones · stop the turn |
+| `<C-c>` | chat panel, both modes | stop the running turn |
+| `<C-r>` | chat panel | list past conversations — in insert only while the box is empty, so `i_CTRL-R` stays the register paste |
+| `<C-n>` | chat panel, normal | new conversation (insert keeps `i_CTRL-N` for the `@`-path popup) |
 | `<CR>` / `d` / `q` | session picker | open · delete (y/n confirm) · close |
 | `<C-c>` | panel | stop the running turn |
 | `]o` | chat/big panel | jump to the pending choice |
 | `q` | scrollback | close |
 | `y` / `n` / `<Esc>` | approval float | allow once / deny / deny |
-| `<Esc>` | compose float, both modes | cancel, on one press |
+| `<Esc>` | compose float, both modes | cancel on one press — the draft goes to the unnamed register, `"p` pastes it back |
 | `<CR>` / `r` / `d` | changeset | open the file · revert the hunk · unified diff |
 | `<C-n>` / `<C-r>` / `<C-t>` | big panel | new change · resume one · open the review threads |
 | `]t` / `[t` | review | next · previous thread |

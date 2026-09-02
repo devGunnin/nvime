@@ -697,8 +697,12 @@ describe('a build that outlives the editor', function()
     for _, map in ipairs(vim.api.nvim_buf_get_keymap(view.prompt_buf, 'i')) do
       insert[map.lhs] = true
     end
-    for _, lhs in ipairs({ '<C-N>', '<C-R>', '<C-T>', '<C-C>', '<C-S>' }) do
+    for _, lhs in ipairs({ '<C-R>', '<C-C>', '<C-S>' }) do
       ok(insert[lhs], lhs .. ' is advertised on a box that opens in insert mode')
+    end
+    for lhs, advertised in pairs({ ['<C-N>'] = 'n_<C-n>', ['<C-T>'] = 'n_<C-t>' }) do
+      eq(nil, insert[lhs], lhs .. ' is Vim’s in insert and stays Vim’s')
+      ok(view.prompt_hint:find(advertised, 1, true) ~= nil, 'the hint marks it normal-only: ' .. view.prompt_hint)
     end
     eq(nil, insert['s'], '`s` is never bound where the reader is typing prose')
     cleanup()
@@ -709,7 +713,7 @@ describe('a build that outlives the editor', function()
     -- its `runnerLive` is still false while this editor's own build streams.
     local _, path = sandbox()
     open_on(path)
-    big.state().session = session({ display = 'building' })
+    big.state().session = session({ display = 'building', runner = { pid = 4242 } })
     big.state().request_id = 7
     ok(big.steerable(), 'a build this editor is following is steerable')
     big.open_steer()
@@ -731,13 +735,56 @@ describe('a build that outlives the editor', function()
   it('sends what is typed in the prompt to the running build as a steer', function()
     local _, path = sandbox()
     open_on(path)
-    big.state().session = session({ display = 'building' })
+    big.state().session = session({ display = 'building', runner = { pid = 4242 } })
     big.state().request_id = 7
     big.send('prefer the existing helper')
     local steer = sent('big.steer')
     ok(steer ~= nil, 'typing at a streaming build steers it rather than being refused')
     eq('prefer the existing helper', steer.params.text)
     ok(not has_line('the build is running'), 'and it is not answered with a hint')
+    cleanup()
+  end)
+
+  it('hands the words back when the sidecar refuses the steer', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ display = 'building', runner = { pid = 4242 } })
+    big.state().request_id = 7
+    fake.replies['big.steer'] = { err = { message = 'there is no running build to steer' } }
+    local before = #scrollback()
+    big.send('prefer the existing helper')
+    local prompt = panel.get('big').prompt_buf
+    eq(
+      'prefer the existing helper',
+      table.concat(vim.api.nvim_buf_get_lines(prompt, 0, -1, false), '\n'),
+      'a refused steer must not eat what was typed'
+    )
+    ok(has_line('no running build to steer'), 'and the refusal is on screen')
+    ok(#scrollback() > before, 'the reason is printed, not swallowed')
+    cleanup()
+  end)
+
+  it('will not offer to steer a build running inside the sidecar', function()
+    -- The in-sidecar fallback records no runner (there is no control socket),
+    -- so `is_running()` alone must not make the panel promise steering.
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ display = 'building' })
+    big.state().request_id = 7
+    eq(false, big.steerable(), 'no runner, nothing to steer')
+    eq(nil, big.next_step(session({ display = 'building' })):find('steer', 1, true), 'and the hint agrees')
+    big.send('prefer the existing helper')
+    eq(nil, sent('big.steer'), 'the prompt does not send a steer that would always be refused')
+    cleanup()
+  end)
+
+  it('steers once the runner has recorded itself, before the view says it is live', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ display = 'building', runner = { pid = 4242 } })
+    big.state().request_id = 7
+    ok(big.steerable())
+    ok(big.next_step(session({ display = 'building', runner = { pid = 4242 } })):find('steer', 1, true) ~= nil)
     cleanup()
   end)
 

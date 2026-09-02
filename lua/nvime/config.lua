@@ -224,10 +224,18 @@ local function validate(opts)
   end
   check_type(opts.big.cleanup_on_merge, 'boolean', 'big.cleanup_on_merge')
   check_type(opts.agent.node, 'string', 'agent.node')
-  -- Caught here rather than at the first turn: the sidecar cannot start
-  -- without it, and `doctor` is not where a typo should first surface.
+  -- Expanded here so `~/...` reaches the spawn as a real path; the spawn takes
+  -- the string verbatim.
+  opts.agent.node = vim.fn.expand(opts.agent.node)
+  -- A warning, never a failure: this is the one check that reads the machine,
+  -- and a GUI Neovim started without the shell's PATH would otherwise have its
+  -- whole nvime config rejected — along with the `:Nvime doctor` built to
+  -- explain exactly this. Doctor and the spawn stay the authority.
   if vim.fn.executable(opts.agent.node) ~= 1 then
-    fail('agent.node is not an executable: ' .. opts.agent.node)
+    vim.notify(
+      'nvime: agent.node is not executable: ' .. opts.agent.node .. ' — run :Nvime doctor',
+      vim.log.levels.WARN
+    )
   end
   if opts.agent.model ~= nil then
     fail('agent.model was replaced by models.<lane>.model — see :h nvime-configuration')

@@ -187,8 +187,8 @@ export function branchNameFor(title: string, sessionId: string): string {
   return `nvime/big/${slug === '' ? sessionId : slug}`;
 }
 
-/** Git's soft subject limit; a longer one is cut on a word boundary. */
-const MAX_SUBJECT_CHARS = 72;
+/** Git's soft subject limit, in BYTES — three of those is one CJK character. */
+const MAX_SUBJECT_BYTES = 72;
 
 /**
  * The commit a change lands as. The subject is the spec's one-line goal —
@@ -199,10 +199,12 @@ const MAX_SUBJECT_CHARS = 72;
 export function commitMessageFor(session: { title: string; spec: BigSpec | null }): string {
   const goal = oneLine(session.spec?.goal ?? '');
   const title = oneLine(session.title);
-  const subject = clipSubject(goal === '' ? title : goal);
+  // Never empty: `git commit-tree -m ''` writes a commit with no message at
+  // all, and it lands on the operator's branch.
+  const subject = clipSubject(goal) || clipSubject(title) || 'big change';
   const approach = oneLine(session.spec?.approach ?? '');
   const body = approach === '' ? title : approach;
-  if (subject === '' || body === '' || body === subject) return subject;
+  if (body === '' || body === subject) return subject;
   return `${subject}\n\n${body}`;
 }
 
@@ -210,13 +212,23 @@ function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
-/** Trailing punctuation off, cut on a word boundary rather than mid-word. */
+/**
+ * Trailing punctuation off, then cut to fit the byte budget at the last space
+ * that fits — a hard cut only when the subject has no space at all. Built up
+ * code point by code point, so an astral character is never halved.
+ */
 function clipSubject(text: string): string {
   const trimmed = text.replace(/[.\s]+$/, '');
-  if (trimmed.length <= MAX_SUBJECT_CHARS) return trimmed;
-  const cut = trimmed.slice(0, MAX_SUBJECT_CHARS);
-  const lastSpace = cut.lastIndexOf(' ');
-  return (lastSpace > MAX_SUBJECT_CHARS / 2 ? cut.slice(0, lastSpace) : cut).replace(/[.,;:\s]+$/, '');
+  if (Buffer.byteLength(trimmed) <= MAX_SUBJECT_BYTES) return trimmed;
+  let fits = '';
+  let lastSpace: number | null = null;
+  for (const char of trimmed) {
+    if (Buffer.byteLength(fits + char) > MAX_SUBJECT_BYTES) break;
+    fits += char;
+    if (char === ' ') lastSpace = fits.length - 1;
+  }
+  const cut = lastSpace === null ? fits : fits.slice(0, lastSpace);
+  return cut.replace(/[.,;:\s]+$/, '');
 }
 
 /**

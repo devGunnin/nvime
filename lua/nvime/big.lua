@@ -173,7 +173,10 @@ function M.next_step(session)
   if session.heldElsewhere then
     return 'another editor is driving this — watch it there, or <C-r> to pick a different change'
   end
-  local building = 'building — type to steer it, <C-c> stops it'
+  -- No runner, no control socket, no steer: an in-sidecar build is stopped,
+  -- not nudged, and the hint must not promise otherwise.
+  local building = session.runner ~= nil and 'building — type to steer it, <C-c> stops it'
+    or 'building — <C-c> stops it'
   if session.detached then
     building = session.runner ~= nil and 'the build died part-way — type `resume` to pick it back up, or `discard`'
       or 'type `resume` to pick the build back up, or `discard` to throw it away'
@@ -709,17 +712,27 @@ function M.steer(text)
     sessionId = state.session.id,
     text = text,
   }, function(err)
-    if err ~= nil then
-      show_error(err)
-      M.refresh()
+    if err == nil then
+      return
     end
+    show_error(err)
+    -- The box was cleared on send and only an ACCEPTED steer is echoed back,
+    -- so a refusal would otherwise take the words with it.
+    local live = panel.get(PANEL)
+    if live == nil or not live:restore_prompt(text) then
+      vim.notify('nvime: the steer was refused, and your text was: ' .. text, vim.log.levels.WARN)
+    end
+    M.refresh()
   end)
 end
 
 --- Whether what the reader types now is a nudge for a build in flight.
---- `state.session` is the snapshot adopted before the runner started, so its
---- `runnerLive` alone would refuse to steer this editor's own build; the live
---- request/attach id is what this editor knows first-hand.
+---
+--- A steer travels to a RUNNER over its control socket, so a recorded runner
+--- is the precondition: a build that fell back to running inside the sidecar
+--- has none, and every steer to it would be refused. `runnerLive` alone is not
+--- enough either — it comes from a snapshot taken before this editor's own
+--- runner recorded itself.
 --- @return boolean
 function M.steerable()
   local session = state.session
@@ -734,7 +747,7 @@ function M.steerable()
   if session.heldElsewhere then
     return false
   end
-  return M.is_running()
+  return session.runner ~= nil and M.is_running()
 end
 
 --- `s`: the compose float for one steer.
@@ -880,14 +893,30 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'describe · <CR> send (i_<C-s>) · <C-n> new · <C-r> changes · <C-t> review · <C-c> stop',
+    prompt_hint = 'describe · <CR> send (i_<C-s>) · <C-c> stop · <C-r> changes · n_<C-n> new · n_<C-t> review',
     on_submit = M.send,
     on_close = on_panel_close,
     keys = {
+      -- Insert bindings are named one by one: `<C-n>` and `<C-t>` are Vim's
+      -- there (completion, and indent-one-shiftwidth) and stay Vim's.
       { mode = 'n', lhs = '<C-n>', fn = M.new_change, desc = 'nvime: start a new big change', where = 'both' },
-      { mode = 'n', lhs = '<C-r>', fn = M.pick_session, desc = 'nvime: pick a big change', where = 'both' },
+      {
+        mode = 'n',
+        lhs = '<C-r>',
+        fn = M.pick_session,
+        desc = 'nvime: pick a big change',
+        where = 'both',
+        insert = 'when-empty',
+      },
       { mode = 'n', lhs = '<C-t>', fn = M.open_threads, desc = 'nvime: open the review threads', where = 'both' },
-      { mode = 'n', lhs = '<C-c>', fn = M.cancel, desc = 'nvime: stop the big change', where = 'both' },
+      {
+        mode = 'n',
+        lhs = '<C-c>',
+        fn = M.cancel,
+        desc = 'nvime: stop the big change',
+        where = 'both',
+        insert = true,
+      },
       { mode = 'n', lhs = ']o', fn = M.jump_to_offer, desc = 'nvime: jump to the pending choice', where = 'both' },
       -- Scrollback only: `s` is `substitute` in the prompt buffer, which the
       -- user is typing in.

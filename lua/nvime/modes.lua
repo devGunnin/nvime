@@ -5,17 +5,22 @@
 --- instead of acting.
 local M = {}
 
---- Leaves insert (or replace) mode. Call whenever a surface driven by
---- normal-mode keys takes focus.
+--- Leaves every mode in which a printable key writes text instead of acting.
+--- Call whenever a surface driven by normal-mode keys takes focus.
+---
+--- `ni*` is normal mode reached from insert with `i_CTRL-O`: it returns to
+--- insert on its own unless insert is ended. Select mode is not insert at all
+--- — `stopinsert` does nothing there — but a printable key REPLACES the
+--- selection, so it is left the only way it can be.
 function M.normal()
-  if vim.fn.mode():match('^[iR]') then
+  local mode = vim.fn.mode(true)
+  if mode:match('^[iR]') or mode:match('^ni') then
     vim.cmd('stopinsert')
+    return
+  end
+  if mode:match('^[sS\19]') then
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', true, false, true), 'n', false)
   end
 end
-
---- Both modes an advertised prompt key must answer in: a prompt opens in
---- insert deliberately, so a key bound only in normal is unreachable exactly
---- when the user needs it.
-M.PROMPT = { 'n', 'i' }
 
 return M

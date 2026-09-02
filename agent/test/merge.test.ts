@@ -196,6 +196,33 @@ describe('commitMessageFor', () => {
     assert.ok(long[subject.length] === ' ', 'cut on a word boundary');
   });
 
+  it('keeps a CJK subject inside git’s 72-BYTE soft limit', () => {
+    const goal = '重试层的退避决策集中到一个地方并在那里测试它们以免每个调用点各自实现一遍';
+    const subject = commitMessageFor({ title: 't', spec: { ...spec, goal } }).split('\n')[0] ?? '';
+    assert.ok(Buffer.byteLength(subject) <= 72, `${Buffer.byteLength(subject)} bytes: ${subject}`);
+    assert.ok(goal.startsWith(subject), subject);
+  });
+
+  it('never cuts an astral character in half', () => {
+    const goal = `${'x'.repeat(68)}🚀 and more`;
+    const subject = commitMessageFor({ title: 't', spec: { ...spec, goal } }).split('\n')[0] ?? '';
+    assert.ok(Buffer.byteLength(subject) <= 72, subject);
+    assert.equal(subject, [...subject].join(''), 'no lone surrogate survived the cut');
+    assert.ok(!subject.includes('\uFFFD'));
+  });
+
+  it('cuts a spaceless goal rather than emitting nothing', () => {
+    const goal = 'a'.repeat(200);
+    const subject = commitMessageFor({ title: 't', spec: { ...spec, goal } }).split('\n')[0] ?? '';
+    assert.equal(subject, 'a'.repeat(72));
+  });
+
+  it('never produces an empty subject', () => {
+    assert.equal(commitMessageFor({ title: '', spec: { ...spec, goal: '   ' } }).split('\n')[0], 'big change');
+    assert.equal(commitMessageFor({ title: '', spec: null }), 'big change', 'nothing to say, but never an empty commit message');
+    assert.equal(commitMessageFor({ title: 'make retries jittered', spec: { ...spec, goal: '' } }).split('\n')[0], 'make retries jittered');
+  });
+
   it('flattens a multi-line goal and drops its trailing full stop', () => {
     const message = commitMessageFor({ title: 't', spec: { ...spec, goal: 'add a\n  --version flag.' } });
     assert.equal(message.split('\n')[0], 'add a --version flag');
