@@ -1,7 +1,7 @@
 *nvime.txt*  No vibe coding in my editor — a Claude-native Neovim plugin
 
 Author:  devGunnin
-Version: 2.0.0
+Version: 3.0.0
 License: private
 
 ==============================================================================
@@ -92,6 +92,10 @@ require('nvime').setup({opts})
                         configured one; leaving a field at 'default' keeps it.
                         Its effort step's `reset` entry clears the whole
                         override back to the configured default.
+
+:Nvime enroll           Show and copy this workstation's public, repository-
+                        scoped enrollment record. Available only when a
+                        licensed organization control plane is configured.
 
 :Nvime doctor           Run every preflight check and render the result as one
                         pass/warn/fail list, with the fix named under each
@@ -360,6 +364,11 @@ Defaults: >
       project_instructions = {
         enabled = true,
       },
+      organization = {
+        control_plane_url = nil,
+        trust_core = nil,
+        github = 'gh',
+      },
     })
 <
 panel.width            number, 20..400. Columns the panel occupies.
@@ -435,6 +444,18 @@ project_instructions.enabled
                        instructions.md to chat and edit as an explicitly
                        marked-untrusted block. Off disables reading the file
                        at all.
+
+organization.control_plane_url
+                       string or nil. Licensed organization policy and
+                       attestation endpoint. Must use HTTPS, except loopback
+                       HTTP for local development.
+organization.trust_core
+                       string or nil. Absolute path to the native licensed
+                       nvime-trust signer. It must be configured together with
+                       control_plane_url.
+organization.github    string. Authenticated GitHub CLI executable; `gh` by
+                       default. Managed certification resolves live numeric
+                       user and repository IDs through it.
 
 ==============================================================================
 10. HIGHLIGHT GROUPS                                         *nvime-highlights*
@@ -533,6 +554,15 @@ Subscription only ~
     SDK sees, and `:checkhealth` says which of them were set. Proxy and TLS
     variables are deliberately left alone, which means a configured
     man-in-the-middle still sees the traffic.
+
+Managed assurance ~
+    A managed Big Change is pinned to the live immutable organization policy
+    and exact gate threshold. After merge, the sidecar verifies HEAD, resolves
+    numeric GitHub identity, and asks the native Ed25519 trust core to sign
+    canonical evidence. The private key never enters Lua or Node. There is no
+    shared submission token in the plugin; the server requires a paid
+    entitlement and an enrolled repository-scoped public key, then the PR
+    webhook binds stored evidence to the exact pushed head.
 
 No project settings ~
     Chat and edit load no `.claude/settings.json` — not the repo's, not

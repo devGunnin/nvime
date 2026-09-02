@@ -1,5 +1,6 @@
 local t = require('harness')
 local compose = require('nvime.compose')
+local config = require('nvime.config')
 local palette = require('nvime.palette')
 
 local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
@@ -52,6 +53,8 @@ package.loaded['nvime.agent'] = {
     return true
   end,
 }
+package.loaded['nvime.organization'] = nil
+require('nvime.organization')
 package.loaded['nvime.threads'] = nil
 local threads = require('nvime.threads')
 
@@ -734,6 +737,40 @@ describe('the merge key', function()
     ok(sent ~= nil, 'M is a request, not a local decision')
     eq('abc123', sent.params.sessionId)
     eq(false, sent.params.cleanup, 'the clone is kept unless the config says otherwise')
+    threads.close()
+  end)
+
+  it('automatically submits managed evidence after the reviewed commit lands', function()
+    config.setup({
+      organization = {
+        control_plane_url = 'http://127.0.0.1:4817',
+        trust_core = '/bin/true',
+        github = '/bin/true',
+      },
+    })
+    open_review({ block({ state = 'resolved' }) })
+    fake.replies['big.merge'] = {
+      result = {
+        merged = true,
+        refusals = {},
+        session = session({ block({ state = 'resolved' }) }, {
+          display = 'merged',
+          state = 'merged',
+          merge = { branch = 'nvime/big/backoff', commit = 'deadbeefcafe', baseBranch = 'main' },
+        }),
+      },
+    }
+    fake.replies['organization.attest'] = { result = { commitSha = 'deadbeefcafe' } }
+    with_notices(function()
+      press(threads.view().tree_buf, 'M')
+    end)
+    local attestation = vim.iter(fake.requests):find(function(request)
+      return request.method == 'organization.attest'
+    end)
+    ok(attestation ~= nil, 'a managed merge must submit its evidence')
+    eq('abc123', attestation.params.sessionId)
+    eq('/tmp/project', attestation.params.root)
+    config.setup({})
     threads.close()
   end)
 

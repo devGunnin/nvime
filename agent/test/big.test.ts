@@ -1197,6 +1197,16 @@ describe('the comprehension gate', () => {
     );
   });
 
+  it('never lets a user override an organization-managed gate', () => {
+    const created = service.create(repo, 'managed review', 'medium', 82, 'org:42:policy:7');
+    assert.equal(created.policyId, 'org:42:policy:7');
+    assert.throws(
+      () => service.setDifficulty(repo, created.id, 'easy'),
+      (error: unknown) => error instanceof ProtocolError && /organization policy/.test(error.message),
+    );
+    assert.equal(service.open(repo, created.id).threshold, 82);
+  });
+
   it('keeps a thread the reader re-opened while the grading turn was running', async () => {
     const created = service.create(repo, 'mixed', 'medium');
     turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'ok', spec: SPEC })] });

@@ -159,6 +159,27 @@ local function report_claude(entries, claude)
   info(entries, 'claude login is confirmed by the first chat turn; run `:Nvime chat` to verify it')
 end
 
+local function report_organization(entries, frame)
+  assert(config.get().organization.control_plane_url ~= nil, 'managed report needs an endpoint')
+  if type(frame) ~= 'table' then
+    fail(entries, 'organization control plane did not answer the policy probe')
+    return
+  end
+  if frame.ok ~= true then
+    local err = frame.error or {}
+    fail(entries, 'organization assurance is unavailable: ' .. (err.message or 'unknown control-plane error'))
+    return
+  end
+  local policy = frame.result or {}
+  if type(policy.policyId) ~= 'string' or type(policy.threshold) ~= 'number' then
+    fail(entries, 'organization control plane returned an invalid policy')
+    return
+  end
+  assert(policy.policyId ~= '', 'validated managed policy ID must not be empty')
+  ok(entries, string.format('managed policy %s · pass mark %d', policy.policyId, policy.threshold))
+  ok(entries, 'licensed trust core and GitHub CLI are executable')
+end
+
 --- Starts the sidecar, pings it, and shuts it down again. Uses the same env as
 --- a real spawn, or the probe would deny a `claude` that chat resolves fine.
 local function check_sidecar(entries)
@@ -173,14 +194,20 @@ local function check_sidecar(entries)
     return
   end
   proc:write('{"id":1,"method":"ping","params":{}}\n')
+  if config.get().organization.control_plane_url ~= nil then
+    proc:write('{"id":3,"method":"organization.policy","params":{}}\n')
+  end
   proc:write('{"id":2,"method":"shutdown","params":{}}\n')
   proc:write(nil)
   local done = proc:wait(PROBE_TIMEOUT_MS)
   local ping = nil
+  local organization = nil
   for _, line in ipairs(vim.split(done.stdout or '', '\n', { plain = true, trimempty = true })) do
     local decoded_ok, frame = pcall(vim.json.decode, line)
     if decoded_ok and type(frame) == 'table' and frame.id == 1 then
       ping = frame
+    elseif decoded_ok and type(frame) == 'table' and frame.id == 3 then
+      organization = frame
     end
   end
   if ping == nil or ping.ok ~= true then
@@ -189,6 +216,11 @@ local function check_sidecar(entries)
   end
   ok(entries, 'sidecar answers: nvime-agent ' .. tostring(ping.result.agentVersion))
   report_claude(entries, ping.result)
+  if config.get().organization.control_plane_url ~= nil then
+    report_organization(entries, organization)
+  else
+    info(entries, 'community mode: no organization control plane configured')
+  end
 end
 
 --- A big change's local merge writes a commit; with no identity configured

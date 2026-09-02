@@ -166,6 +166,33 @@ describe('big change intake', function()
     cleanup()
   end)
 
+  it('locks a new change to the live organization policy revision', function()
+    local _, path = sandbox()
+    open_on(path)
+    config.setup({
+      organization = {
+        control_plane_url = 'http://127.0.0.1:4817',
+        trust_core = '/bin/true',
+        github = '/bin/true',
+      },
+    })
+    fake.replies['organization.policy'] =
+      { result = {
+        policyId = 'org:42:policy:7',
+        gateMode = 'manual',
+        threshold = 82,
+      } }
+    fake.replies['big.create'] = { result = { session = session({ policyId = 'org:42:policy:7', threshold = 82 }) } }
+    fake.replies['big.intake'] = { result = { session = session({ spec = SPEC }) } }
+    big.send('change the retry policy')
+    local created = sent('big.create')
+    eq('org:42:policy:7', created.params.policyId)
+    eq(82, created.params.threshold)
+    eq('medium', created.params.difficulty)
+    config.setup({})
+    cleanup()
+  end)
+
   it("threads the big_intake lane's model dial into big.intake", function()
     local _, path = sandbox()
     local models = require('nvime.models')

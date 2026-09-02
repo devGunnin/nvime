@@ -9,6 +9,7 @@ local agent = require('nvime.agent')
 local config = require('nvime.config')
 local context = require('nvime.context')
 local models = require('nvime.models')
+local organization = require('nvime.organization')
 local panel = require('nvime.panel')
 local picker = require('nvime.picker')
 local threads = require('nvime.threads')
@@ -301,11 +302,13 @@ local function title_from(text)
   return vim.trim(first):sub(1, 80)
 end
 
-local function start_new(text)
+local function create_new(text, policy)
   local params = {
     root = state.root,
     title = title_from(text),
-    difficulty = config.get().big.difficulty,
+    difficulty = policy ~= nil and organization.difficulty(policy) or config.get().big.difficulty,
+    threshold = policy ~= nil and policy.threshold or nil,
+    policyId = policy ~= nil and policy.policyId or nil,
   }
   agent.request('big.create', params, function(err, result)
     if err ~= nil then
@@ -314,8 +317,24 @@ local function start_new(text)
     end
     adopt(result.session)
     surface():append('— ' .. result.session.title .. ' —', 'NvimeSession')
+    if policy ~= nil then
+      surface():append(
+        string.format('  managed policy %s · pass mark %d', policy.policyId, policy.threshold),
+        'NvimeSession'
+      )
+    end
     surface():blank()
     M.ask(text)
+  end)
+end
+
+local function start_new(text)
+  organization.policy(function(err, policy)
+    if err ~= nil then
+      show_error(err)
+      return
+    end
+    create_new(text, policy)
   end)
 end
 
@@ -453,7 +472,12 @@ function M.send(text)
     if word == 'approve' then
       M.approve()
     elseif vim.tbl_contains(config.DIFFICULTIES, word) then
-      M.set_difficulty(word)
+      if organization.managed() then
+        surface():append('  the comprehension gate is locked by organization policy', 'NvimeActivity')
+        surface():blank()
+      else
+        M.set_difficulty(word)
+      end
     else
       M.ask(text)
     end

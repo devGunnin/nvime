@@ -34,6 +34,9 @@ local subcommands = {
   model = function()
     require('nvime').model()
   end,
+  enroll = function()
+    require('nvime').enrollment()
+  end,
   statusline = function()
     local on = require('nvime').toggle_statusline()
     vim.notify('nvime: winbar status ' .. (on and 'on' or 'off'))

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Managed GitHub assurance.** Licensed deployments can lock every Big Change
+  to a live, immutable organization policy and exact comprehension threshold.
+  `:Nvime enroll` exposes only the repository-scoped public workstation record;
+  after a reviewed merge the sidecar binds numeric GitHub user/repository IDs,
+  the full SHA-256 diff identity, policy revision, gates and exact commit into
+  canonical evidence signed by the native Ed25519 trust core. There is no
+  shared submission token in the open plugin. Missing entitlement, policy,
+  signer, enrollment, GitHub identity, or current `HEAD` fails closed, and the
+  eventual PR webhook is what binds stored evidence to the pushed head.
+
 - **Fresh means fresh (#11).** Chat now opens a new conversation instead of
   silently restoring the last project session. `<C-n>` starts clean in Chat or
   Big Change without deleting resumable history; `<C-r>` is the explicit

@@ -144,6 +144,8 @@ export interface BigSession {
   difficulty: Difficulty;
   /** Exact score required for this session. Null only for the ungated mode. */
   threshold: number | null;
+  /** Immutable organization policy revision, or null for community mode. */
+  policyId: string | null;
   createdAt: number;
   updatedAt: number;
   transitions: BigTransition[];
@@ -240,9 +242,16 @@ export class BigStore {
     return join(this.dirFor(repoRoot, id), 'events.ndjson');
   }
 
-  create(repoRoot: string, title: string, difficulty: Difficulty = DEFAULT_DIFFICULTY, threshold: number | null = thresholdFor(difficulty)): BigSession {
+  create(
+    repoRoot: string,
+    title: string,
+    difficulty: Difficulty = DEFAULT_DIFFICULTY,
+    threshold: number | null = thresholdFor(difficulty),
+    policyId: string | null = null,
+  ): BigSession {
     if (title.trim() === '') throw new ProtocolError('bad_request', 'a big change needs a title');
     validateThreshold(difficulty, threshold);
+    validatePolicyId(policyId);
     const now = Date.now();
     const session: BigSession = {
       version: 1,
@@ -252,6 +261,7 @@ export class BigStore {
       state: 'drafting',
       difficulty,
       threshold,
+      policyId,
       createdAt: now,
       updatedAt: now,
       transitions: [{ state: 'drafting', at: now, note: 'created' }],
@@ -713,6 +723,8 @@ function withDefaults(session: BigSession): BigSession {
   if (!isDifficulty(session.difficulty)) session.difficulty = DEFAULT_DIFFICULTY;
   if (session.threshold === undefined) session.threshold = thresholdFor(session.difficulty);
   validateThreshold(session.difficulty, session.threshold);
+  if (session.policyId === undefined) session.policyId = null;
+  validatePolicyId(session.policyId);
   if (session.gradeSessionId === undefined) session.gradeSessionId = null;
   if (session.merge === undefined) session.merge = null;
   if (session.landAttempt === undefined) session.landAttempt = null;
@@ -738,9 +750,18 @@ function validateThreshold(difficulty: Difficulty, threshold: number | null): vo
   }
 }
 
+function validatePolicyId(policyId: string | null): void {
+  if (policyId === null) return;
+  if (!/^org:[1-9][0-9]*:policy:[1-9][0-9]*$/.test(policyId)) {
+    throw new ProtocolError('bad_request', 'organization policy ID is invalid');
+  }
+}
+
 /** Identity of a captured diff: the same bytes, the same id, always. */
 export function diffIdOf(diff: string): string {
-  return createHash('sha256').update(diff, 'utf8').digest('hex').slice(0, 32);
+  const digest = createHash('sha256').update(diff, 'utf8').digest('hex');
+  if (digest.length !== 64) throw new Error('diff identity must be SHA-256');
+  return digest;
 }
 
 /**

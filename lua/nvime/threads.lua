@@ -961,6 +961,7 @@ local function merge()
       return
     end
     refresh_after_merge(result.session)
+    require('nvime.organization').attest(view.root, result.session.id)
   end)
 end
 

@@ -81,4 +81,8 @@ M.doctor = require('nvime.doctor').open
 --- session-scoped override on top of `models.*` from `setup()`.
 M.model = models.open
 
+--- `:Nvime enroll`: show the public, repository-scoped workstation record an
+--- organization administrator enrolls. The private signing key never enters Lua.
+M.enrollment = require('nvime.organization').enrollment
+
 return M

@@ -50,6 +50,21 @@ local function preflight()
       detail = M.build_hint(),
     }
   end
+  local organization = opts.organization
+  if organization.control_plane_url ~= nil and vim.fn.executable(organization.trust_core) == 0 then
+    return {
+      code = 'trust_core_missing',
+      message = string.format("nvime trust core was not executable (looked for '%s')", organization.trust_core),
+      detail = 'install the licensed nvime trust core for this platform, then run :Nvime doctor',
+    }
+  end
+  if organization.control_plane_url ~= nil and vim.fn.executable(organization.github) == 0 then
+    return {
+      code = 'github_missing',
+      message = string.format("GitHub CLI was not executable (looked for '%s')", organization.github),
+      detail = 'install gh and run `gh auth login`',
+    }
+  end
   return nil
 end
 
@@ -70,6 +85,12 @@ function M.sidecar_env()
   }
   if opts.agent.claude ~= nil then
     env.NVIME_CLAUDE_PATH = opts.agent.claude
+  end
+  if opts.organization.control_plane_url ~= nil then
+    env.NVIME_CONTROL_PLANE_URL = opts.organization.control_plane_url
+    env.NVIME_TRUST_PATH = opts.organization.trust_core
+    env.NVIME_GITHUB_PATH = opts.organization.github
+    env.NVIME_IDENTITY_DIR = vim.fs.normalize(vim.fn.stdpath('data') .. '/nvime/identity')
   end
   return env
 end
