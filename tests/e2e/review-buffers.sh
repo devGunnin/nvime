@@ -40,13 +40,23 @@ end
 
 return M
 LUA
+# The scratch repo is the agent's to commit in, so the developer's global git
+# config must not reach it: gpgsign, hooksPath or includeIf would fail a run for
+# a reason that has nothing to do with nvime.
+export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-/dev/null}"
+export GIT_CONFIG_NOSYSTEM=1
+
 git -C "$repo" init -q -b main
 git -C "$repo" config user.email e2e@nvime
 git -C "$repo" config user.name e2e
 git -C "$repo" add -A
 git -C "$repo" commit -qm 'pool'
 
-npm --prefix "$plugin/agent" run build >/dev/null
+# The runner builds the sidecar once and says so; a wrapper run by hand builds
+# for itself.
+if [ "${NVIME_E2E_BUILT:-0}" != 1 ]; then
+  npm --prefix "$plugin/agent" run build >/dev/null
+fi
 
 printf '== build a change, then review it on the real file\n'
 nvim --clean --headless -l "$here/review-buffers.lua"

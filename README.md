@@ -935,6 +935,76 @@ big-change sidecar tests run against a real scratch git repo: the clone is
 really made, the build agent is mocked at the SDK boundary but its writes are
 real, and the diff capture and triage fallback run over what it actually wrote.
 
+### End-to-end scenarios
+
+The unit suites mock the SDK at its boundary. `tests/e2e/` does not: every
+scenario drives real Neovim against the real `claude` CLI, and one runner runs
+them all.
+
+```sh
+make e2e                              # every scenario
+make e2e-one SCENARIO=cold-start      # one of them
+tests/e2e/run.sh --list               # names and default timeouts
+tests/e2e/run.sh --keep prompt-keys   # keep the scratch root even on success
+tests/e2e/run.sh --selftest           # the runner's own checks; spends nothing
+```
+
+| scenario | what it proves |
+| --- | --- |
+| `cold-start` | an empty machine: `:Nvime` opens, the sidecar starts, one small build lands a diff |
+| `prompt-keys` | `i_<C-s>` sends, `i_<C-c>` stops, `i_<C-r>` is history on an empty box and Vim's register paste on a full one, `i_<C-n>`/`i_<C-t>` stay Vim's (#19) |
+| `debug-bundle` | a build with the log on: `:Nvime log` and `:Nvime bundle` describe it, and the prompt appears in neither |
+| `review-buffers` | the review pane is the clone's own file, with marks rather than diff text |
+| `rebase-merge` | the base moves under a build, `M` refuses, `R` rebases, `M` lands (#10) |
+| `detached-build` | a build outlives its editor and takes a steer from another one |
+
+**They cost real money and need a login.** Each one runs a real model turn —
+most of them a whole build — so a full pass is minutes and tokens against your
+subscription. nvime is subscription-only: the runner refuses early if `claude`
+is missing or does not look logged in, and nothing here reads or sets an API
+key. `NVIME_E2E_MODEL` (default `sonnet`) picks the model.
+
+**CI never runs them**, and nothing in `.github/workflows/` should. They are a
+before-you-merge check you run by hand.
+
+Every scenario gets its own directory under a scratch root for the run, with
+all four XDG homes pointed inside it, so a scenario never reads or writes
+**nvime's** own config, data, state or cache. Your `~/.claude` is *not*
+isolated — that is where the subscription login lives — so the scratch repos'
+prompts and transcripts do land in your real claude directory. That residue
+**accumulates**: a full run leaves about a dozen `~/.claude/projects/`
+directories named after scratch paths that no longer exist, and nothing ever
+cleans them up. The scratch root itself is removed when everything passes and
+kept, with its path printed, when anything does not; `--keep` keeps it either
+way.
+
+Deadlines default per scenario and are overridden with
+`NVIME_E2E_TIMEOUT_<NAME>` (`NVIME_E2E_TIMEOUT_COLD_START=600`). A scenario
+that misses its deadline is killed — and so is any build runner it started.
+That second half needs saying: a big-change build is spawned detached, in a
+process group of its own, so killing the scenario's group does not reach it and
+nothing caps its wall clock. The runner reads the pid out of the scenario's own
+session store and kills that too, and it traps `SIGINT`/`SIGTERM` so Ctrl-C
+stops the tree instead of leaving it running.
+
+A runner is killed by its **process group**, not just its pid: it leads its own
+session, so that group is exactly its own descendants — the `claude` it spawned
+included — and killing the pid alone would orphan that child to keep spending.
+The scenario's own group is swept the same way, whatever the verdict.
+
+Only a *live* runner is ever signalled. The store keeps naming a runner after
+it exits — that is how a died build is told apart from a running one — so the
+pid alone proves nothing, and by the time a scenario ends some other process
+may hold that number. A pid is signalled only when the session's claim
+(`lock.json`) is on this host, names that same pid, and has been heartbeated
+within the same staleness window the sidecar itself uses. And if the store
+cannot be read at all, the scenario is reported `BLIND` rather than passed: a
+run that cannot see its own builds has no cost guard, and that must never look
+like success.
+
+`tests/e2e/run.sh --selftest` proves all of it against stub scenarios, without
+spending anything.
+
 ### The screenshots
 
 Every image in this README is a real terminal running the shipped plugin and is

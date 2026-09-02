@@ -16,13 +16,18 @@ work="${NVIME_E2E_WORK:-$(mktemp -d)}"
 export NVIME_E2E_MODEL="${NVIME_E2E_MODEL:-sonnet}"
 
 repo="$work/repo"
+# All four homes, so nothing this scenario writes — the session store, the
+# debug log, the bundle — can land in the developer's own.
+export XDG_CONFIG_HOME="$work/config"
 export XDG_DATA_HOME="$work/data"
+export XDG_STATE_HOME="$work/state"
+export XDG_CACHE_HOME="$work/cache"
 export NVIME_E2E_REPO="$repo"
 export NVIME_E2E_OUT="$work/report.txt"
 export NVIME_E2E_MOVE="NOTES.md"
 : >"$NVIME_E2E_OUT"
 
-mkdir -p "$repo" "$XDG_DATA_HOME"
+mkdir -p "$repo" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
 cat >"$repo/greet.py" <<'PY'
 import sys
 
@@ -35,13 +40,23 @@ def main(argv):
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
 PY
+# The scratch repo is the agent's to commit in, so the developer's global git
+# config must not reach it: gpgsign, hooksPath or includeIf would fail a run for
+# a reason that has nothing to do with nvime.
+export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-/dev/null}"
+export GIT_CONFIG_NOSYSTEM=1
+
 git -C "$repo" init -q -b main
 git -C "$repo" config user.email e2e@nvime
 git -C "$repo" config user.name e2e
 git -C "$repo" add -A
 git -C "$repo" commit -qm 'greet'
 
-npm --prefix "$plugin/agent" run build >/dev/null
+# The runner builds the sidecar once and says so; a wrapper run by hand builds
+# for itself.
+if [ "${NVIME_E2E_BUILT:-0}" != 1 ]; then
+  npm --prefix "$plugin/agent" run build >/dev/null
+fi
 
 printf '== build, move the base, refuse, rebase, merge\n'
 nvim --clean --headless -l "$here/rebase-merge.lua"
