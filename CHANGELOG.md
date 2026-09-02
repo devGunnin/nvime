@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **The review tab says what it is doing.** `R`, `M`, `a`, `r`, `e` and `X` all
+  run through one indicator: past ~300ms the left bar spins with what is
+  running and the right bar carries the run's latest line, cleared the moment
+  it settles. A rebase is a full agent turn, and the tab used to sit silent for
+  the whole of one — indistinguishable from a wedged merge (#10). A second
+  keystroke in that window now names what it is waiting on instead of sending a
+  request the sidecar can only refuse.
+- **A refusal that names your own build.** A session held by its own detached
+  runner said "another editor is driving this change", which reads as a dead
+  end when it is your rebase still going. It now says the change is still
+  running outside the editor, and what it is running.
+
 - **Big-change builds outlive the editor.** `big.build`, `big.revise` and
   `big.rebase` now run in a detached runner process instead of Neovim's
   sidecar. It holds the session's claim, owns the build's agent session, and

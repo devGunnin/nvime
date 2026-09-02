@@ -7,6 +7,7 @@ import type { BigService, BuildDial, SessionView } from './big.js';
 import type { BigSession, BigStore } from './bigstore.js';
 import type { EmitEvent } from './chat.js';
 import type { Env } from './env.js';
+import { holderMessage } from './merge.js';
 import { ProtocolError } from './protocol.js';
 import { isTerminal, lastSeqOf, readLogAfter, type RunEvent } from './runlog.js';
 import { connectControl, socketPathFor, type ControlClient } from './runsock.js';
@@ -99,9 +100,9 @@ export class DetachedService {
   async start(requestId: number, kind: DetachedKind, params: StartParams): Promise<SessionView> {
     if (!detachedEnabled(this.#env)) return this.#inSidecar(requestId, kind, params);
     const session = this.#store.require(params.root, params.id);
-    const live = this.#store.foreignLock(session);
-    if (live !== null) {
-      throw new ProtocolError('busy', `this big change is already running (${live.what}) — attach to it instead`);
+    const held = this.#store.holderOf(session);
+    if (held !== null) {
+      throw new ProtocolError('busy', `${holderMessage(held)}; attach to it instead`);
     }
     const from = lastSeqOf(this.#store.logPathFor(params.root, params.id));
     let spawned: SpawnedRunner;
@@ -210,9 +211,9 @@ export class DetachedService {
    */
   #refuseIfTakenElsewhere(params: { root: string; id: string }): void {
     const session = this.#store.read(params.root, params.id);
-    const taken = session === null ? null : this.#store.foreignLock(session);
-    if (taken === null) return;
-    throw new ProtocolError('busy', `this big change is already running (${taken.what}) — attach to it instead`);
+    const held = session === null ? null : this.#store.holderOf(session);
+    if (held === null) return;
+    throw new ProtocolError('busy', `${holderMessage(held)}; attach to it instead`);
   }
 
   #socketFor(params: { root: string; id: string }): string {

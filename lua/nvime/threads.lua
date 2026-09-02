@@ -31,6 +31,36 @@ local CHIPS = {
   reopened = { text = ' OPEN ', hl = 'NvimeThreadOpen' },
 }
 
+--- A review-tab request short enough that an indicator would only flash is
+--- never shown one; anything past this is visible until it settles.
+local ACTIVITY_DELAY_MS = 300
+
+--- The spinner's own cadence, matching the panel's.
+local ACTIVITY_TICK_MS = 90
+
+--- The pane's title always keeps at least this many cells, whatever the
+--- streamed detail beside it wants — the floor `status()` cuts the detail to.
+local PANE_TITLE_ROOM = 12
+
+--- The one review-tab request in flight, or nil. A rebase or a grading round
+--- is a full agent turn — minutes — and a tab that says nothing while one runs
+--- is indistinguishable from a wedged one (issue #10).
+---
+--- Survives `M.close`: the sidecar keeps running a build turn after the tab
+--- closes, so the one-at-a-time latch must too — only the timer, which would
+--- otherwise tick against dead windows, is paused. `generation` is what keeps
+--- a stale callback from touching a LATER request's record: `run_op` captures
+--- it when the request goes out, and only clears the indicator, stops the
+--- timer, or frees the latch when both that generation AND `session_id` are
+--- still current — a reopen onto a DIFFERENT change must not inherit this
+--- record just because nothing has replaced it yet (see `current_activity`).
+--- @type table|nil { label, detail, request_id, frame, shown, timer, generation, session_id }
+local activity = nil
+
+--- Bumped once per request; `activity.generation` pins a callback to the
+--- record it started with, so nothing has to compare table identity.
+local next_generation = 0
+
 local view = {
   root = nil,
   session = nil,
@@ -284,7 +314,7 @@ function M.keys_hint(session)
   end
   -- `R rebase` is deliberately absent: it only applies once the base has
   -- moved, and the merge refusal names it at exactly that moment.
-  return 'a answer · e explain · r changes · X re-open · ]t/[t · M merge'
+  return 'a answer · e explain · r changes · X re-open · ]t/[t · M merge · <C-c> give up on a wedged request'
 end
 
 local function paint(buf, marks)
@@ -305,22 +335,63 @@ local function paint(buf, marks)
   end
 end
 
+--- `activity`, but only when it belongs to the change the tab is showing
+--- right now. A record left over from a change the reader has since moved
+--- away from (a reopen onto a different session, `<C-r>` then `<C-t>`) is
+--- still running on the sidecar, but it must read as idle here: it is not
+--- this change's latch, and not this change's spinner.
+--- @return table|nil
+local function current_activity()
+  if activity == nil or activity.session_id ~= (view.session or {}).id then
+    return nil
+  end
+  return activity
+end
+
+--- The spinner and label for the request in flight, or nil when the tab is
+--- idle (or the request has not yet outlived `ACTIVITY_DELAY_MS`).
+--- @return string|nil
+function M.activity_line()
+  local current = current_activity()
+  if current == nil or not current.shown then
+    return nil
+  end
+  local frames = require('nvime.icons').get().spinner
+  return frames[(current.frame - 1) % #frames + 1] .. ' ' .. current.label
+end
+
 --- The two bars. The gate's count goes on the narrow tree, where it always
 --- fits; the change's own name goes on the wide pane, where it does.
+---
+--- While a request is in flight both bars switch to it: the tree says what is
+--- running and the pane carries the last thing the sidecar reported doing,
+--- since none of the keys the hint names will do anything until it settles.
 local function status()
   if not win_valid(view.tree_win) then
     return
   end
   -- Well inside the border: a bar that exactly fills its window makes nvim
   -- scroll it and show a `<` instead.
-  local gate = shape.ellipsise(M.gate_status(view.session), math.max(vim.api.nvim_win_get_width(view.tree_win) - 4, 8))
+  local left = M.activity_line() or M.gate_status(view.session)
+  local gate = shape.ellipsise(left, math.max(vim.api.nvim_win_get_width(view.tree_win) - 4, 8))
   vim.wo[view.tree_win].winbar = '%#NvimeBar# ' .. M.escape_winbar(gate) .. ' %=%#NvimeBar# '
   if not win_valid(view.pane_win) then
     return
   end
-  local keys = M.keys_hint(view.session)
-  local room = vim.api.nvim_win_get_width(view.pane_win) - vim.fn.strdisplaywidth(keys) - 4
-  local title = shape.ellipsise((view.session or {}).title or 'big change', math.max(room, 12))
+  local pane_width = vim.api.nvim_win_get_width(view.pane_win)
+  local current = current_activity()
+  local keys
+  if current ~= nil then
+    -- The streamed detail is whatever the sidecar sent — unbounded, and often
+    -- multi-line (runner stderr, a git error). Collapsed to one line and cut
+    -- to fit before it ever reaches the winbar, the same as the left bar
+    -- already was; the static keys hint below is short enough it never needed this.
+    keys = shape.ellipsise(((current.detail or ''):gsub('%s+', ' ')), math.max(pane_width - PANE_TITLE_ROOM - 4, 8))
+  else
+    keys = M.keys_hint(view.session)
+  end
+  local room = pane_width - vim.fn.strdisplaywidth(keys) - 4
+  local title = shape.ellipsise((view.session or {}).title or 'big change', math.max(room, PANE_TITLE_ROOM))
   vim.wo[view.pane_win].winbar = '%#NvimeBar# '
     .. M.escape_winbar(title)
     .. ' %=%#NvimeBarDim#'
@@ -406,6 +477,234 @@ local function notify_error(err, fallback)
   end
 end
 
+--- Arms `record`'s timer, showing the spinner immediately when `immediate` is
+--- true (resuming a request that was already shown before the tab closed) or
+--- after `ACTIVITY_DELAY_MS` otherwise.
+--- @param record table the activity record the timer belongs to
+--- @param immediate boolean
+local function arm_timer(record, immediate)
+  local timer = vim.uv.new_timer()
+  record.timer = timer
+  timer:start(immediate and 0 or ACTIVITY_DELAY_MS, ACTIVITY_TICK_MS, function()
+    vim.schedule(function()
+      -- The record is the authority, not the closure: a request that settled,
+      -- or a record whose timer was re-armed, between the tick and this
+      -- callback has already moved on from `timer`.
+      if activity ~= record or record.timer ~= timer then
+        return
+      end
+      record.shown = true
+      record.frame = record.frame + 1
+      status()
+    end)
+  end)
+end
+
+--- Starts the indicator for one request. Nothing is drawn for the first
+--- `ACTIVITY_DELAY_MS`, so a round trip the reader would not have noticed
+--- anyway never flashes a spinner at them.
+---
+--- Callers only reach this once `refuse_if_busy` (session-scoped, see
+--- `current_activity`) has said the tab is free, so a leftover `activity` here
+--- can only be a foreign change's record — still running on the sidecar, but
+--- not this change's latch to hold. Its timer is paused rather than touched
+--- any other way: the record itself is left alone so its own generation check
+--- in `run_op` quarantines its eventual answer once nothing points at it.
+--- @param label string what is running, in the reader's words
+local function begin_activity(label)
+  assert(type(label) == 'string' and label ~= '', 'threads.begin_activity needs a label')
+  local session_id = (view.session or {}).id
+  assert(activity == nil or activity.session_id ~= session_id, 'the review tab runs one request at a time per change')
+  if activity ~= nil and activity.timer ~= nil then
+    activity.timer:stop()
+    activity.timer:close()
+  end
+  next_generation = next_generation + 1
+  activity = {
+    label = label,
+    detail = nil,
+    request_id = nil,
+    frame = 0,
+    shown = false,
+    timer = nil,
+    generation = next_generation,
+    session_id = session_id,
+  }
+  arm_timer(activity, false)
+end
+
+--- Stops the ticking timer without releasing the latch — a tab close must not
+--- drop the record of a request that keeps running on the sidecar. Safe to
+--- call when nothing is in flight, or when the timer is already paused.
+local function pause_activity()
+  if activity == nil or activity.timer == nil then
+    return
+  end
+  activity.timer:stop()
+  activity.timer:close()
+  activity.timer = nil
+end
+
+--- Re-arms a paused activity's timer once the tab (and its windows) come
+--- back — showing it immediately when it was already shown before the pause,
+--- rather than making the reader wait out the delay a second time.
+local function resume_activity()
+  if activity == nil or activity.timer ~= nil then
+    return
+  end
+  arm_timer(activity, activity.shown)
+end
+
+--- Clears the indicator and stops its timer, unconditionally — whatever is
+--- currently live, not necessarily the request that is settling (see
+--- `run_op`, which only calls this when the settling request is still the
+--- current generation). Safe to call when nothing is in flight.
+local function end_activity()
+  local live = activity
+  activity = nil
+  if live == nil then
+    return
+  end
+  if live.timer ~= nil then
+    live.timer:stop()
+    live.timer:close()
+  end
+  status()
+end
+
+--- Says what is already running, so a second keystroke reads as "not yet"
+--- rather than firing a request the sidecar will only refuse as busy. Scoped
+--- to the change on screen: a request still running for a change the reader
+--- has since left is not this change's latch (see `current_activity`).
+--- @return boolean true when the caller must not proceed
+local function refuse_if_busy()
+  local current = current_activity()
+  if current == nil then
+    return false
+  end
+  notify(current.label .. ' — wait for that to finish', vim.log.levels.WARN)
+  return true
+end
+
+--- `<C-c>`: give up waiting on a wedged request. Nothing tells the sidecar —
+--- there is no cancel channel every op can reach (see `answer()`) — so this
+--- only frees the local latch. The abandoned request keeps a generation that
+--- is no longer current, so if it does answer later it renders its outcome
+--- but can never re-arm the latch or touch whatever runs next. Scoped to the
+--- change on screen: it must not reach into a foreign change's latch.
+local function give_up()
+  if current_activity() == nil then
+    return
+  end
+  end_activity()
+  notify('gave up waiting — the request may still land', vim.log.levels.WARN)
+end
+
+--- Every request the review tab makes, with the indicator around it.
+---
+--- One at a time per change: the sidecar claims the session for the duration
+--- of a turn and would refuse a second one, so the guard belongs here where
+--- it can say what is running instead of relaying a `busy`.
+---
+--- `spec.always_deliver` opts a call site out of quarantine — only safe for a
+--- callback that touches nothing but its own float (`explain`, which never
+--- reads or writes `view.session`). Every other call site is left quarantined
+--- by default: `on_result`/`on_failure` are skipped entirely once the answer
+--- is no longer current, so it can never mutate `view.session`, fire
+--- `on_update`, or issue another request against a change the reader has left
+--- — only its outcome line is rendered.
+--- @param spec table label, method, params, and optional no_deadline/on_error/on_failure/always_deliver
+--- @param on_result fun(result: table) called only when the request succeeded
+local function run_op(spec, on_result)
+  assert(type(spec.label) == 'string' and spec.label ~= '', 'threads.run_op needs a label')
+  assert(type(spec.method) == 'string' and spec.method ~= '', 'threads.run_op needs a method')
+  assert(type(on_result) == 'function', 'threads.run_op needs a result handler')
+  if refuse_if_busy() then
+    return
+  end
+  begin_activity(spec.label)
+  local generation = activity.generation
+  local session_id = activity.session_id
+  agent.request(spec.method, spec.params, function(err, result)
+    -- Two different questions. `is_same_record`: has nothing later replaced
+    -- this record (generation)? If so the request genuinely just finished,
+    -- and the latch must be freed regardless of what the tab shows now — an
+    -- answered request left un-cleared would read as busy forever the next
+    -- time the reader comes back to this same change. `is_current` narrows
+    -- that to "and the tab still shows the change this was for": only then
+    -- may `on_result`/`on_failure` run, since only then are `view.session`,
+    -- `on_update`, and another `big.diff` safe to touch.
+    local is_same_record = activity ~= nil and activity.generation == generation
+    local is_current = is_same_record and (view.session or {}).id == session_id
+    if is_same_record then
+      end_activity()
+    end
+    if not (is_current or spec.always_deliver) then
+      local outcome = err ~= nil and (err.message or spec.on_error or 'that request failed')
+        or (spec.label .. ' finished')
+      notify(
+        outcome .. ' — for a change you have since left',
+        err ~= nil and vim.log.levels.WARN or vim.log.levels.INFO
+      )
+      return
+    end
+    if err ~= nil then
+      if spec.on_failure ~= nil then
+        spec.on_failure(err)
+      else
+        notify_error(err, spec.on_error or 'that request failed')
+      end
+      return
+    end
+    on_result(result or {})
+  end, {
+    no_deadline = spec.no_deadline,
+    on_sent = function(id)
+      -- Nil when the request already settled (a synchronous refusal); the
+      -- events it would have matched are gone with it. Guarded by generation
+      -- too, though `on_sent` fires synchronously so this is only ever the
+      -- record `begin_activity` just created.
+      if activity ~= nil and activity.generation == generation then
+        activity.request_id = id
+      end
+    end,
+  })
+end
+
+--- The sidecar streams a run's progress addressed to the request that started
+--- it. Showing the latest line is what makes a multi-minute rebase read as
+--- work rather than as a hang.
+--- @param name string
+--- @param params table
+function M.on_agent_event(name, params)
+  if activity == nil or params.id == nil or params.id ~= activity.request_id then
+    return
+  end
+  local detail = nil
+  if name == 'big.state' then
+    detail = params.note or params.state
+  elseif name == 'big.tool' then
+    detail = params.summary or params.tool
+  elseif name == 'big.notice' then
+    detail = params.text
+  end
+  if type(detail) ~= 'string' or detail == '' then
+    return
+  end
+  activity.detail = detail
+  status()
+end
+
+local subscribed = false
+
+local function subscribe_once()
+  if subscribed then
+    return
+  end
+  agent.on_event(M.on_agent_event)
+  subscribed = true
+end
+
 --- `X`: re-open an auto-resolved thread, or clear it again.
 local function toggle()
   local block = current_block()
@@ -416,16 +715,17 @@ local function toggle()
     notify('a substantial thread is cleared by the review gate, not by hand', vim.log.levels.WARN)
     return
   end
-  agent.request('big.toggle', {
-    root = view.root,
-    sessionId = view.session.id,
-    blockId = block.id,
-    resolved = block.state == 'open',
-  }, function(err, result)
-    if err ~= nil then
-      notify(err.message or 'could not change that thread', vim.log.levels.WARN)
-      return
-    end
+  run_op({
+    label = 'updating the thread',
+    method = 'big.toggle',
+    on_error = 'could not change that thread',
+    params = {
+      root = view.root,
+      sessionId = view.session.id,
+      blockId = block.id,
+      resolved = block.state == 'open',
+    },
+  }, function(result)
     adopt(result.session)
   end)
 end
@@ -433,7 +733,7 @@ end
 --- `r`: send this thread's comment back to the build agent and re-triage.
 local function request_changes()
   local block = current_block()
-  if block == nil then
+  if block == nil or refuse_if_busy() then
     return
   end
   require('nvime.compose').open({
@@ -443,26 +743,26 @@ local function request_changes()
       notify('revising the change — this runs for as long as it takes')
       local dial = models.dial('big_build')
       local triage_dial = models.dial('big_triage')
-      agent.request('big.revise', {
-        root = view.root,
-        sessionId = view.session.id,
-        blockId = block.id,
-        comment = comment,
-        model = dial.model,
-        effort = dial.effort,
-        triageModel = triage_dial.model,
-        triageEffort = triage_dial.effort,
-      }, function(err, result)
-        if err ~= nil then
-          notify_error(err, 'the revision failed')
-          return
-        end
-        M.reload(result.session)
-      end, {
+      run_op({
+        label = 'revising the change',
+        method = 'big.revise',
+        on_error = 'the revision failed',
         -- A revision re-runs the build agent; it is bounded by <C-c> and by
         -- the sidecar, never by the editor's control deadline.
         no_deadline = true,
-      })
+        params = {
+          root = view.root,
+          sessionId = view.session.id,
+          blockId = block.id,
+          comment = comment,
+          model = dial.model,
+          effort = dial.effort,
+          triageModel = triage_dial.model,
+          triageEffort = triage_dial.effort,
+        },
+      }, function(result)
+        M.reload(result.session)
+      end)
     end,
   })
 end
@@ -471,7 +771,7 @@ end
 --- is that you had to think it through, and pasting the diff back is not that.
 local function answer()
   local block = current_block()
-  if block == nil then
+  if block == nil or refuse_if_busy() then
     return
   end
   if not block.substantial then
@@ -489,28 +789,27 @@ local function answer()
     no_paste = true,
     height = 10,
     on_submit = function(text)
-      notify('grading your answer')
       local dial = models.dial('big_grade')
-      agent.request('big.answer', {
-        root = view.root,
-        sessionId = view.session.id,
-        answers = { { blockId = block.id, text = text } },
-        model = dial.model,
-        effort = dial.effort,
-      }, function(err, result)
-        if err ~= nil then
-          notify_error(err, 'the grading turn failed')
-          return
-        end
+      run_op({
+        label = 'grading your answer',
+        method = 'big.answer',
+        on_error = 'the grading turn failed',
+        -- A grading round is an agent turn with no bound at all, and closing
+        -- the answer box only destroys the window — the turn keeps running
+        -- and still holds the session lock. `<C-c>` gives up locally (see
+        -- `give_up`), but reaches no cancel channel on the sidecar for this.
+        no_deadline = true,
+        params = {
+          root = view.root,
+          sessionId = view.session.id,
+          answers = { { blockId = block.id, text = text } },
+          model = dial.model,
+          effort = dial.effort,
+        },
+      }, function(result)
         adopt(result.session)
         M.report_grade(result.session, block.id)
-      end, {
-        -- A grading round is an agent turn with no bound at all: its request
-        -- id is never stored where `big.cancel` can see it, and closing the
-        -- answer box only destroys the window — the turn keeps running and
-        -- still holds the session lock. There is no <C-c> for this one.
-        no_deadline = true,
-      })
+      end)
     end,
   })
 end
@@ -520,7 +819,7 @@ end
 --- but checked here first so the float is never opened on a refusal.
 local function explain()
   local block = current_block()
-  if block == nil then
+  if block == nil or refuse_if_busy() then
     return
   end
   if block.substantial and block.state == 'open' then
@@ -534,28 +833,36 @@ local function explain()
   local explain_ui = require('nvime.explain')
   explain_ui.pending(title)
   local dial = models.dial('explain')
-  agent.request('big.explain', {
-    root = view.root,
-    sessionId = view.session.id,
-    blockId = block.id,
-    model = dial.model,
-    effort = dial.effort,
-  }, function(err, result)
-    if err ~= nil then
+  run_op({
+    label = 'explaining this thread',
+    method = 'big.explain',
+    -- Closing the float only destroys the window, not the request — the turn
+    -- runs to completion regardless (or until `<C-c>` gives up on it locally),
+    -- and other actions refuse with "wait for that to finish" until it does.
+    no_deadline = true,
+    -- Safe to always deliver: neither branch below touches `view.session`,
+    -- so a reader who switched changes while this ran still gets their
+    -- answer rather than a generic "finished elsewhere" notice.
+    always_deliver = true,
+    params = {
+      root = view.root,
+      sessionId = view.session.id,
+      blockId = block.id,
+      model = dial.model,
+      effort = dial.effort,
+    },
+    -- The float is already open on this thread, so the refusal belongs in it
+    -- rather than in a toast the reader has to look away for.
+    on_failure = function(err)
       local text = '! ' .. (err.message or 'could not explain this thread')
       if err.detail ~= nil and err.detail ~= '' then
         text = text .. '\n' .. err.detail
       end
       explain_ui.show(title, text)
-      return
-    end
-    explain_ui.show(title, (result or {}).text or '')
-  end, {
-    -- An agent turn with no cancel: closing the float only destroys the
-    -- window, not the request — the turn runs to completion regardless, and
-    -- other actions refuse with "already running" until it does.
-    no_deadline = true,
-  })
+    end,
+  }, function(result)
+    explain_ui.show(title, result.text or '')
+  end)
 end
 
 --- Says what the newest round on `block_id` earned. Read off the session the
@@ -626,24 +933,27 @@ local function merge()
     return
   end
   local config = require('nvime.config')
-  notify('checking the merge preconditions')
-  agent.request('big.merge', {
-    root = view.root,
-    sessionId = view.session.id,
-    cleanup = config.get().big.cleanup_on_merge,
-  }, function(err, result)
-    if err ~= nil then
+  run_op({
+    label = 'checking the merge preconditions',
+    method = 'big.merge',
+    no_deadline = true,
+    params = {
+      root = view.root,
+      sessionId = view.session.id,
+      cleanup = config.get().big.cleanup_on_merge,
+    },
+    on_failure = function(err)
       notify_error(err, 'the merge failed')
       M.reload_current()
-      return
-    end
+    end,
+  }, function(result)
     adopt(result.session)
     if not result.merged then
       M.report_refusals(result.refusals or {})
       return
     end
     refresh_after_merge(result.session)
-  end, { no_deadline = true })
+  end)
 end
 
 --- Renders why the merge would not run, and what to do about it.
@@ -672,23 +982,25 @@ local function rebase()
   if view.session == nil then
     return
   end
-  notify('rebasing the build onto the updated base — this runs for as long as it takes')
   local dial = models.dial('big_build')
   local triage_dial = models.dial('big_triage')
-  agent.request('big.rebase', {
-    root = view.root,
-    sessionId = view.session.id,
-    model = dial.model,
-    effort = dial.effort,
-    triageModel = triage_dial.model,
-    triageEffort = triage_dial.effort,
-  }, function(err, result)
-    if err ~= nil then
-      notify_error(err, 'the rebase failed')
-      return
-    end
+  run_op({
+    label = 'rebasing the build onto the updated base',
+    method = 'big.rebase',
+    on_error = 'the rebase failed',
+    no_deadline = true,
+    params = {
+      root = view.root,
+      sessionId = view.session.id,
+      model = dial.model,
+      effort = dial.effort,
+      triageModel = triage_dial.model,
+      triageEffort = triage_dial.effort,
+    },
+  }, function(result)
+    notify('rebased onto the updated base — review what changed, then M merges')
     M.reload(result.session)
-  end, { no_deadline = true })
+  end)
 end
 
 --- Re-reads the session the sidecar holds, without assuming what changed.
@@ -725,6 +1037,13 @@ end
 function M.close()
   local tab = view.tab
   view.tab, view.tree_win, view.pane_win = nil, nil, nil
+  -- The request itself keeps going — a build turn is meant to outlive the
+  -- surface watching it — and so does the one-at-a-time latch it holds: only
+  -- the timer is paused, so it stops ticking against dead windows without
+  -- dropping the record. `M.open` re-adopts it if the tab comes back before
+  -- it settles (issue-#10 regression: a reopen used to drop the latch, so a
+  -- second request would go out while the sidecar still held the first).
+  pause_activity()
   -- nvim refuses to close the last tabpage; the buffers below still go, so the
   -- review does not linger as a husk in a session that had only this tab.
   if tab ~= nil and vim.api.nvim_tabpage_is_valid(tab) and #vim.api.nvim_list_tabpages() > 1 then
@@ -761,6 +1080,7 @@ local KEYS = {
   { lhs = 'e', fn = explain, desc = 'nvime: explain this thread' },
   { lhs = 'R', fn = rebase, desc = 'nvime: rebase onto the moved base' },
   { lhs = 'M', fn = merge, desc = 'nvime: merge' },
+  { lhs = '<C-c>', fn = give_up, desc = 'nvime: give up waiting on a wedged request' },
   {
     lhs = 'q',
     fn = function()
@@ -858,7 +1178,28 @@ local function build_tab()
       end
     end,
   })
+  -- `:tabclose` or `:q` on the raw window (bypassing the `q` mapping's own
+  -- `M.close`) still hides this buffer, and `bufhidden = 'wipe'` wipes it —
+  -- the one signal every teardown path shares. Without this the indicator's
+  -- timer keeps ticking a `status()` against dead windows for the rest of
+  -- the run; harmless (guarded by `win_valid`) but wasteful.
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    group = group,
+    buffer = view.tree_buf,
+    desc = 'nvime: stop the indicator timer when the review tab is torn down',
+    callback = pause_activity,
+  })
   vim.api.nvim_set_current_win(view.tree_win)
+  -- Every key here is a normal-mode-only mapping (`KEYS`), but the caller can
+  -- land here mid-insert — the big panel's prompt is routinely left in insert
+  -- after sending, and `tabnew`ing away from it carries that mode along
+  -- verbatim. Left alone, a raw `a`/`M` types into the (briefly writable, see
+  -- `write`) buffer instead of firing `answer`/`merge` — the exact `aMDEFEND`
+  -- corruption a QA pass caught, with no error since nvim considers this a
+  -- perfectly normal insert.
+  if vim.fn.mode():match('^i') then
+    vim.cmd('stopinsert')
+  end
 end
 
 --- Re-reads the captured diff for `session` and redraws.
@@ -903,16 +1244,35 @@ function M.open(root, session, on_update)
     return
   end
   M.close()
+  subscribe_once()
   view.root = root
   view.on_update = on_update
   view.selected = 1
   build_tab()
+  -- Re-adopts a request that was already in flight when the tab last closed
+  -- (a plain reopen, or `<C-t>` from the big panel) rather than orphaning it:
+  -- the latch survived `M.close`, only its timer was paused. Only for THIS
+  -- change, though — reopening onto a DIFFERENT change must not inherit a
+  -- leftover latch that belongs to the one the reader left (issue-#10
+  -- regression N1): that record is left alone, quarantined by `run_op`'s own
+  -- generation/session check once it eventually settles.
+  if activity ~= nil and activity.session_id == session.id then
+    resume_activity()
+  end
+  status()
   M.reload(session)
 end
 
 --- Test hook: the rendered model.
 function M.view()
   return view
+end
+
+--- Test hook: the request in flight for the change on screen, or nil — what
+--- the reader would actually see, not a leftover record for a change they
+--- have since left (see `current_activity`).
+function M.activity()
+  return current_activity()
 end
 
 return M

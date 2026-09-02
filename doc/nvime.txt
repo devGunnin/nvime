@@ -152,6 +152,9 @@ Review threads ~
     X                           re-open (or re-clear) a trivial thread
     R                           rebase the build onto a moved base
     M                           merge into your branch
+    <C-c>                       give up waiting on a wedged request (does not
+                                 stop it — unlike the panel's <C-c>, which
+                                 reaches the runner and actually stops the run)
     <CR>                        open this file in the build clone
     q                           close the review
 

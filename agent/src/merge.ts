@@ -68,13 +68,40 @@ export interface LandResult {
   branch: string;
 }
 
+/**
+ * Whoever holds this session's claim, when it is not the run asking.
+ *
+ * The two cases read as opposites to the reader: their own detached runner is
+ * something to wait for, and a second editor is not theirs to interrupt.
+ */
+export interface SessionHolder {
+  /** This session's own detached runner, rather than a second editor. */
+  detached: boolean;
+  /** What the holder is doing, in the words its claim recorded. */
+  what: string;
+}
+
 /** What `checkMerge` is told about the session, so it reads no state twice. */
 export interface MergeFacts {
   /** The captured diff, parsed — null when it does not verify against `diffId`. */
   diff: ParsedDiff | null;
   counts: TriageCounts;
-  /** Another editor holds a live claim on this session. */
-  heldElsewhere: boolean;
+  /** Something else holds a live claim on this session, or null when nothing does. */
+  heldBy: SessionHolder | null;
+}
+
+/**
+ * Why the session is not this reader's to act on right now.
+ *
+ * A detached runner is THEIR OWN build still going — reported as "another
+ * editor" it reads as a dead end, which is exactly how a long rebase started
+ * from the review tab came across.
+ */
+export function holderMessage(holder: SessionHolder): string {
+  if (holder.detached) {
+    return `this change is still running outside the editor (${holder.what}) — it finishes on its own`;
+  }
+  return `another editor is driving this change (${holder.what})`;
 }
 
 /**
@@ -95,7 +122,7 @@ export async function checkMerge(session: BigSession, facts: MergeFacts): Promis
 
   if (session.state === 'merged') push('already-merged', 'this change has already been merged');
   else if (session.state !== 'reviewing') push('not-reviewing', `this change is still ${session.state}`);
-  if (facts.heldElsewhere) push('held-elsewhere', 'another editor is driving this change');
+  if (facts.heldBy !== null) push('held-elsewhere', holderMessage(facts.heldBy));
   if (facts.counts.open > 0) {
     const open = facts.counts.open;
     push('threads-open', `${open} thread${open === 1 ? '' : 's'} still ${open === 1 ? 'needs' : 'need'} clearing`);
