@@ -2,6 +2,65 @@
 
 ## Unreleased
 
+- **Diagnostics you can attach to a bug report.** Issue #10 ("stuck, never
+  allowing me to merge") had nothing attachable: no log, no way to say what
+  nvime was doing. Three things now do.
+
+  A **debug log**, off by default and free when off — nothing is formatted and
+  no file is created. `debug = { level = 'off' | 'info' | 'debug' }` in
+  `setup()`, or `:Nvime debug on|off|toggle` for the session. At `info` it
+  records one line per RPC request, reply and event, plus every state
+  transition in big/edit/chat (display and phase changes, approvals, steers,
+  the merge precondition check); `debug` adds the streamed deltas, on both
+  halves. It goes to `stdpath('log')/nvime-<pid>.log`, append-only, rotated at
+  5 MB keeping one `.1`, and the sidecar mirrors its own half into its editor's
+  file through a new `debug.set`, so both ends of a stuck run read as one
+  timeline — except a detached build's runner, which is a separate process and
+  does not mirror. The log is DENY BY DEFAULT: a string is written out
+  only under a name known to be safe (an identifier, one of nvime's own enums,
+  a tool name, a version, a sha, a path, a line range), and every other string
+  is its size, every list `<N items>`, every secret-named field `<redacted>`.
+  Numbers and booleans pass whatever they are called; objects recurse so each
+  leaf answers for its own name. The clip bounds a line but is never the reason
+  something is safe. Your configuration in the bundle is the one exception —
+  secrets redacted, the rest printed, since `setup()` refuses a key the
+  defaults do not name.
+
+  **`:Nvime log`** shows the last 200 lines in a readonly split parked at the
+  newest line (`q` closes it); `:Nvime log clear` empties the file. `:Nvime
+  doctor` gains a row naming the log's level, path and size.
+
+  **`:Nvime bundle`** writes one markdown file under `stdpath('cache')`, 0600,
+  and copies its path to the `+` and `"` registers: nvime version and git sha,
+  Neovim, OS, node and claude versions, the configuration with secrets
+  redacted, the doctor output, the last 200 log lines and — when a big change
+  is selected — its session and the last 50 events from its build log, through
+  a new read-only `big.runlog`. Nothing blocks the editor: every probe it makes
+  runs off the main thread with a 3 s deadline and prints `(timed out)` rather
+  than waiting, and the bundle never starts a second sidecar.
+
+  **The bundle prints what it names, never what it is handed.** Every section
+  is an allow-list over a shape the sidecar owns and will grow fields in — the
+  session it sends carries the runner's control token and socket, the spec, the
+  conversation, and a title that is the first 80 characters of what the user
+  typed. The bundle prints id, state, display, steerable, base and head sha,
+  the worktree path, the runner's pid and liveness, and the timestamps.
+  Run-log events likewise: a delta is a byte count, a tool is its name and a
+  summary length, a phase is its phase, anything else is its key names.
+
+  **One log file per process** (`nvime-<pid>.log`, 0600): two editors sharing
+  one file rotated over each other's history, silently. `:Nvime log` and the
+  bundle merge every process's file — and the rotated `.1` — by timestamp, and
+  a week-old file from an editor that is gone is pruned. A rotation that
+  cannot happen now stops the log and says so instead of letting the file grow
+  past its cap unbounded, and a log that cannot be opened reads as a failure
+  in `:Nvime doctor` rather than as "off".
+
+- **A long merge check says so.** While the review tab checks the merge
+  preconditions the bars already carried a spinner; past 30 seconds it now says
+  how long it has been running and names `:Nvime bundle`, once as a warning and
+  on the wide bar, instead of looking exactly like a wedged editor (#10).
+
 ## 3.1.0 - 2026-09-02
 
 - Review threads open the clone's real, read-only file with diff annotations,

@@ -1013,8 +1013,9 @@ function scriptGrades(grades: Array<{ threadId: string; grade: number; followup?
 async function reviewing(
   difficulty: 'vibe' | 'easy' | 'medium' | 'extreme' = 'medium',
   write = 'def main():\n    print("v1")\n',
+  title = 'version flag',
 ): Promise<SessionView> {
-  const created = service.create(repo, 'version flag', difficulty);
+  const created = service.create(repo, title, difficulty);
   turns.push({ frames: [frames.init(), frames.result('spec', { ready: true, message: 'here it is', spec: SPEC })] });
   await service.intake(1, { root: repo, id: created.id, message: 'add a --version flag' });
   await service.approve(repo, created.id);
@@ -1626,6 +1627,36 @@ describe('the local merge', () => {
     assert.equal(again.session.display, 'merged', 'and the record is brought up to it');
     assert.equal(again.session.merge?.commit, gitIn(repo, 'rev-parse', 'main'));
     assert.equal(service.open(repo, view.id).display, 'merged', 'the repair is on disk');
+  });
+
+  // G1: the branch is `nvime/big/<slug of the title>`, and the title is the
+  // first 80 characters of what the user typed. `big.state` used to carry it
+  // inside prose (`landing on <branch>`), which put the reader's prompt into
+  // the plugin's debug log — and the log tail goes into `:Nvime bundle`.
+  // Title-derived text may live only in a field the redactor knows by name.
+  it('never puts title-derived text into an event except as a named field', async () => {
+    const view = await reviewing('medium', 'def main():\n    print("v1")\n', 'fix the hunter2 staging password leak');
+    scriptGrades(view.blocks.filter((block) => block.state === 'open').map((block) => ({ threadId: block.id, grade: 100 })));
+    const ready = await service.answer(3, {
+      root: repo,
+      id: view.id,
+      answers: view.blocks
+        .filter((block) => block.state === 'open')
+        .map((block) => ({ blockId: block.id, text: 'I understand it' })),
+    });
+    const result = await service.merge(4, { root: repo, id: ready.id });
+    assert.equal(result.merged, true);
+
+    const REDACTED_BY_NAME = new Set(['branch', 'title', 'slug']);
+    const offenders = events.flatMap((entry) =>
+      Object.entries(entry.params)
+        .filter(([key, value]) => !REDACTED_BY_NAME.has(key) && JSON.stringify(value ?? null).includes('hunter2'))
+        .map(([key]) => `${entry.event}.${key}`),
+    );
+    assert.deepEqual(offenders, [], `title-derived text reached an unnamed field: ${offenders.join(', ')}`);
+
+    const landing = events.filter((entry) => entry.event === 'big.state').at(-1);
+    assert.match(String(landing?.params.branch), /^nvime\/big\/fix-the-hunter2/, JSON.stringify(landing));
   });
 
   it('refuses everything that would move a merged change', async () => {

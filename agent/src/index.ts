@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join, normalize } from 'node:path';
 import { promisify } from 'node:util';
 import { deleteSession, getSessionMessages, listSessions, query } from '@anthropic-ai/claude-agent-sdk';
 import { BigService } from './big.js';
@@ -8,6 +8,7 @@ import { BigStore, defaultBigRoot } from './bigstore.js';
 import { CertificationService } from './certification.js';
 import { ChatService } from './chat.js';
 import { parseContextBlocks, parseProjectInstructions } from './context.js';
+import { DebugLog, isDebugLevel } from './debuglog.js';
 import { DetachedService } from './detached.js';
 import { parseDial, parseTriageDial } from './dial.js';
 import { EditService, parseScope } from './edit.js';
@@ -26,6 +27,7 @@ import {
 import { LineSplitter, ProtocolError, encodeFrame, type OutgoingFrame } from './protocol.js';
 import { ManagedPolicyClient } from './managed-policy.js';
 import { Dispatcher } from './rpc.js';
+import { tailRunLog } from './runlog.js';
 import { SessionStore, defaultStorePath } from './sessions.js';
 import { CLAUDE_VERSION_PROBE_TIMEOUT_MS, DRAIN_TIMEOUT_MS } from './timeouts.js';
 
@@ -42,6 +44,21 @@ const run = promisify(execFile);
  */
 let unflushed = 0;
 
+/**
+ * One pushed event, mirrored by SIZE at `debug` before it goes on the wire.
+ * The plugin logs what it receives; this says what the sidecar sent, which is
+ * the difference that matters when a stream is stuck.
+ */
+function emitter(debugLog: DebugLog): (event: string, params: Record<string, unknown>) => void {
+  return (event, params) => {
+    if (debugLog.enabled('debug')) {
+      const text = typeof params.text === 'string' ? params.text : '';
+      debugLog.detail(event.endsWith('.delta') ? `sent ${event} ${text.length} bytes` : `sent ${event}`);
+    }
+    write({ event, params });
+  };
+}
+
 function write(frame: OutgoingFrame): void {
   const line = encodeFrame(frame);
   unflushed += 1;
@@ -51,6 +68,8 @@ function write(frame: OutgoingFrame): void {
 }
 
 function main(): void {
+  const debugLog = new DebugLog();
+  const emit = emitter(debugLog);
   const claudePath = resolveClaudeExecutable(process.env);
   const store = new SessionStore(process.env.NVIME_SESSION_STORE ?? defaultStorePath(process.env));
   const chat =
@@ -61,7 +80,7 @@ function main(): void {
           store,
           claudePath,
           env: process.env,
-          emit: (event, params) => write({ event, params }),
+          emit: emit,
         });
 
   const edit =
@@ -71,7 +90,7 @@ function main(): void {
           sdk: { query },
           claudePath,
           env: process.env,
-          emit: (event, params) => write({ event, params }),
+          emit: emit,
           approvalTimeoutMs: readApprovalTimeout(process.env.NVIME_APPROVAL_TIMEOUT_MS),
         });
 
@@ -84,7 +103,7 @@ function main(): void {
           store: bigStore,
           claudePath,
           env: process.env,
-          emit: (event, params) => write({ event, params }),
+          emit: emit,
         });
 
   const detached =
@@ -94,14 +113,36 @@ function main(): void {
           big,
           store: bigStore,
           env: process.env,
-          emit: (event, params) => write({ event, params }),
+          emit: emit,
         });
 
   const organization = createCertificationService(process.env);
-
-  const dispatcher = new Dispatcher(write);
+  const dispatcher = new Dispatcher(write, debugLog);
   registerHandlers(dispatcher, { chat, edit, big, detached, organization }, claudePath, store.path);
+  registerDiagnosticHandlers(dispatcher, debugLog, bigStore);
   readStdin(dispatcher);
+}
+
+/**
+ * The two methods `:Nvime bundle` and `:Nvime debug` need. Read-only, and the
+ * only writer here is the debug log the plugin explicitly turned on.
+ */
+function registerDiagnosticHandlers(dispatcher: Dispatcher, debugLog: DebugLog, bigStore: BigStore): void {
+  dispatcher.register('debug.set', async (_id, params) => {
+    const level = params.level;
+    if (!isDebugLevel(level)) {
+      throw new ProtocolError('bad_request', 'params.level must be off, info or debug');
+    }
+    debugLog.setLevel(level, level === 'off' ? null : logPathFrom(params));
+    return { level, path: debugLog.path };
+  });
+
+  dispatcher.register('big.runlog', async (_id, params) => ({
+    events: tailRunLog(
+      bigStore.logPathFor(requireAbsolutePath(params, 'root'), requireString(params, 'sessionId')),
+      optionalPositiveInt(params, 'limit', 500) ?? 50,
+    ),
+  }));
 }
 
 interface Services {
@@ -485,6 +526,24 @@ function registerBigHandlers(
     if (detached !== null && (await detached.cancel(target))) return { cancelled: true };
     return { cancelled: present(big).cancel(target) };
   });
+}
+
+/**
+ * The mirror's file, built HERE from a directory and the editor's pid rather
+ * than taken as a path. The plugin names one file per process; accepting an
+ * arbitrary absolute path made this the only place the sidecar wrote wherever
+ * a peer pointed it, `..` segments included.
+ */
+function logPathFrom(params: Record<string, unknown>): string {
+  const dir = requireAbsolutePath(params, 'dir');
+  if (normalize(dir) !== dir) {
+    throw new ProtocolError('bad_request', 'params.dir must be a normalized absolute path');
+  }
+  const pid = params.pid;
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid < 1) {
+    throw new ProtocolError('bad_request', 'params.pid must be the editor process id');
+  }
+  return join(dir, `nvime-${pid}.log`);
 }
 
 /** The `after` cursor an attach resumes from. 0 means "replay everything". */

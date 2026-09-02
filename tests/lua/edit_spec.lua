@@ -431,3 +431,31 @@ end)
 -- `edit.lua` captured the stub when it was required; every later spec gets the
 -- real module back.
 package.loaded['nvime.agent'] = real_agent
+
+describe('one name, two meanings: the edit target in the debug log', function()
+  -- Round 4 LOW: `scope` is BigSpec's user-written scope lines AND
+  -- `edit.start`'s target. Privacy wins on the shared key — the RPC line
+  -- collapses it — so the call site that has something worth reading says it
+  -- in fields of its own, rather than the key list being loosened.
+  it('names the file and the range in its own state line', function()
+    local log = require('nvime.log')
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local path = dir .. '/nvime-' .. vim.uv.os_getpid() .. '.log'
+    local _, file = sandbox()
+    open_on(file)
+    log.set_level('info', path)
+    edit.send('add a lock')
+    log.close()
+
+    local handle = assert(io.open(path, 'r'))
+    local bytes = handle:read('*a')
+    handle:close()
+    ok(bytes:find(file, 1, true) ~= nil, 'the edit target must stay readable in the timeline: ' .. bytes)
+    ok(bytes:find('state edit start', 1, true) ~= nil, bytes)
+    local rpc = bytes:match('[^\n]*rpc > edit%.start[^\n]*') or ''
+    ok(rpc:find('"kind"', 1, true) == nil, 'the rpc line keeps the scope payload collapsed: ' .. rpc)
+    log.set_level('off')
+    cleanup()
+  end)
+end)

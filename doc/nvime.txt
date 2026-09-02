@@ -19,7 +19,8 @@ CONTENTS                                                       *nvime-contents*
  10. Highlight groups ..................... |nvime-highlights|
  11. Statusline ........................... |nvime-statusline|
  12. Health .............................. |nvime-health|
- 13. Security model ....................... |nvime-security|
+ 13. Diagnostics .......................... |nvime-diagnostics|
+ 14. Security model ....................... |nvime-security|
 
 ==============================================================================
 1. INTRODUCTION                                            *nvime-introduction*
@@ -106,6 +107,16 @@ require('nvime').setup({opts})
 :Nvime statusline       Toggle the built-in winbar status on or off, globally,
                         for windows that have no winbar of their own.
                         |nvime-statusline|
+
+:Nvime debug [arg]      Turn the debug log on or off for this session.
+                        `on`/`info`, `debug`, `off`, or `toggle` (the default).
+                        |nvime-diagnostics|
+
+:Nvime log              Show the tail of the debug log in a readonly split;
+                        `q` closes it. `:Nvime log clear` empties the file.
+
+:Nvime bundle           Write everything a bug report needs to one markdown
+                        file and copy its path to the `+` and `"` registers.
 
 ==============================================================================
 5. KEYMAPS                                                      *nvime-keymaps*
@@ -649,12 +660,91 @@ windows that have no winbar of their own.
     - a claude credentials file exists (best effort)
     - this repository has a git identity, which a local merge needs
     - which lanes, if any, run a non-default model/effort dial
+    - the debug log's level, path and size |nvime-diagnostics|
 
 `:Nvime doctor` renders them as one pass/warn/fail list with the fix named
 under each failure; `q` or `<Esc>` closes it.
 
 ==============================================================================
-13. SECURITY MODEL                                             *nvime-security*
+13. DIAGNOSTICS                                             *nvime-diagnostics*
+
+When something is stuck, these three make it reportable. All of it is local,
+none of it costs a token, and nothing runs until you turn it on.
+
+The debug log ~
+    Off by default, and free when off: the level is the first thing every log
+    call checks, so a streamed token costs nothing at all. Turn it on for good
+    in `setup()` >
+
+        require('nvime').setup({ debug = { level = 'info' } })
+<
+    or for this session with `:Nvime debug on`. Levels:
+
+        off     nothing at all (the default)
+        info    one line per RPC request, reply and event, plus every state
+                transition in big/edit/chat — display and phase changes,
+                approvals, steers, and the merge precondition check
+        debug   the same, plus the streamed deltas
+
+    It is written to `stdpath('log')/nvime-<pid>.log` (`stdpath('state')` on a
+    Neovim without a log directory) — one file per process, because two
+    editors sharing one file rotate over each other's history silently.
+    Append-only, created 0600, rotated at 5 MB keeping one `.1`, and pruned
+    once a week-old file belongs to an editor that is gone. The sidecar
+    mirrors its own half into its editor's file, so both ends of a stuck run
+    read as one timeline — with one exception: a detached build's runner is a
+    separate process and does not mirror.
+
+    The log is DENY BY DEFAULT. A string is written out only under a name
+    known to be safe — an identifier, one of nvime's own enums, a tool name, a
+    version, a sha, a filesystem path, a line range. Every other string is
+    recorded as its size (`<412 chars>`), a list as `<N items>`, and a
+    secret-named field as `<redacted>`. Numbers and booleans pass whatever
+    they are called; objects recurse, so every leaf answers for its own name.
+    The clip still bounds a line but is never the reason something is safe.
+
+    So a field nobody has thought about yet is a size, not a leak — which is
+    what makes the log safe to paste into a public issue, and it has to hold
+    at the log line, because `:Nvime bundle` attaches the tail verbatim.
+
+    The one exception is your configuration in the bundle: redacted for
+    secrets, otherwise printed, because `setup()` refuses a key the defaults
+    do not name and its shape is therefore bounded.
+
+:Nvime log ~
+    Opens the last 200 lines in a readonly scratch split, parked at the newest
+    line — every process's log merged by timestamp, the rotated `.1` included.
+    `q` or `<Esc>` closes it. `:Nvime log clear` empties this process's file,
+    never another editor's, and re-renders an open split.
+
+:Nvime bundle ~
+    Writes one markdown file under `stdpath('cache')`, 0600, and copies its
+    path to the `+` and `"` registers. It carries the nvime version and git
+    sha, your Neovim, OS, node and claude versions, your configuration with
+    secrets redacted, the `:Nvime doctor` output, the last 200 log lines, and
+    — when a big change is selected — its session and the last 50 events from
+    its build log. Nothing blocks: every probe it makes — node, git, the
+    claude version — runs off the main thread with a 3 s deadline and prints
+    `(timed out)` rather than waiting, and no second sidecar is started.
+
+    THE BUNDLE PRINTS WHAT IT NAMES, NEVER WHAT IT IS HANDED. Every section is
+    an allow-list. The session the sidecar sends carries the runner's control
+    token and socket, the spec, the conversation, and a title that is the
+    first 80 characters of what you typed; the bundle prints id, state,
+    display, steerable, base and head sha, the worktree path, the runner's pid
+    and whether it is still alive, and the timestamps — nothing else. Run-log
+    events are the same: a delta becomes a byte count, a tool its name and a
+    summary length, a phase its phase, and anything unrecognised its key
+    names.
+
+A merge check that runs long ~
+    While the review tab is checking the merge preconditions the bars carry a
+    spinner and what is running, so a slow check is visibly in progress rather
+    than indistinguishable from a wedged editor. Past 30 seconds it says so
+    and names `:Nvime bundle`.
+
+==============================================================================
+14. SECURITY MODEL                                             *nvime-security*
 
 nvime is precise about what it confines. The README carries the full text;
 the short version:

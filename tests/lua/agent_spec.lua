@@ -151,3 +151,57 @@ end)
 
 package.loaded['nvime.rpc'] = real_rpc
 package.loaded['nvime.agent'] = real_agent
+
+describe('setup reaches a sidecar that is already running', function()
+  local t2 = require('harness')
+
+  --- `require('nvime')` pulls in every surface, binding each to whichever
+  --- `nvime.*` modules are loaded right now — and other specs leave fakes
+  --- there. Snapshot the whole namespace and put it back, so this spec cannot
+  --- decide what a later one sees. (Round 2, G16: `setup()` is idempotent at
+  --- runtime; it was only ever the harness that needed the isolation.)
+  local function with_isolated_modules(fn)
+    local snapshot = {}
+    for name, module in pairs(package.loaded) do
+      if name == 'nvime' or name:match('^nvime%.') ~= nil then
+        snapshot[name] = module
+      end
+    end
+    local finished, err = pcall(fn)
+    for name in pairs(package.loaded) do
+      if name == 'nvime' or name:match('^nvime%.') ~= nil then
+        package.loaded[name] = nil
+      end
+    end
+    for name, module in pairs(snapshot) do
+      package.loaded[name] = module
+    end
+    if not finished then
+      error(err, 0)
+    end
+  end
+
+  -- F14 (round 1): `init.setup` installed the plugin's own level but never
+  -- told a sidecar that was already up, so `setup{ debug = { level = ... } }`
+  -- was half-applied, silently.
+  t2.it('tells a running sidecar the level setup just installed', function()
+    local told = {}
+    with_isolated_modules(function()
+      local live = require('nvime.agent')
+      local real = live.set_debug_level
+      live.set_debug_level = function(level)
+        told[#told + 1] = level
+      end
+      local finished, err = pcall(function()
+        require('nvime').setup({ debug = { level = 'debug' } })
+      end)
+      live.set_debug_level = real
+      require('nvime.log').set_level('off')
+      require('nvime.config').setup()
+      if not finished then
+        error(err, 0)
+      end
+    end)
+    t2.eq({ 'debug' }, told, 'the level must reach the sidecar half too')
+  end)
+end)

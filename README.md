@@ -488,6 +488,9 @@ big change in this project with its review progress. `<CR>` opens one.
 | `:Nvime doctor` | the preflight, as one pass/warn/fail list |
 | `:Nvime health` | the same checks in `:checkhealth` |
 | `:Nvime statusline` | toggle the built-in winbar status |
+| `:Nvime debug [on\|off\|toggle\|info\|debug]` | the debug log's level for this session |
+| `:Nvime log [clear]` | show the debug log's tail, or empty it |
+| `:Nvime bundle` | write everything a bug report needs to one file |
 | `:checkhealth nvime` | node, claude, sidecar, keymaps |
 
 ## Keymaps
@@ -537,6 +540,10 @@ require('nvime').setup({
   },
   ui = {
     icons = 'unicode',   -- or 'ascii' for a terminal font with neither
+  },
+  debug = {
+    -- 'off' (default, costs nothing and writes no file), 'info', or 'debug'.
+    level = 'off',
   },
   keymaps = {
     enabled = false,
@@ -672,6 +679,73 @@ one glanceable list with the fix named under each failure.
 
 ---
 
+## Diagnostics
+
+Three things make a stuck nvime reportable. All local, none of them costs a
+token, and nothing runs until you turn it on.
+
+**A debug log.** Off by default, and free when off — the level is the first
+thing every log call checks, so a streamed token costs nothing at all.
+`debug = { level = 'info' }` in `setup()`, or `:Nvime debug on` for the
+session. At `info` it records one line per RPC request, reply and event, plus
+every state transition in big/edit/chat — display and phase changes, approvals,
+steers, the merge precondition check. `debug` adds the streamed deltas.
+
+It goes to `stdpath('log')/nvime-<pid>.log` — one file per process, because two
+editors sharing one file rotate over each other's history silently. Append-only,
+rotated at 5 MB keeping one `.1`, created 0600, and pruned once a week-old file
+belongs to an editor that is gone. The sidecar mirrors its own half into its
+editor's file, so both ends of a stuck run read as one timeline — with one
+exception: a detached build's runner is a separate process and does not mirror.
+
+**The log is deny-by-default.** A string is written out only under a name
+known to be safe — an identifier, one of nvime's own enums, a tool name, a
+version, a sha, a filesystem path, a line range. Every other string is recorded
+as its size (`<412 chars>`), a list as `<N items>`, and a secret-named field as
+`<redacted>`. Numbers and booleans pass whatever they are called, and objects
+recurse so every leaf answers for its own name. The clip still bounds a line
+but is never the reason something is safe.
+
+That is the inversion four review rounds bought: enumerating what to *hide*
+ended one name short of the payload every time — the runner's control token,
+then the change's title, then the approved spec beside it, then the listing of
+a directory you attached. Now a field nobody has thought about is a size, not a
+leak. It has to hold at the log line: `:Nvime bundle` attaches the tail
+verbatim.
+
+The one deliberate exception is your own configuration in the bundle, which is
+redacted for secrets but otherwise printed — `setup()` refuses a key the
+defaults do not name, so unlike a wire payload its shape is bounded and known.
+
+**`:Nvime log`** opens the last 200 lines in a readonly split parked at the
+newest line; `q` closes it. Every process's log is merged by timestamp, the
+rotated `.1` included. `:Nvime log clear` empties this process's file — never
+another editor's — and re-renders the split if one is open.
+
+**`:Nvime bundle`** writes one markdown file under `stdpath('cache')`, 0600,
+and copies its path to the `+` and `"` registers: nvime version and git sha,
+Neovim, OS, node and claude versions, your config with secrets redacted, the
+doctor output, the last 200 log lines, and — when a big change is selected —
+its session and the last 50 events from its build log. Nothing blocks the
+editor: every probe it makes — node, git, the claude version — runs off the
+main thread with a 3 s deadline and prints `(timed out)` rather than waiting,
+and no second sidecar is started.
+
+**The bundle prints what it names, never what it is handed.** Every section is
+an allow-list. The session the sidecar sends carries the runner's control token
+and socket, the spec, the conversation, and a title that is the first 80
+characters of what you typed; the bundle prints id, state, display, steerable,
+base and head sha, the worktree path, the runner's pid and whether it is still
+alive, and the timestamps — and nothing else. Run-log events are the same: a
+delta becomes a byte count, a tool becomes its name and a summary length, a
+phase becomes its phase, and anything unrecognised becomes its key names.
+
+And while the review tab checks the merge preconditions, the bars carry a
+spinner and what is running. Past 30 seconds it says so and names
+`:Nvime bundle`, instead of looking exactly like a wedged editor.
+
+---
+
 ## Security model
 
 nvime is precise about what it confines, and this section is deliberately the
@@ -800,9 +874,9 @@ Methods: `chat.send`, `chat.list`, `chat.history`, `chat.forget`, `chat.cancel`,
 `big.list`, `big.open`, `big.diff`, `big.intake`, `big.approve`, `big.build`,
 `big.capture`, `big.revise`, `big.toggle`, `big.answer`, `big.difficulty`,
 `big.mergecheck`, `big.merge`, `big.rebase`, `big.discard`, `big.cancel`,
-`big.explain`, `big.attach`, `big.steer`, `big.stop`, `big.detach`, `ping`,
-`organization.policy`, `organization.enrollment`, `organization.attest`,
-`shutdown`.
+`big.explain`, `big.attach`, `big.steer`, `big.stop`, `big.detach`,
+`big.runlog`, `debug.set`, `ping`, `organization.policy`,
+`organization.enrollment`, `organization.attest`, `shutdown`.
 
 `big.build`, `big.revise` and `big.rebase` spawn the detached runner and then
 follow it; `big.attach` follows one nothing here started, replaying the log
@@ -893,6 +967,8 @@ lua/nvime/
   confirm.lua         a y/n float for an action that cannot be taken back
   dashboard.lua       :Nvime — the front door and this project's big changes
   doctor.lua          :Nvime doctor — the preflight as one list
+  log.lua             the debug log: levels, redaction, rotation, :Nvime log
+  bundle.lua          :Nvime bundle — the attachable diagnostics file
   compose.lua         a float for one piece of free text; paste-blocked for a defense
   explain.lua         the post-clear explanation float
   approval.lua        the y/n float for a gated tool
@@ -913,6 +989,7 @@ lua/nvime/
 agent/src/
   index.ts            stdio loop, method registration
   rpc.ts              dispatcher
+  debuglog.ts         the sidecar's half of the plugin's debug log
   protocol.ts         frames + line splitting
   chat.ts             the SDK boundary for chat
   edit.ts             the SDK boundary for edit, and the change record

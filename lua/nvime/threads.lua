@@ -51,6 +51,11 @@ local ACTIVITY_DELAY_MS = 300
 --- The spinner's own cadence, matching the panel's.
 local ACTIVITY_TICK_MS = 90
 
+--- Past this a request is no longer "a moment": the indicator stops being a
+--- spinner the reader waits out and starts naming what to do about it. Issue
+--- #10 was a merge check that looked identical to a wedged editor.
+M.SLOW_ACTIVITY_MS = 30000
+
 --- The pane's title always keeps at least this many cells, whatever the
 --- streamed detail beside it wants — the floor `status()` cuts the detail to.
 local PANE_TITLE_ROOM = 12
@@ -476,7 +481,25 @@ function M.activity_line()
     return nil
   end
   local frames = require('nvime.icons').get().spinner
-  return frames[(current.frame - 1) % #frames + 1] .. ' ' .. current.label
+  local line = frames[(current.frame - 1) % #frames + 1] .. ' ' .. current.label
+  local note = M.slow_note()
+  return note == nil and line or (line .. ' — ' .. note)
+end
+
+--- What to say once the request in flight has run past `SLOW_ACTIVITY_MS`: how
+--- long it has been, and the one command that makes it reportable. Nil while
+--- the request is still within the time a reader would simply wait out.
+--- @return string|nil
+function M.slow_note()
+  local current = current_activity()
+  if current == nil or not current.shown then
+    return nil
+  end
+  local elapsed = vim.uv.now() - current.started_ms
+  if elapsed < M.SLOW_ACTIVITY_MS then
+    return nil
+  end
+  return string.format('still %s after %ds · :Nvime bundle', current.label, math.floor(elapsed / 1000))
 end
 
 --- The two bars. The gate's count goes on the narrow tree, where it always
@@ -505,7 +528,10 @@ local function status()
     -- multi-line (runner stderr, a git error). Collapsed to one line and cut
     -- to fit before it ever reaches the winbar, the same as the left bar
     -- already was; the static keys hint below is short enough it never needed this.
-    keys = shape.ellipsise(((current.detail or ''):gsub('%s+', ' ')), math.max(pane_width - PANE_TITLE_ROOM - 4, 8))
+    -- With no streamed detail — a merge check sends none — the wide bar is
+    -- where the slow note fits, since the tree bar cuts it off (issue #10).
+    local detail = current.detail or M.slow_note() or ''
+    keys = shape.ellipsise((detail:gsub('%s+', ' ')), math.max(pane_width - PANE_TITLE_ROOM - 4, 8))
   else
     keys = M.keys_hint(view.session, view.showing)
   end
@@ -858,6 +884,12 @@ local function arm_timer(record, immediate)
       end
       record.shown = true
       record.frame = record.frame + 1
+      -- Said once, not every tick: a bar the reader may not be looking at is
+      -- not how they find out a check has been running for half a minute.
+      if not record.slow_said and vim.uv.now() - record.started_ms >= M.SLOW_ACTIVITY_MS then
+        record.slow_said = true
+        notify(record.label .. ' is taking a while — :Nvime bundle attaches what it is doing', vim.log.levels.WARN)
+      end
       status()
     end)
   end)
@@ -892,7 +924,12 @@ local function begin_activity(label)
     timer = nil,
     generation = next_generation,
     session_id = session_id,
+    started_ms = vim.uv.now(),
   }
+  local log = require('nvime.log')
+  if log.enabled('info') then
+    log.state_change('review', 'started', { op = label, session = session_id })
+  end
   arm_timer(activity, false)
 end
 
@@ -927,6 +964,10 @@ local function end_activity()
   activity = nil
   if live == nil then
     return
+  end
+  local log = require('nvime.log')
+  if log.enabled('info') then
+    log.state_change('review', 'settled', { op = live.label, ms = vim.uv.now() - live.started_ms })
   end
   if live.timer ~= nil then
     live.timer:stop()

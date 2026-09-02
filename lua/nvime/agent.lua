@@ -5,6 +5,7 @@
 --- as the same structured error shape the sidecar itself uses, so the panel has
 --- exactly one way to render trouble.
 local config = require('nvime.config')
+local log = require('nvime.log')
 local rpc = require('nvime.rpc')
 
 local M = {}
@@ -146,7 +147,31 @@ function M.ensure(cb)
   end
   state.client = client
   state.last_exit = nil
+  -- A sidecar that starts while the log is on must mirror into it from its
+  -- first frame, or half the timeline is missing exactly when it matters. A
+  -- fresh sidecar is already off, so an off log costs it no frame at all.
+  if log.level() ~= 'off' then
+    M.set_debug_level(log.level())
+  end
   cb(nil)
+end
+
+--- Tells the sidecar which level to mirror into the shared log file. A no-op
+--- when the sidecar is not up: `ensure` sends it again on the next spawn.
+--- @param level string one of `nvime.log`'s levels
+function M.set_debug_level(level)
+  assert(vim.tbl_contains(log.LEVELS, level), 'agent.set_debug_level needs a known level')
+  if state.client == nil or not state.client:is_running() then
+    return
+  end
+  -- A directory and this process's id, never a path: the sidecar builds the
+  -- file name itself so it can refuse anything but its own.
+  local params = { level = level, dir = vim.fs.dirname(log.path()), pid = vim.uv.os_getpid() }
+  state.client:request('debug.set', params, function(err)
+    if err ~= nil then
+      vim.notify('nvime: the sidecar refused the debug level: ' .. tostring(err.message), vim.log.levels.WARN)
+    end
+  end, config.get().agent.request_timeout_ms)
 end
 
 --- Ensures the sidecar is up, then sends one request. Control requests carry

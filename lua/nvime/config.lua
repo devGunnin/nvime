@@ -99,6 +99,12 @@ local defaults = {
     -- an explicit, marked-untrusted block. Off disables reading the file at all.
     enabled = true,
   },
+  debug = {
+    -- The attachable debug log. 'off' costs nothing and creates no file;
+    -- 'info' records every RPC request/reply and state transition; 'debug'
+    -- adds the streamed deltas. `:Nvime debug on|off|toggle` for one session.
+    level = 'off',
+  },
   organization = {
     -- Paid enforcement stays opt-in for the community plugin. A managed
     -- deployment supplies both the service and its native signing binary.
@@ -280,6 +286,11 @@ local function validate(opts)
     fail('context.max_dir_entries must be at least 1')
   end
   check_type(opts.project_instructions.enabled, 'boolean', 'project_instructions.enabled')
+  check_type(opts.debug.level, 'string', 'debug.level')
+  local levels = require('nvime.log').LEVELS
+  if not vim.tbl_contains(levels, opts.debug.level) then
+    fail('debug.level must be one of: ' .. table.concat(levels, ', '))
+  end
   validate_organization(opts)
   return opts
 end

@@ -162,7 +162,14 @@ local function on_external_change(params)
 end
 
 local function on_approval(request)
+  local log = require('nvime.log')
+  if log.enabled('info') then
+    log.state_change('edit', 'approval asked', { approvalId = request.approvalId, tool = request.tool })
+  end
   approval.ask(request, function(allow)
+    if log.enabled('info') then
+      log.state_change('edit', 'approval answered', { approvalId = request.approvalId, allow = allow })
+    end
     agent.request('edit.answer', { approvalId = request.approvalId, allow = allow }, function(err, result)
       if err ~= nil then
         show_error(err)
@@ -181,6 +188,14 @@ end
 --- identical for the rest of the run.
 --- @param params table approvalId, allowed, cause
 local function on_approval_settled(params)
+  local log = require('nvime.log')
+  if log.enabled('info') then
+    log.state_change('edit', 'approval settled', {
+      approvalId = params.approvalId,
+      allowed = params.allowed,
+      cause = params.cause,
+    })
+  end
   if params.allowed then
     return
   end
@@ -349,6 +364,15 @@ function M.send(text)
   surface():blank()
   surface():begin_stream('claude', 'NvimeAgentBody')
   surface():start_activity()
+
+  -- The log writes a string only under a name it has vouched for, and `scope`
+  -- is not one — BigSpec's scope lines are the reader's own words. Named here
+  -- in fields that are vouched for, rather than vouching for a shared name.
+  local log = require('nvime.log')
+  if log.enabled('info') then
+    local range = scope.startLine ~= nil and string.format('%d-%d', scope.startLine, scope.endLine) or nil
+    log.state_change('edit', 'start', { kind = scope.kind, file = scope.path, range = range })
+  end
 
   local dial = models.dial('edit')
   agent.request('edit.start', {
