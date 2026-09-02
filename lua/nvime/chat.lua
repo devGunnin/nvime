@@ -45,9 +45,13 @@ local state = {
   -- live stream and, worse, start a new session before the old one is known.
   restored = false,
   -- A send that arrived while restore was still in flight; replayed once
-  -- `restored` goes true. At most one: a second send while still restoring
-  -- replaces it, since only the latest prompt matters.
+  -- `restored` goes true, and only into the conversation it was written for —
+  -- it carries the `restore_token` it was queued under. At most one: a second
+  -- send while still restoring replaces it, since only the latest matters.
   pending_send = nil,
+  -- Sessions deleted from this editor, by id. A turn that was already in
+  -- flight must not install one of these as the panel's conversation.
+  deleted = {},
   -- Bumped whenever the panel walks away from a restore (reopen, <C-n>,
   -- deleting the live session). A reply carrying an older token is dropped
   -- instead of splicing a dead transcript into the current panel.
@@ -112,12 +116,36 @@ local function subscribe_once()
   state.subscribed = true
 end
 
+--- Gives an undelivered prompt back to the user rather than losing or
+--- misdelivering it: into the prompt box when there is one and it is empty,
+--- otherwise as a notice. Never sent.
+local function return_prompt(pending)
+  local live = panel.get(PANEL)
+  if live ~= nil and live:restore_prompt(pending.text) then
+    return
+  end
+  vim.notify('nvime: your queued prompt was not sent: ' .. pending.text, vim.log.levels.WARN)
+end
+
+--- Drops a queued send without delivering it. For every path that walks away
+--- from the conversation the prompt was written for.
+local function abandon_pending_send()
+  local pending = state.pending_send
+  state.pending_send = nil
+  if pending ~= nil then
+    return_prompt(pending)
+  end
+end
+
 --- Panel closed with a turn still running: nobody will read the reply, and the
 --- subscription pays for it either way, so stop it.
 local function on_panel_close()
   -- The choice's keys are bound to a buffer that is going away; a handle left
   -- behind would answer the next panel's question with the old one's block.
   retire_offer()
+  -- A prompt still queued behind a restore has nowhere to land now: sending it
+  -- would bill a turn into a surface nobody can read.
+  abandon_pending_send()
   local target = state.request_id
   if target == nil then
     return
@@ -136,10 +164,16 @@ end
 local function finish_restore()
   state.restored = true
   local pending = state.pending_send
+  state.pending_send = nil
   if pending == nil then
     return
   end
-  state.pending_send = nil
+  if pending.token ~= state.restore_token then
+    -- The panel walked away from the restore this was queued behind: sending
+    -- it now would deliver it to a conversation the user never addressed.
+    return_prompt(pending)
+    return
+  end
   M.send(pending.text, pending.extra, pending.echo)
 end
 
@@ -195,10 +229,13 @@ end
 --- transcript. Shared by the picker's resume choice and `chat.default =
 --- 'resume-last'`'s open path — the only two places a specific past session
 --- becomes the live one.
+--- The caller owns the restore generation: a caller switching AWAY from the
+--- restore in flight must `abandon_restore()` first, so a prompt queued behind
+--- it is not replayed into this session. The `resume-last` open path does not
+--- — landing on its own session continues the restore the user typed into.
 --- @param session_id string
 --- @param note string|nil status suffix; nil for a plain resume on open
 local function resume(session_id, note)
-  abandon_restore()
   state.session_id = session_id
   state.explicit_new = false
   state.restored = false
@@ -247,7 +284,7 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'prompt · <CR> send · <C-n> new · <C-r> resume · <C-c> stop',
+    prompt_hint = 'prompt · <CR> send · <C-n> new · <C-r> sessions · <C-c> stop',
     root = state.root,
     on_submit = M.send,
     on_close = on_panel_close,
@@ -298,7 +335,7 @@ function M.send(text, extra, echo)
   if not state.restored then
     -- Restore (session lookup + history) is still running: sending now would
     -- guess at the session and let the resumed transcript land mid-stream.
-    state.pending_send = { text = text, extra = extra, echo = echo }
+    state.pending_send = { text = text, extra = extra, echo = echo, token = state.restore_token }
     return
   end
   if state.request_id ~= nil then
@@ -320,6 +357,10 @@ function M.send(text, extra, echo)
   surface():start_activity()
 
   local dial = models.dial('chat')
+  -- The reply decides which conversation the panel is in. If the panel has
+  -- walked away since (reopen, <C-n>, a picked session, a delete), this turn
+  -- is no longer the one on screen and must not name it.
+  local token = state.restore_token
   agent.request('chat.send', {
     root = state.root,
     prompt = text,
@@ -335,6 +376,9 @@ function M.send(text, extra, echo)
     surface():finish_stream()
     if err ~= nil then
       show_error(err)
+      return
+    end
+    if token ~= state.restore_token or state.deleted[result.sessionId] then
       return
     end
     state.session_id = result.sessionId
@@ -420,6 +464,21 @@ local function age(ms)
   return string.format('%dd ago', math.floor(seconds / 86400))
 end
 
+--- Drops the panel back to fresh after the conversation it was showing was
+--- deleted. Its transcript is gone, so nothing here could still resume it.
+local function reset_after_delete()
+  abandon_restore()
+  state.session_id = nil
+  state.explicit_new = true
+  state.restored = true
+  abandon_pending_send()
+  surface():replace({}, {})
+  surface():append('— that conversation was deleted —', 'NvimeDim')
+  surface():blank()
+  refresh_status(nil)
+  render_fresh_start()
+end
+
 --- Deletes a stored session and its history. Called from the picker's `d`,
 --- after its own y/n confirm. Drops the panel back to fresh if the deleted
 --- session is the one currently live — its transcript is gone, so nothing
@@ -427,27 +486,34 @@ end
 --- @param session_id string
 --- @param done fun(ok: boolean) picker.open's on_delete callback
 local function delete_session(session_id, done)
-  agent.request('chat.forget', { root = state.root, sessionId = session_id }, function(err)
+  if state.session_id == session_id and state.request_id ~= nil then
+    -- Same reason `M.new_session` refuses: the reset below calls
+    -- `surface():replace`, which cannot run into an open stream.
+    vim.notify('nvime: stop the running turn before deleting this conversation', vim.log.levels.WARN)
+    done(false)
+    return
+  end
+  agent.request('chat.forget', { root = state.root, sessionId = session_id }, function(err, result)
     if err ~= nil then
       show_error(err)
       done(false)
       return
     end
+    if result ~= nil and result.alreadyGone then
+      vim.notify('nvime: that conversation was already gone', vim.log.levels.INFO)
+    end
+    state.deleted[session_id] = true
+    -- The picker row must be released even if the surface work throws, or it
+    -- stays dimmed and unusable for the life of the picker. The failure is
+    -- re-raised after, never swallowed.
+    local reset_ok, reset_err = true, nil
     if state.session_id == session_id then
-      -- Its transcript is gone: clear the surface and drop any restore still
-      -- in flight, so the dead conversation cannot replay after the notice.
-      abandon_restore()
-      state.session_id = nil
-      state.explicit_new = true
-      state.restored = true
-      state.pending_send = nil
-      surface():replace({}, {})
-      surface():append('— that conversation was deleted —', 'NvimeDim')
-      surface():blank()
-      refresh_status(nil)
-      render_fresh_start()
+      reset_ok, reset_err = pcall(reset_after_delete)
     end
     done(true)
+    if not reset_ok then
+      error(reset_err, 0)
+    end
   end)
 end
 
@@ -482,6 +548,10 @@ function M.pick_session()
           M.new_session()
           return
         end
+        -- The user switched conversations: the restore in flight is theirs no
+        -- longer, and a prompt queued behind it was not written for this one.
+        abandon_restore()
+        abandon_pending_send()
         surface():replace({}, {})
         surface():append('— switched to ' .. short(session_id) .. ' —', 'NvimeDim')
         surface():blank()
@@ -504,7 +574,7 @@ function M.new_session()
   state.session_id = nil
   state.explicit_new = true
   state.restored = true
-  state.pending_send = nil
+  abandon_pending_send()
   refresh_status('fresh')
   render_fresh_start()
 end

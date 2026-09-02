@@ -89,6 +89,27 @@ local function scrollback()
   return vim.api.nvim_buf_get_lines(panel.get('chat').buf, 0, -1, false)
 end
 
+--- What the prompt box currently holds.
+local function prompt_text()
+  local live = panel.get('chat')
+  return table.concat(vim.api.nvim_buf_get_lines(live.prompt_buf, 0, -1, false), '\n')
+end
+
+--- Runs `fn` with vim.notify captured, and returns everything it said.
+local function capture_notices(fn)
+  local said = {}
+  local real = vim.notify
+  vim.notify = function(message)
+    said[#said + 1] = message
+  end
+  local okay, err = pcall(fn)
+  vim.notify = real
+  if not okay then
+    error(err, 0)
+  end
+  return table.concat(said, '\n')
+end
+
 --- Runs `fn` from a cwd that is not the project, the case finding 1 lived in.
 local function from_elsewhere(fn)
   local before = vim.uv.cwd()
@@ -393,6 +414,149 @@ describe("chat.default = 'resume-last'", function()
     eq(true, sent('chat.send').params.new, 'a failed lookup must not leave the send guessing at a session')
     panel.close('chat')
     config.setup({})
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
+local GAP_PROMPT = 'what did we decide yesterday?'
+
+describe('a prompt queued while a restore is still in flight', function()
+  --- Opens under `resume-last` with the lookup still unanswered, and sends a
+  --- prompt into that gap. It is queued for the session being restored.
+  local function send_in_the_gap(dir)
+    fake.replies['chat.list'] = { defer = true }
+    fake.replies['chat.history'] = { defer = true }
+    open_resuming(dir)
+    chat.send(GAP_PROMPT)
+    eq(nil, sent('chat.send'), 'a send during the restore gap is queued, not delivered')
+  end
+
+  local function cleanup(dir)
+    panel.close('chat')
+    config.setup({})
+    fake.replies['chat.history'] = nil
+    fake.replies['chat.list'] = nil
+    vim.fn.delete(dir, 'rf')
+  end
+
+  it('is handed back unsent when the user resumes a different conversation', function()
+    local dir = sandbox()
+    send_in_the_gap(dir)
+    fake.replies['chat.list'] = {
+      err = nil,
+      result = { current = 'sess-A', sessions = { { sessionId = 'sess-B', title = 'other', lastModified = 0 } } },
+    }
+    chat.pick_session()
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, true, true), 'x', false)
+    eq('sess-B', chat.state().session_id, 'the picked session is now live')
+    fake.answer('chat.history', nil, { turns = {} })
+    eq(nil, sent('chat.send'), 'a prompt is never sent to a conversation the user did not address it to')
+    eq(GAP_PROMPT, prompt_text(), 'the words come back to the prompt box')
+    cleanup(dir)
+  end)
+
+  it('is handed back unsent when <C-n> starts a fresh conversation instead', function()
+    local dir = sandbox()
+    send_in_the_gap(dir)
+    chat.new_session()
+    eq(nil, sent('chat.send'), 'the queued prompt was written for the session being restored')
+    eq(GAP_PROMPT, prompt_text(), '<C-n> must not destroy what the user typed')
+    cleanup(dir)
+  end)
+
+  it('is dropped with a notice, never billed, when the panel is gone', function()
+    local dir = sandbox()
+    send_in_the_gap(dir)
+    local said = capture_notices(function()
+      panel.close('chat')
+    end)
+    ok(said:find(GAP_PROMPT, 1, true) ~= nil, 'a prompt with nowhere to go is given back as a notice')
+    fake.answer('chat.list', nil, { current = 'sess-1', sessions = {} })
+    fake.answer('chat.history', nil, { turns = {} })
+    eq(nil, sent('chat.send'), 'a closed panel must not bill a turn nobody can read')
+    cleanup(dir)
+  end)
+end)
+
+describe('a turn that finishes on a panel that has moved on', function()
+  it('does not name the conversation of a panel closed and reopened since', function()
+    local dir = sandbox()
+    open_on(dir)
+    fake.replies['chat.send'] = { defer = true }
+    chat.send('hello')
+    ok(chat.state().request_id ~= nil, 'the turn is in flight')
+
+    panel.close('chat')
+    vim.cmd('edit ' .. vim.fn.fnameescape(dir .. '/a.lua'))
+    chat.open()
+    eq(nil, chat.state().session_id, 'the reopened panel is explicitly a new conversation')
+
+    fake.answer('chat.send', nil, { sessionId = 'sess-OLD', usage = { output = 1 }, costUsd = 0 })
+    eq(nil, chat.state().session_id, 'the old turn must not silently resume itself on the new panel')
+    eq(true, chat.state().explicit_new)
+    panel.close('chat')
+    fake.replies['chat.send'] = nil
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
+describe('deleting a conversation while a turn is running', function()
+  it('refuses to delete the live one, and leaves its picker row usable', function()
+    local dir = sandbox()
+    open_on(dir)
+    local live = chat.state()
+    live.session_id, live.explicit_new = 'sess-1', false
+    fake.replies['chat.list'] = {
+      err = nil,
+      result = { current = 'sess-1', sessions = { { sessionId = 'sess-1', title = 'earlier', lastModified = 0 } } },
+    }
+    fake.replies['chat.forget'] = { err = nil, result = { forgotten = true } }
+    chat.pick_session()
+    -- The turn was started from the prompt while the picker sat open.
+    fake.replies['chat.send'] = { defer = true }
+    live.request_id = 99
+
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    local said = capture_notices(function()
+      vim.api.nvim_feedkeys('d', 'x', false)
+      vim.api.nvim_feedkeys('y', 'x', false)
+    end)
+    eq(nil, sent('chat.forget'), 'the live conversation is not deleted out from under its own stream')
+    ok(said:find('stop the running turn', 1, true) ~= nil, 'and the user is told why')
+    eq('sess-1', live.session_id, 'the panel keeps the conversation it is still streaming into')
+    live.request_id = nil
+    panel.close('chat')
+    fake.replies['chat.send'] = nil
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('never lets the finishing turn reinstate a conversation deleted meanwhile', function()
+    local dir = sandbox()
+    open_on(dir)
+    local live = chat.state()
+    fake.replies['chat.list'] = {
+      err = nil,
+      result = { current = nil, sessions = { { sessionId = 'sess-1', title = 'earlier', lastModified = 0 } } },
+    }
+    fake.replies['chat.forget'] = { err = nil, result = { forgotten = true } }
+    chat.pick_session()
+    -- A fresh conversation's turn: it has no id yet, so deleting `sess-1` is
+    -- not deleting the live one and the guard above does not apply.
+    fake.replies['chat.send'] = { defer = true }
+    chat.send('hello')
+    eq(nil, live.session_id)
+
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    vim.api.nvim_feedkeys('d', 'x', false)
+    vim.api.nvim_feedkeys('y', 'x', false)
+    ok(sent('chat.forget') ~= nil, 'the delete goes through')
+
+    fake.answer('chat.send', nil, { sessionId = 'sess-1', usage = { output = 1 }, costUsd = 0 })
+    eq(nil, live.session_id, 'the finished turn must not resurrect the conversation just deleted')
+    eq(true, live.explicit_new, 'and the next send must not try to resume it')
+    panel.close('chat')
+    fake.replies['chat.send'] = nil
     vim.fn.delete(dir, 'rf')
   end)
 end)

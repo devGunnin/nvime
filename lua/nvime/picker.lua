@@ -212,29 +212,43 @@ function M.open(items, opts)
     end
   end
 
+  -- True while this picker's own confirm float holds focus: leaving for our
+  -- own child is not the user walking away, so dismissal is muted for it.
+  local confirming = false
+
+  --- The muted WinLeave never fired for the confirm float, so re-check on the
+  --- way back: answering it from some other window dismisses the picker too.
+  local function dismiss_if_left()
+    if vim.api.nvim_win_is_valid(win) and vim.api.nvim_get_current_win() ~= win then
+      dismiss()
+    end
+  end
+
   local function delete_current()
     local row = vim.api.nvim_win_get_cursor(win)[1]
     local item = items[row]
     if item == nil or item.deletable == false or deleting[item] then
       return
     end
+    confirming = true
     confirm('delete ' .. vim.trim(item.label) .. '?', function(yes)
-      if not yes or not vim.api.nvim_buf_is_valid(buf) then
-        return
+      confirming = false
+      if yes and vim.api.nvim_buf_is_valid(buf) then
+        mark_deleting(item)
+        opts.on_delete(item.value, function(ok)
+          unmark_deleting(item)
+          if not ok or not vim.api.nvim_buf_is_valid(buf) then
+            return
+          end
+          -- By identity, not the captured row: a delete that landed first may
+          -- already have shifted this item up the list.
+          local now = row_of(item)
+          if now ~= nil then
+            remove_row(now)
+          end
+        end)
       end
-      mark_deleting(item)
-      opts.on_delete(item.value, function(ok)
-        unmark_deleting(item)
-        if not ok or not vim.api.nvim_buf_is_valid(buf) then
-          return
-        end
-        -- By identity, not the captured row: a delete that landed first may
-        -- already have shifted this item up the list.
-        local now = row_of(item)
-        if now ~= nil then
-          remove_row(now)
-        end
-      end)
+      dismiss_if_left()
     end)
   end
 
@@ -247,6 +261,19 @@ function M.open(items, opts)
   end
   map('q', dismiss)
   map('<Esc>', dismiss)
+  -- Same contract as the confirm float: an unmapped window command must not
+  -- leave this floating over the user's code. Leaving is closing it.
+  vim.api.nvim_create_autocmd({ 'WinLeave', 'BufLeave' }, {
+    buffer = buf,
+    callback = function()
+      -- Not inline: closing a window from inside WinLeave hits textlock.
+      vim.schedule(function()
+        if not confirming then
+          dismiss()
+        end
+      end)
+    end,
+  })
   return win
 end
 

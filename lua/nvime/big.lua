@@ -846,7 +846,7 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'describe · <CR> send · <C-n> new · <C-r> resume · <C-t> review · <C-c> stop',
+    prompt_hint = 'describe · <CR> send · <C-n> new · <C-r> changes · <C-t> review · <C-c> stop',
     on_submit = M.send,
     on_close = on_panel_close,
     keys = {

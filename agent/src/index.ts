@@ -273,8 +273,11 @@ function registerChatHandlers(dispatcher: Dispatcher, chat: ChatService | null):
   }));
 
   dispatcher.register('chat.forget', async (_id, params) => {
-    await present(chat).forget(requireAbsolutePath(params, 'root'), requireUuid(params, 'sessionId'));
-    return { forgotten: true };
+    const existed = await present(chat).forget(
+      requireAbsolutePath(params, 'root'),
+      requireUuid(params, 'sessionId'),
+    );
+    return { forgotten: true, alreadyGone: !existed };
   });
 
   dispatcher.register('chat.cancel', async (_id, params) => ({

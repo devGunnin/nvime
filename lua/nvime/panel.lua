@@ -249,6 +249,26 @@ local function take_prompt(self)
   return text
 end
 
+--- Hands an unsent prompt back to the box — `take_prompt`'s counterpart, for a
+--- prompt that was taken but never delivered.
+--- Only when the box is empty: the user may have typed something else since,
+--- and that must win.
+--- @param text string
+--- @return boolean whether the text is now in the box
+function Panel:restore_prompt(text)
+  assert(type(text) == 'string', 'panel:restore_prompt needs text')
+  if self.prompt_buf == nil or not vim.api.nvim_buf_is_valid(self.prompt_buf) then
+    return false
+  end
+  local current = vim.trim(table.concat(vim.api.nvim_buf_get_lines(self.prompt_buf, 0, -1, false), '\n'))
+  if current ~= '' then
+    return false
+  end
+  write_lines(self.prompt_buf, 0, -1, vim.split(text, '\n', { plain = true }))
+  vim.bo[self.prompt_buf].modifiable = true
+  return true
+end
+
 --- One space of left gutter, and a wrapped line that keeps its own indent —
 --- the difference between a wall of text and something laid out.
 ---

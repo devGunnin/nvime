@@ -61,6 +61,46 @@ describe('picker.open', function()
   end)
 end)
 
+describe('picker.open: walking away from it', function()
+  it('closes itself instead of floating over the editor after an unmapped window command', function()
+    local chosen = {}
+    local before = #vim.api.nvim_list_wins()
+    local win = picker.open(items(3), {
+      on_choice = function(value)
+        chosen[#chosen + 1] = value
+      end,
+    })
+    eq(before + 1, #vim.api.nvim_list_wins(), 'the picker is up')
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-w>w', true, true, true), 'x', false)
+    vim.wait(200, function()
+      return not vim.api.nvim_win_is_valid(win)
+    end)
+    ok(not vim.api.nvim_win_is_valid(win), 'leaving the picker closes it')
+    eq({}, chosen, 'and leaving is never a choice')
+  end)
+
+  it('survives its own confirm float taking focus', function()
+    local deleted = {}
+    local win = picker.open(items(2), {
+      on_choice = function() end,
+      on_delete = function(value, done)
+        deleted[#deleted + 1] = value
+        done(true)
+      end,
+    })
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    vim.api.nvim_feedkeys('d', 'x', false)
+    -- The confirm float stole focus; dismissing the picker for its own child
+    -- would abandon the delete the user is being asked to confirm.
+    vim.wait(50)
+    vim.api.nvim_feedkeys('y', 'x', false)
+    eq({ 'id-1' }, deleted, 'the confirmed delete still goes through')
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end)
+end)
+
 describe('picker.open: deleting a row', function()
   local function feed(keys)
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, true, true), 'x', false)

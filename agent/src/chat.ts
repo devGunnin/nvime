@@ -161,10 +161,23 @@ export class ChatService {
     return { current: entry.current, sessions };
   }
 
-  /** Deletes a stored session and its transcript, and drops it from the project's list. */
-  async forget(root: string, sessionId: string): Promise<void> {
-    await this.#sdk.deleteSession(sessionId, { dir: root });
+  /**
+   * Deletes a stored session and its transcript, and drops it from the
+   * project's list. A session the SDK no longer knows is already gone: the
+   * user's intent is satisfied, so the local entry still goes.
+   * @returns whether the SDK still had it to delete
+   */
+  async forget(root: string, sessionId: string): Promise<boolean> {
+    let existed = true;
+    try {
+      await this.#sdk.deleteSession(sessionId, { dir: root });
+    } catch (error) {
+      // Another editor deleted it, or the SDK pruned it between list and now.
+      if (!isMissingSession(error)) throw error;
+      existed = false;
+    }
     this.#store.forget(root, sessionId);
+    return existed;
   }
 
   async history(root: string, sessionId: string, limit: number): Promise<
@@ -297,6 +310,16 @@ function toSummary(info: SDKSessionInfo): SessionSummary {
   const named = nonEmpty(info.customTitle) ?? nonEmpty(info.firstPrompt) ?? nonEmpty(info.summary);
   const title = named ?? `(new) ${info.sessionId.slice(0, 8)}`;
   return { sessionId: info.sessionId, title, lastModified: info.lastModified };
+}
+
+/**
+ * Whether a `deleteSession` rejection means the session simply is not there.
+ * Matched on the message: the SDK throws a plain Error with no code, and the
+ * only not-found it can raise for this call is the session's own.
+ */
+function isMissingSession(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /not found/i.test(message);
 }
 
 /** `??` alone would let a blank title through as a blank picker row. */

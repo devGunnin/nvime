@@ -110,12 +110,12 @@ project's most recent conversation back up on open instead. Either way,
 `<C-r>` opens a picker whose first row is "new conversation" and whose
 remaining rows are past sessions by title and age — a session with no prompt
 yet reads as `(new)` plus its short id, so two of them are still tellable
-apart. `d` on a row deletes that session
-and its history, after a y/n float, never a modal. `<C-n>` clears the surface
-for another new conversation without deleting history. Resume survives Neovim
-restarts, and several Neovim instances share the session file without
-overwriting each other. A running turn must be stopped before switching, so its
-stream and cancellation handle cannot be orphaned.
+apart. `d` on a row deletes that session and its history, after a y/n float,
+never a modal. `<C-n>` clears the surface for another new conversation without
+deleting history. Resume survives Neovim restarts, and several Neovim
+instances share the session file without overwriting each other. A running turn
+must be stopped before switching or deleting, so its stream and cancellation
+handle cannot be orphaned.
 
 ![The session picker: past conversations by first prompt and age](assets/sessions-dark.png)
 
@@ -471,7 +471,7 @@ Off until `keymaps.enabled = true`.
 | `<leader>nB` | normal | open a big change |
 | `<CR>` | prompt, normal | send |
 | `<C-s>` | prompt, insert | send (so `<CR>` still inserts a newline) |
-| `<C-n>` / `<C-r>` | chat panel | new conversation · resume one |
+| `<C-n>` / `<C-r>` | chat panel | new conversation · list past ones |
 | `<CR>` / `d` / `q` | session picker | open · delete (y/n confirm) · close |
 | `<C-c>` | panel | stop the running turn |
 | `]o` | chat/big panel | jump to the pending choice |

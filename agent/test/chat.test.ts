@@ -501,12 +501,33 @@ describe('ChatService.forget', () => {
   it('propagates a delete failure instead of silently keeping the pointer', async () => {
     const h = harness([frames.init(), frames.success('ok')], storePath, {
       deleteSession: async () => {
-        throw new Error('session not found');
+        throw new Error('the transcript directory is read-only');
       },
     });
     await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
-    await assert.rejects(h.service.forget(ROOT, SESSION), /session not found/);
+    await assert.rejects(h.service.forget(ROOT, SESSION), /read-only/);
     assert.equal(h.store.get(ROOT).current, SESSION, 'a failed delete leaves the store untouched');
+  });
+
+  it('treats a session the SDK no longer knows as already gone, and still drops it', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath, {
+      deleteSession: async () => {
+        throw new Error(`Session ${SESSION} not found in project directory for ${ROOT}`);
+      },
+    });
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    assert.equal(await h.service.forget(ROOT, SESSION), false, 'the SDK did not have it to delete');
+    assert.deepEqual(
+      h.store.get(ROOT),
+      { current: null, known: [] },
+      'the local entry still goes, so the row can never be stranded',
+    );
+  });
+
+  it('reports that the SDK still had the session it deleted', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath);
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    assert.equal(await h.service.forget(ROOT, SESSION), true);
   });
 });
 
