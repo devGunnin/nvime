@@ -20,10 +20,15 @@ local BAND_PRIORITY = 90
 
 --- What this review opened, by path: { buf, adopted, prior }. `adopted` means
 --- the buffer already existed, so it is the reader's: it is handed back rather
---- than wiped, and `prior` is what its options were before the review locked
---- it. Adoption governs OWNERSHIP only — the read-only contract below applies
---- to every buffer the pane shows, whoever owns it.
+--- than wiped. `prior` is what the options were before the review locked the
+--- buffer, recorded for every entry so the restore below has nothing to check.
+--- Adoption governs OWNERSHIP only — the read-only contract applies to every
+--- buffer the pane shows, whoever owns it.
 local opened = {}
+
+--- Owns the re-lock watchers, so they go with `drop`/`release` rather than
+--- outliving the review that installed them.
+local GROUP = vim.api.nvim_create_augroup('nvime.reviewbuf', { clear = true })
 
 --- The read-only contract. The clone is a sandbox to read: neither a stray
 --- key nor a `BufWritePre` formatter may rewrite the file the captured diff
@@ -31,6 +36,43 @@ local opened = {}
 local function lock(buf)
   vim.bo[buf].modifiable = false
   vim.bo[buf].readonly = true
+end
+
+--- Re-locks after a reload. `:edit!` re-reads the file and clears `readonly`
+--- with it, which quietly turns `:w` from an `E45` into a real write.
+--- @param buf integer
+local function watch_reload(buf)
+  vim.api.nvim_create_autocmd('BufReadPost', {
+    group = GROUP,
+    buffer = buf,
+    desc = 'nvime: a reload must not unlock a review buffer',
+    callback = function()
+      lock(buf)
+    end,
+  })
+end
+
+--- @param buf integer
+--- @param keys table[] each { lhs, fn, desc }
+local function install_keys(buf, keys)
+  for _, key in ipairs(keys) do
+    vim.keymap.set('n', key.lhs, key.fn, { buffer = buf, nowait = true, silent = true, desc = key.desc })
+  end
+end
+
+--- True when `buf` is on screen in a window outside the review's own tab.
+--- Locking such a buffer read-only and hanging the review's keys off it turns
+--- an ordinary tab the reader opened into a control surface where `q` tears
+--- the review down and `M` merges.
+--- @param buf integer
+--- @param review_tab integer|nil the review's tabpage; nil means none is ours
+local function shown_outside(buf, review_tab)
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_tabpage(win) ~= review_tab then
+      return true
+    end
+  end
+  return false
 end
 
 --- Re-reads `buf` from disk. `:edit`, not `:checktime`: with `autoread` off a
@@ -47,18 +89,25 @@ local function reread(buf)
 end
 
 --- The clone's copy of `path`, loaded, locked and keyed for the review.
+---
+--- Refused, rather than adopted, for a buffer already on screen outside the
+--- review's tab: the caller degrades to the unified diff and the reader keeps
+--- their ordinary window.
 --- @param path string absolute, inside the build clone
 --- @param keys table[] the review's buffer-local keys, each { lhs, fn, desc }
+--- @param review_tab integer|nil the review's tabpage
 --- @return integer|nil buffer
 --- @return string|nil why it could not be opened
-function M.open(path, keys)
+--- @return string|nil a one-time notice about the buffer that was adopted
+function M.open(path, keys, review_tab)
   assert(type(path) == 'string' and path ~= '', 'reviewbuf.open needs a path')
   assert(type(keys) == 'table', 'reviewbuf.open needs the review key table')
   local known = opened[path]
   if known ~= nil and vim.api.nvim_buf_is_valid(known.buf) then
     -- Re-applied rather than assumed: a reload, or anything else that touched
-    -- the buffer since, can have left it writable.
+    -- the buffer since, can have left it writable or stripped its keys.
     lock(known.buf)
+    install_keys(known.buf, keys)
     return known.buf
   end
   -- Ownership is "this review created the buffer", so it has to be read
@@ -69,6 +118,17 @@ function M.open(path, keys)
   if buf == 0 then
     return nil, 'neovim would not open ' .. path
   end
+  local name = vim.fn.fnamemodify(path, ':t')
+  if adopted and shown_outside(buf, review_tab) then
+    return nil, name .. ' is open in another tab (close it there, or <CR> to go to it)'
+  end
+  -- Nothing below may leave a buffer of ours behind on a failure.
+  local function abandon(why)
+    if not adopted then
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    end
+    return nil, why
+  end
   if not adopted then
     -- Before the load: a swap file for a sandbox copy is litter, and a stale
     -- one opens an E325 modal that no pcall around the draw can answer.
@@ -78,23 +138,26 @@ function M.open(path, keys)
   -- degrade the pane with a reason, not throw out of a redraw.
   local ok, err = pcall(vim.fn.bufload, buf)
   if not ok then
-    return nil, tostring(err)
+    return abandon(tostring(err))
   end
   if not vim.api.nvim_buf_is_loaded(buf) then
-    return nil, 'could not read ' .. path
+    return abandon('could not read ' .. path)
   end
-  local prior = nil
+  local notice = nil
   if adopted then
-    prior = { modifiable = vim.bo[buf].modifiable, readonly = vim.bo[buf].readonly }
+    -- The pane is about to grade what the reader has in front of them, which
+    -- is not what is on disk and not what a merge would land.
+    notice = vim.bo[buf].modified and (name .. ' has unsaved changes — the pane is showing yours, not the clone’s')
+      or nil
   else
     vim.bo[buf].buflisted = false
   end
+  local prior = { modifiable = vim.bo[buf].modifiable, readonly = vim.bo[buf].readonly }
   lock(buf)
-  for _, key in ipairs(keys) do
-    vim.keymap.set('n', key.lhs, key.fn, { buffer = buf, nowait = true, silent = true, desc = key.desc })
-  end
+  watch_reload(buf)
+  install_keys(buf, keys)
   opened[path] = { buf = buf, adopted = adopted, prior = prior }
-  return buf
+  return buf, nil, notice
 end
 
 --- Re-reads every buffer this review adopted. Ours are wiped and read again by
@@ -180,27 +243,54 @@ function M.paint(buf, spec)
   end
 end
 
---- Gives every opened buffer back: ours are wiped, so the review leaves no
---- clone buffers behind; an adopted one gets its marks, keys and options back
+--- Gives one entry's buffer back: ours is wiped, so the review leaves no clone
+--- buffers behind; an adopted one gets its marks, keys and options back
 --- exactly as the reader had them.
+---
+--- It runs in teardown loops where a raise would leak every buffer still to
+--- come, so every step that can fail is guarded — and `prior` is recorded for
+--- every entry, so the restore itself has no missing-state case to assert on.
+--- @param entry table
+--- @param keys table[]
+local function give_back(entry, keys)
+  if not vim.api.nvim_buf_is_valid(entry.buf) then
+    return
+  end
+  pcall(vim.api.nvim_buf_clear_namespace, entry.buf, M.NS, 0, -1)
+  pcall(vim.api.nvim_clear_autocmds, { group = GROUP, buffer = entry.buf })
+  if not entry.adopted then
+    pcall(vim.api.nvim_buf_delete, entry.buf, { force = true })
+    return
+  end
+  for _, key in ipairs(keys) do
+    pcall(vim.api.nvim_buf_del_keymap, entry.buf, 'n', key.lhs)
+  end
+  vim.bo[entry.buf].modifiable = entry.prior.modifiable
+  vim.bo[entry.buf].readonly = entry.prior.readonly
+end
+
+--- Gives one path back, so a thread the pane could not vouch for stops being
+--- held: a released path is one `<CR>` can open in an ordinary tab again.
+--- @param path string
+--- @param keys table[] the same key table `open` was given
+function M.release(path, keys)
+  assert(type(path) == 'string' and path ~= '', 'reviewbuf.release needs a path')
+  assert(type(keys) == 'table', 'reviewbuf.release needs the review key table')
+  local entry = opened[path]
+  if entry == nil then
+    return
+  end
+  opened[path] = nil
+  give_back(entry, keys)
+end
+
+--- Gives every opened buffer back.
 --- @param keys table[] the same key table `open` was given
 function M.drop(keys)
   assert(type(keys) == 'table', 'reviewbuf.drop needs the review key table')
   for path, entry in pairs(opened) do
-    if vim.api.nvim_buf_is_valid(entry.buf) then
-      pcall(vim.api.nvim_buf_clear_namespace, entry.buf, M.NS, 0, -1)
-      if entry.adopted then
-        for _, key in ipairs(keys) do
-          pcall(vim.api.nvim_buf_del_keymap, entry.buf, 'n', key.lhs)
-        end
-        assert(type(entry.prior) == 'table', 'an adopted buffer must carry the options it had')
-        vim.bo[entry.buf].modifiable = entry.prior.modifiable
-        vim.bo[entry.buf].readonly = entry.prior.readonly
-      else
-        pcall(vim.api.nvim_buf_delete, entry.buf, { force = true })
-      end
-    end
     opened[path] = nil
+    give_back(entry, keys)
   end
 end
 

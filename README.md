@@ -323,7 +323,10 @@ A thread with nothing to annotate — binary content, a deleted file — falls b
 to it on its own, and so does a build clone that has been cleaned up, which says
 so once. So does a file that has moved on since the capture: one line per hunk
 is checked against the buffer before anything is drawn, because a band on the
-wrong row reads exactly like a band on the right one.
+wrong row reads exactly like a band on the right one. A hunk that offers no such
+line — a pure deletion between blank lines — cannot be checked, so it is not
+drawn either. A file you already have open in another tab falls back too: the
+review leaves that window alone, says where the file is, and `<CR>` goes there.
 
 ### The gate
 

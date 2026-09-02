@@ -10,23 +10,62 @@ local M = {}
 
 local NS = vim.api.nvim_create_namespace('nvime.confirm')
 local WIDTH = 64
+local GROUP = vim.api.nvim_create_augroup('nvime.confirm', { clear = true })
 
---- The float on screen, or nil. One at a time: a second float over an
---- unanswered question would hide the decision it is stacked on.
+--- The question on screen, or nil: { win, buf, on_answer }. One at a time — a
+--- second float over an unanswered question would hide the decision it is
+--- stacked on — so this latch has to clear on EVERY way the float can die, not
+--- only on its own keys.
 local active = nil
 
-local function close_window()
-  if active == nil then
+--- Answers the question once and takes the float down. `active` is cleared
+--- first, so the window close below re-entering through the watcher below
+--- finds nothing to answer twice.
+--- @param yes boolean
+local function settle(yes)
+  local entry = active
+  if entry == nil then
     return
   end
-  local win, buf = active.win, active.buf
   active = nil
-  if win ~= nil and vim.api.nvim_win_is_valid(win) then
-    pcall(vim.api.nvim_win_close, win, true)
+  vim.api.nvim_clear_autocmds({ group = GROUP })
+  if vim.api.nvim_win_is_valid(entry.win) then
+    pcall(vim.api.nvim_win_close, entry.win, true)
   end
-  if buf ~= nil and vim.api.nvim_buf_is_valid(buf) then
-    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+  if vim.api.nvim_buf_is_valid(entry.buf) then
+    pcall(vim.api.nvim_buf_delete, entry.buf, { force = true })
   end
+  entry.on_answer(yes)
+end
+
+--- Closing the question is a no: `:q`, `<C-w>o`, a `:tabclose` of the tab it
+--- opened over, or the review taking its own tab down.
+--- @param win integer the float's window
+--- @param buf integer the float's buffer
+local function watch(win, buf)
+  vim.api.nvim_create_autocmd('WinClosed', {
+    group = GROUP,
+    pattern = tostring(win),
+    desc = 'nvime: a question closed unanswered is a no',
+    callback = function()
+      settle(false)
+    end,
+  })
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    group = GROUP,
+    buffer = buf,
+    desc = 'nvime: a question wiped unanswered is a no',
+    callback = function()
+      settle(false)
+    end,
+  })
+end
+
+--- Dismisses an unanswered question as a no. For when the decision it asks
+--- about has been taken by another route and the float would otherwise sit
+--- there ready to take it a second time.
+function M.dismiss()
+  settle(false)
 end
 
 --- The float's lines, and the marks that colour the two keys.
@@ -54,15 +93,21 @@ function M.render(question, width)
   return lines, marks
 end
 
---- Asks `question`. `on_answer(true)` runs only on an explicit yes; anything
---- else answers false. It runs exactly once — or never, when a float is
---- already up and this ask is refused rather than stacked on it.
+--- Asks `question`. `on_answer(true)` runs only on an explicit yes; every
+--- other way the question goes away — `n`, `<Esc>`, or the float being closed,
+--- wiped or dismissed — answers false. It runs exactly once, or never, when a
+--- float is already up and this ask is refused rather than stacked on it.
 --- @param question string
 --- @param on_answer fun(yes: boolean)
 --- @return boolean whether the float was opened
 function M.ask(question, on_answer)
   assert(type(question) == 'string' and question ~= '', 'confirm.ask needs a question')
   assert(type(on_answer) == 'function', 'confirm.ask needs an answer callback')
+  if active ~= nil and not vim.api.nvim_win_is_valid(active.win) then
+    -- Belt and braces: a teardown that suppressed the watcher below must not
+    -- leave a dead question latched over every later one.
+    settle(false)
+  end
   if active ~= nil then
     vim.notify('nvime: answer the question already on screen first', vim.log.levels.WARN)
     return false
@@ -93,11 +138,11 @@ function M.ask(question, on_answer)
     title = ' nvime · are you sure? ',
     title_pos = 'center',
   })
-  active = { win = win, buf = buf }
+  active = { win = win, buf = buf, on_answer = on_answer }
+  watch(win, buf)
   for _, key in ipairs(keymaps.CONFIRM) do
     vim.keymap.set('n', key.lhs, function()
-      close_window()
-      on_answer(key.allow)
+      settle(key.allow)
     end, { buffer = buf, nowait = true, silent = true, desc = key.desc })
   end
   return true

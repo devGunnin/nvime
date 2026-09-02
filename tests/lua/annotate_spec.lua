@@ -91,6 +91,14 @@ describe('the line a hunk can be checked against', function()
     eq(nil, annotate.hunk_marks('@@ -1,2 +0,0 @@', { '-first', '-second' }).check)
   end)
 
+  --- Drift between two whitespace-only rows is invisible, and blank-ish rows
+  --- are common enough in a real diff that accepting one is accepting nothing.
+  it('skips a whitespace-only context line the same as an empty one', function()
+    local marks = annotate.hunk_marks('@@ -1,4 +1,3 @@', { '    ', ' two', '-three', ' four' })
+    eq({ row = 1, text = 'two' }, marks.check)
+    eq(nil, annotate.hunk_marks('@@ -1,3 +1,2 @@', { '   ', '-gone', '  ' }).check)
+  end)
+
   it('drops the line ending a CRLF file keeps out of the buffer', function()
     eq('local M = {}', annotate.strip_cr('local M = {}\r'))
     eq('a\rb', annotate.strip_cr('a\rb'), 'only a trailing one')

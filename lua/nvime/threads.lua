@@ -26,6 +26,10 @@ local CHIP_WIDTH = 6
 --- The one-column left gutter both review windows are drawn with.
 local GUTTER = 1
 
+--- The review's window-scoped autocmds. Created with the tab and deleted with
+--- it, so nothing of the review outlives it.
+local AUTOCMD_GROUP = 'NvimeThreads'
+
 --- The review windows' own chrome. Named because a window split off the pane
 --- inherits both, and is recognised by them on the way back out.
 local PANE_FILLCHARS = 'eob: '
@@ -530,29 +534,36 @@ local function hunk_body(hunk)
   return view.diff_lines[hunk.offset + 1], body
 end
 
---- What the filesystem answered for the capture on screen: whether the clone
---- is there, and which of its files are readable. The pane redraws once per
---- cursor move in the thread list, and a capture does not change under it —
---- only a new one does, which is what resets this.
---- @type table { clone: boolean|nil, readable: table<string, boolean> }
-local probe = { clone = nil, readable = {} }
+--- Which of the capture's files are readable. The pane redraws once per cursor
+--- move in the thread list, and a capture does not change under it — only a
+--- new one does, which is what resets this. One stat per file per capture,
+--- rather than per keystroke.
+--- @type table { readable: table<string, boolean> }
+local probe = { readable = {} }
 
 local function reset_probe()
-  probe = { clone = nil, readable = {} }
+  probe = { readable = {} }
 end
 
 --- True while the build clone this review reads from is still on disk. A clone
 --- that vanished mid-review is what sends the pane back to the unified diff.
+---
+--- Deliberately NOT cached: `cleanup_on_merge`, `git worktree prune` or the
+--- reader tidying up removes the clone between captures, and a pane that only
+--- noticed on the next one keeps annotating a file that is gone. One
+--- `isdirectory` per draw is what the per-file cache above exists to afford.
 local function clone_present()
   local session = view.session or {}
   if session.worktreeExists == false then
     return false
   end
-  if probe.clone == nil then
-    local root = (session.worktree or {}).path
-    probe.clone = type(root) == 'string' and root ~= '' and vim.fn.isdirectory(root) == 1
+  local root = (session.worktree or {}).path
+  local present = type(root) == 'string' and root ~= '' and vim.fn.isdirectory(root) == 1
+  if not present then
+    -- Every `filereadable` under a root that is gone is stale.
+    reset_probe()
   end
-  return probe.clone
+  return present
 end
 
 --- Every hunk of `block` that can be shown on a real file, in the thread's own
@@ -655,7 +666,9 @@ end
 --- Placement is pure row arithmetic off the `@@` headers, and a band on the
 --- wrong row is indistinguishable from a band on the right one. So one line
 --- per hunk — a `+` line where there is one — is read back off the buffer and
---- compared with what the patch says is there.
+--- compared with what the patch says is there. A hunk that offers no such line
+--- (a pure deletion whose only context is blank) cannot be checked at all, and
+--- unchecked is not the same as correct: it is not drawn either.
 --- @param buf integer
 --- @param found table[] every location of this thread
 --- @param path string the file being drawn
@@ -663,8 +676,11 @@ end
 local function patch_disagrees(buf, found, path)
   local count = vim.api.nvim_buf_line_count(buf)
   for _, location in ipairs(found) do
-    local check = location.path == path and location.marks.check or nil
-    if check ~= nil then
+    if location.path == path then
+      local check = location.marks.check
+      if check == nil then
+        return location.file .. ' has a hunk with no line to check its placement against'
+      end
       local actual = check.row < count and vim.api.nvim_buf_get_lines(buf, check.row, check.row + 1, false)[1] or nil
       if actual == nil or annotate.strip_cr(actual) ~= annotate.strip_cr(check.text) then
         return location.file .. ' on disk no longer matches the captured diff'
@@ -680,13 +696,22 @@ end
 --- @return boolean whether the file could be shown
 local function show_file(found, index, block)
   local here = found[index]
-  local buf, why = reviewbuf.open(here.path, KEYS)
+  local buf, why, notice = reviewbuf.open(here.path, KEYS, view.tab)
   if buf == nil then
     degrade((why or 'could not open ' .. here.file) .. ' — showing the unified diff')
     return false
   end
+  if notice ~= nil then
+    notify(notice, vim.log.levels.WARN)
+  end
   local disagrees = patch_disagrees(buf, found, here.path)
   if disagrees ~= nil then
+    -- Released, not held: a file the pane cannot vouch for must stay reachable
+    -- with `<CR>`, which refuses any path the review is holding. The pane
+    -- window gives the buffer up first — wiping one it is showing would leave
+    -- nvim to pick an arbitrary replacement for it.
+    restore_scratch_pane()
+    reviewbuf.release(here.path, KEYS)
     degrade(disagrees .. ' — showing the unified diff')
     return false
   end
@@ -1281,17 +1306,31 @@ local function on_file_buffer()
 end
 
 --- Runs `action`, first asking on a file buffer (see `on_file_buffer`).
+---
+--- The float is advisory, not modal, so the same action stays reachable from
+--- the thread list while a question is up: taking it there answers the float
+--- rather than leaving it on screen to take the action a second time. And an
+--- answer is only honoured for the change it was asked about — a review that
+--- has since closed or moved on is not one to merge or rebase.
 --- @param question string
 --- @param action fun()
 local function guarded(question, action)
+  local confirm = require('nvime.confirm')
   if not on_file_buffer() then
+    confirm.dismiss()
     action()
     return
   end
-  require('nvime.confirm').ask(question, function(yes)
-    if yes then
-      action()
+  local asked_for = (view.session or {}).id
+  confirm.ask(question, function(yes)
+    if not yes then
+      return
     end
+    if (view.session or {}).id ~= asked_for then
+      notify('that question was about a change you have since left', vim.log.levels.WARN)
+      return
+    end
+    action()
   end)
 end
 
@@ -1325,9 +1364,10 @@ local function dispatch_merge()
   end)
 end
 
---- `M`: merge.
+--- `M`: merge. Busy is settled before the question, not after it: asking, and
+--- only then refusing the `y`, wastes the decision the reader just made.
 local function merge()
-  if view.session == nil then
+  if view.session == nil or refuse_if_busy() then
     return
   end
   guarded('merge this change into your branch?', dispatch_merge)
@@ -1379,7 +1419,7 @@ end
 
 --- `R`: rebase.
 local function rebase()
-  if view.session == nil then
+  if view.session == nil or refuse_if_busy() then
     return
   end
   guarded('rebase the build onto the updated base? it rewrites the clone', dispatch_rebase)
@@ -1456,6 +1496,14 @@ local function open_file()
     notify(file .. ' is not in the build clone (it was deleted, or renamed away)', vim.log.levels.WARN)
     return
   end
+  -- A file already on screen outside the review is why the pane degraded for
+  -- it; go to that window rather than stacking a second tab on the same buffer.
+  for _, win in ipairs(vim.fn.bufexists(path) == 1 and vim.fn.win_findbuf(vim.fn.bufadd(path)) or {}) do
+    if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_tabpage(win) ~= view.tab then
+      vim.api.nvim_set_current_win(win)
+      return
+    end
+  end
   vim.cmd('tabedit ' .. vim.fn.fnameescape(path))
 end
 
@@ -1475,6 +1523,9 @@ end
 function M.close()
   local tab = view.tab
   view.tab, view.tree_win, view.pane_win = nil, nil, nil
+  -- Before the tabclose below, so the pane's own WinClosed does not schedule a
+  -- second teardown; `build_tab` recreates the group on the next open.
+  pcall(vim.api.nvim_del_augroup_by_name, AUTOCMD_GROUP)
   -- The request itself keeps going — a build turn is meant to outlive the
   -- surface watching it — and so does the one-at-a-time latch it holds: only
   -- the timer is paused, so it stops ticking against dead windows without
@@ -1615,7 +1666,7 @@ local function build_tab()
   vim.wo[view.pane_win].breakindentopt = 'shift:' .. panel.WRAP_SHIFT
   vim.wo[view.tree_win].cursorline = true
 
-  local group = vim.api.nvim_create_augroup('NvimeThreads', { clear = true })
+  local group = vim.api.nvim_create_augroup(AUTOCMD_GROUP, { clear = true })
   vim.api.nvim_create_autocmd('CursorMoved', {
     group = group,
     buffer = view.tree_buf,

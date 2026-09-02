@@ -46,6 +46,9 @@ local FILES = {
   --- On disk as the reader's checkout has it, NOT as the capture below
   --- describes it — the drift the integrity check is there to catch.
   ['drift.lua'] = { 'local M = {}', 'return M' },
+  --- Drifted too (a line inserted above), but its hunk is a pure deletion
+  --- between blank context lines, so there is no line to check it against.
+  ['blind.lua'] = { 'INSERTED', 'alpha', '', 'beta' },
 }
 
 vim.fn.mkdir(clone, 'p')
@@ -95,6 +98,13 @@ local DIFF_LINES = {
   ' local M = {}',
   '+  local base = 1',
   ' return M',
+  'diff --git a/blind.lua b/blind.lua',
+  '--- a/blind.lua',
+  '+++ b/blind.lua',
+  '@@ -1,3 +1,2 @@',
+  '',
+  '-removed',
+  '',
 }
 
 local DIFF = table.concat(DIFF_LINES, '\n')
@@ -105,6 +115,7 @@ local HUNKS = {
   { id = 'hs', file = 'stale.txt', offset = 21, lineCount = 3 },
   { id = 'he', file = 'empty.txt', offset = 27, lineCount = 3 },
   { id = 'hd', file = 'drift.lua', offset = 33, lineCount = 4 },
+  { id = 'hb', file = 'blind.lua', offset = 40, lineCount = 4 },
   { id = 'hbin', file = 'logo.png', offset = -1, lineCount = 0, note = 'binary content changed' },
 }
 
@@ -613,19 +624,18 @@ describe('a file the reader already had open', function()
 end)
 
 describe('the pane refuses to paint what it cannot vouch for', function()
-  --- `@@ -1,3 +0,0 @@` — a tracked file truncated to zero bytes. It is still
-  --- readable, so the hunk reaches the pane; its row used to be -1.
-  it('draws a file the change emptied, and keeps drawing it', function()
+  --- `@@ -1,3 +0,0 @@` — a tracked file truncated to zero bytes. Nothing in it
+  --- can be checked, so it degrades; the row arithmetic behind it used to
+  --- reach -1 and throw, once per keystroke in the thread list.
+  it('degrades for a file the change emptied, without throwing on every redraw', function()
     local emptied = block({ id = 'be', title = 'emptied', files = { 'empty.txt' }, hunkIds = { 'he' } })
-    open_review({ emptied, block() })
-    local buf = pane_buf()
-    eq(clone .. '/empty.txt', vim.api.nvim_buf_get_name(buf))
-    ok(has_virtual(buf, 'first'), 'the removed lines still render')
-    -- The thread list redraws the pane on every cursor move; the throw this
-    -- covers repeated once per keystroke.
-    press(threads.view().tree_buf, ']t')
-    press(threads.view().tree_buf, '[t')
-    eq(clone .. '/empty.txt', vim.api.nvim_buf_get_name(pane_buf()))
+    local seen = with_notices(function()
+      open_review({ emptied, block() })
+      press(threads.view().tree_buf, ']t')
+      press(threads.view().tree_buf, '[t')
+    end)
+    eq(threads.view().pane_buf, pane_buf())
+    ok(said(seen, 'empty%.txt has a hunk with no line to check'), vim.inspect(seen))
     threads.close()
   end)
 
@@ -636,6 +646,21 @@ describe('the pane refuses to paint what it cannot vouch for', function()
     end)
     eq(threads.view().pane_buf, pane_buf(), 'a band on a row that moved is indistinguishable from a right one')
     ok(said(seen, 'drift%.lua on disk no longer matches the captured diff'), vim.inspect(seen))
+    threads.close()
+  end)
+
+  --- The hunk offers no `+` line and no context line with anything on it, so
+  --- the check has nothing to compare. Unchecked is not the same as correct:
+  --- the rows it would band have moved, silently, which is the exact failure
+  --- the check exists to close.
+  it('degrades for a hunk it has no line to check at all, rather than painting it blind', function()
+    local blind = block({ id = 'bb', title = 'blind', files = { 'blind.lua' }, hunkIds = { 'hb' } })
+    local seen = with_notices(function()
+      open_review({ blind })
+    end)
+    eq(threads.view().pane_buf, pane_buf())
+    ok(said(seen, 'blind%.lua has a hunk with no line to check its placement against'), vim.inspect(seen))
+    eq(nil, reviewbuf.buffers()[clone .. '/blind.lua'], 'and it is not left holding the file it would not draw')
     threads.close()
   end)
 end)
@@ -712,7 +737,89 @@ describe('the destructive keys on a real code surface', function()
   end)
 end)
 
+--- The float is module state, so a float that dies without answering used to
+--- latch `M` and `R` off for the rest of the nvim session.
+describe('a confirm float that dies without being answered', function()
+  it('answers no exactly once when its window is closed any other way', function()
+    local confirm = require('nvime.confirm')
+    local answers = {}
+    ok(
+      confirm.ask('really?', function(yes)
+        answers[#answers + 1] = yes
+      end),
+      'the question opened'
+    )
+    local float = confirm.current()
+    ok(float ~= nil)
+    vim.api.nvim_win_close(float.win, true)
+    eq({ false }, answers, 'closing the question is a no, delivered once')
+    eq(nil, confirm.current(), 'and nothing is left latched')
+    local second = {}
+    ok(
+      confirm.ask('again?', function(yes)
+        second[#second + 1] = yes
+      end),
+      'so the next question can still be asked'
+    )
+    press(confirm.current().buf, 'n')
+    eq({ false }, second)
+  end)
+
+  it('goes down with the review tab it lives in, leaving M usable', function()
+    open_review({ block() })
+    vim.api.nvim_set_current_win(threads.view().pane_win)
+    press(pane_buf(), 'M')
+    ok(require('nvime.confirm').current() ~= nil, 'the question is up')
+    threads.close()
+    eq(nil, require('nvime.confirm').current(), 'closing the review took the question with it')
+    open_review({ block() })
+    vim.api.nvim_set_current_win(threads.view().pane_win)
+    local seen = with_notices(function()
+      press(pane_buf(), 'M')
+    end)
+    ok(require('nvime.confirm').current() ~= nil, 'M asks again in a reopened review: ' .. vim.inspect(seen))
+    press(require('nvime.confirm').current().buf, 'n')
+    threads.close()
+  end)
+end)
+
+describe('a clone that vanishes mid-review', function()
+  it('notices on the next draw instead of annotating a phantom file', function()
+    local gone = vim.fs.normalize(vim.fn.tempname())
+    vim.fn.mkdir(gone, 'p')
+    vim.fn.writefile(FILES['pool.lua'], gone .. '/pool.lua')
+    threads.close()
+    palette.apply()
+    fake.replies['big.diff'] = { result = { diff = { text = DIFF, hunks = HUNKS } } }
+    threads.open(gone, session({ block(), block({ id = 'b2', title = 'second' }) }, { worktree = { path = gone } }))
+    eq(gone .. '/pool.lua', vim.api.nvim_buf_get_name(pane_buf()), 'the pane opened on the clone’s real file')
+    eq(0, vim.fn.delete(gone, 'rf'), 'the clone is removed under the open review')
+    local seen = with_notices(function()
+      press(threads.view().tree_buf, ']t')
+      press(threads.view().tree_buf, '[t')
+    end)
+    eq(threads.view().pane_buf, pane_buf(), 'the pane stops showing a file that is not on disk')
+    local count = 0
+    for _, message in ipairs(seen) do
+      if message:match('the build clone is gone') then
+        count = count + 1
+      end
+    end
+    eq(1, count, 'said once, with a reason: ' .. vim.inspect(seen))
+    threads.close()
+  end)
+end)
+
 describe('<CR> and the review’s own buffers', function()
+  --- The keys bound on a buffer, as a set.
+  local function keys_on(buf)
+    local out = {}
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do
+      out[map.lhs] = true
+    end
+    return out
+  end
+
   it('refuses a file the review already holds, even from the unified diff', function()
     open_review({ block() })
     local file_buf = pane_buf()
@@ -726,5 +833,132 @@ describe('<CR> and the review’s own buffers', function()
     ok(said(seen, 'the review already holds pool%.lua'), vim.inspect(seen))
     ok(vim.api.nvim_buf_is_valid(file_buf))
     threads.close()
+  end)
+
+  --- The reverse order of the case above: `<CR>` first, so the review has no
+  --- buffer to refuse on, then `t` — which used to adopt the reader's ordinary
+  --- tab, lock it read-only and hang `q`, `M` and `a` off it.
+  it('will not adopt a buffer the reader has open in another tab', function()
+    local notes = block({ id = 'bn', title = 'notes', files = { 'notes.md' }, hunkIds = { 'hn' } })
+    open_review({ block(), notes })
+    press(pane_buf(), 't')
+    press(threads.view().tree_buf, ']t')
+    eq(nil, reviewbuf.buffers()[clone .. '/notes.md'], 'unified: the review never opened it, so <CR> is allowed')
+    local before = #vim.api.nvim_list_tabpages()
+    press(threads.view().pane_buf, '<CR>')
+    eq(before + 1, #vim.api.nvim_list_tabpages(), '<CR> opened an ordinary tab')
+    local ordinary_tab = vim.api.nvim_get_current_tabpage()
+    local ordinary = vim.api.nvim_get_current_buf()
+    eq(clone .. '/notes.md', vim.api.nvim_buf_get_name(ordinary))
+
+    local seen = with_notices(function()
+      press(threads.view().pane_buf, 't')
+    end)
+    ok(said(seen, 'notes%.md is open in another tab'), vim.inspect(seen))
+    eq(threads.view().pane_buf, pane_buf(), 'the review degrades rather than claiming it')
+    eq(true, vim.bo[ordinary].modifiable, 'the reader’s tab stays writable')
+    eq(false, vim.bo[ordinary].readonly)
+    local bound = keys_on(ordinary)
+    for _, lhs in ipairs({ 'q', 'M', 'a', 't' }) do
+      eq(nil, bound[lhs], lhs .. ' must not be bound on an ordinary tab')
+    end
+
+    local tabs = #vim.api.nvim_list_tabpages()
+    press(threads.view().pane_buf, '<CR>')
+    eq(tabs, #vim.api.nvim_list_tabpages(), '<CR> goes to the tab it named, it does not stack another')
+    eq(ordinary_tab, vim.api.nvim_get_current_tabpage())
+    vim.api.nvim_set_current_tabpage(ordinary_tab)
+    vim.cmd('tabclose')
+    threads.close()
+    vim.api.nvim_buf_delete(ordinary, { force = true })
+  end)
+
+  --- A file the integrity check rejects is exactly the one the reader most
+  --- needs to open by hand. The pane cannot show it, so `<CR>` has to.
+  it('lets <CR> through for a thread it degraded', function()
+    local drifted = block({ id = 'bd', title = 'drift', files = { 'drift.lua' }, hunkIds = { 'hd' } })
+    with_notices(function()
+      open_review({ drifted })
+    end)
+    eq(nil, reviewbuf.buffers()[clone .. '/drift.lua'], 'the degrade gave the buffer back')
+    local before = #vim.api.nvim_list_tabpages()
+    with_notices(function()
+      press(threads.view().pane_buf, '<CR>')
+    end)
+    eq(before + 1, #vim.api.nvim_list_tabpages(), 'the reader can reach the file')
+    local ordinary_tab = vim.api.nvim_get_current_tabpage()
+    local ordinary = vim.api.nvim_get_current_buf()
+    eq(clone .. '/drift.lua', vim.api.nvim_buf_get_name(ordinary))
+    eq(true, vim.bo[ordinary].modifiable)
+    eq(nil, keys_on(ordinary)['q'], 'as an ordinary buffer, not a review surface')
+    vim.api.nvim_set_current_tabpage(ordinary_tab)
+    vim.cmd('tabclose')
+    threads.close()
+    vim.api.nvim_buf_delete(ordinary, { force = true })
+  end)
+end)
+
+describe('the review’s hold on a buffer survives what nvim does to it', function()
+  --- `:edit!` re-reads the file and clears `readonly` with it, turning a `:w`
+  --- from an `E45` into a real write against the clone the capture came from.
+  it('re-locks a buffer a reload unlocked', function()
+    open_review({ block() })
+    local buf = pane_buf()
+    eq(true, vim.bo[buf].readonly)
+    ok(
+      pcall(vim.api.nvim_buf_call, buf, function()
+        vim.cmd('edit!')
+      end),
+      ':edit! must not raise'
+    )
+    eq(true, vim.bo[buf].readonly, 'a reload does not hand the sandbox back')
+    eq(false, vim.bo[buf].modifiable)
+    local wrote = pcall(vim.api.nvim_buf_call, buf, function()
+      vim.cmd('write')
+    end)
+    eq(false, wrote, ':w is still refused (E45)')
+    threads.close()
+  end)
+
+  it('re-installs its keys on a redraw of a file it already holds', function()
+    open_review({ block() })
+    local buf = pane_buf()
+    vim.api.nvim_buf_del_keymap(buf, 'n', 'q')
+    press(threads.view().tree_buf, ']t')
+    press(threads.view().tree_buf, '[t')
+    eq(buf, pane_buf())
+    local bound = false
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, 'n')) do
+      bound = bound or map.lhs == 'q'
+    end
+    ok(bound, 'a redraw restores the review’s keys, it does not assume them')
+    threads.close()
+  end)
+
+  it('says so once when it adopts a buffer with unsaved changes', function()
+    local buf = user_buffer('pool.lua', true)
+    vim.api.nvim_buf_set_lines(buf, -1, -1, false, { '-- my own unsaved note' })
+    eq(true, vim.bo[buf].modified)
+    local seen = with_notices(function()
+      open_review({ block() })
+      press(threads.view().tree_buf, ']t')
+    end)
+    eq(buf, pane_buf(), 'the pane is the reader’s own buffer')
+    local count = 0
+    for _, message in ipairs(seen) do
+      if message:match('pool%.lua has unsaved changes') then
+        count = count + 1
+      end
+    end
+    eq(1, count, 'said once, not once per redraw: ' .. vim.inspect(seen))
+    threads.close()
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+
+  it('takes its autocmds down with the review', function()
+    open_review({ block() })
+    ok(#vim.api.nvim_get_autocmds({ group = 'NvimeThreads' }) > 0, 'the review is watching its windows')
+    threads.close()
+    eq(false, pcall(vim.api.nvim_get_autocmds, { group = 'NvimeThreads' }), 'and nothing of it outlives the tab')
   end)
 end)

@@ -49,9 +49,10 @@ end
 --- render above it as virtual lines.
 --- `check` is one line of this hunk whose text AND post-change row are both
 --- known, so a caller can tell a correct placement from row arithmetic laid
---- over a file that has since moved. A blank line proves nothing, so only a
---- `+` line or a non-empty context line is ever offered; a hunk with neither
---- has no check.
+--- over a file that has since moved. Blank-ish lines prove nothing — drift
+--- between two of them is invisible — so only a `+` line or a context line
+--- with a non-space on it is ever offered; a hunk with neither has no check,
+--- and a caller that cannot verify a hunk must not draw it.
 --- @param header string the `@@` line
 --- @param body string[] the hunk body, each line keeping its ` `/`+`/`-` prefix
 --- @return table|nil { row, bands, removals, check }, nil for a non-header
@@ -101,7 +102,7 @@ function M.hunk_marks(header, body)
     elseif kind ~= '\\' then
       flush(row)
       changing = false
-      if context == nil and line:sub(2) ~= '' then
+      if context == nil and line:sub(2):match('%S') ~= nil then
         context = { row = row, text = line:sub(2) }
       end
       row = row + 1

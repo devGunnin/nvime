@@ -345,7 +345,9 @@ The review pane ~
     no file to annotate — binary content, a deleted file — falls back to it on
     its own, and so does a build clone that is gone, which says so once. So
     does a file that has moved on since the capture: one line per hunk is
-    checked against the buffer before anything is drawn.
+    checked against the buffer before anything is drawn, and a hunk offering
+    no such line is not drawn at all. A file you already have open in another
+    tab falls back too — that window is left alone, and `<CR>` goes to it.
 
 The gate ~
     `a` on an open substantial thread opens an answer box that takes typed

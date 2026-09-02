@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **The review pane is the file.** Selecting a thread now opens the build
+  clone's own copy of the changed file as an ordinary buffer — real path,
+  filetype, treesitter and your own LSP — with the diff drawn over it as
+  extmarks rather than as text, so `gd` and diagnostics work while you review.
+  Bands mark changed rows, removed lines render as virtual lines above what
+  replaced them, and the thread's question and graded rounds hang at its first
+  hunk. `t` toggles the unified diff, `]c`/`[c` walk the thread's hunks across
+  files. Every buffer the pane shows is `nomodifiable` and `readonly`, and one
+  you already had open is handed back exactly as you had it. `M` and `R` ask a
+  y/n question when pressed on the file, where both are ordinary motions. A
+  hunk the pane cannot check against the buffer under it — drift, a clone that
+  has been cleaned up, a file open in another tab — falls back to the unified
+  diff and says why, rather than banding a row that has moved.
+
 - **Managed GitHub assurance.** Licensed deployments can lock every Big Change
   to a live, immutable organization policy and exact comprehension threshold.
   `:Nvime enroll` exposes only the repository-scoped public workstation record;

@@ -24,9 +24,11 @@ export XDG_STATE_HOME="$work/state"
 export XDG_CACHE_HOME="$work/cache"
 export NVIME_E2E_REPO="$repo"
 export NVIME_E2E_OUT="$work/report.txt"
-: >"$NVIME_E2E_OUT"
 
+# Before the redirect below: NVIME_E2E_WORK is documented as a directory the
+# caller picks, and a caller that has not created it yet is the normal case.
 mkdir -p "$repo" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
+: >"$NVIME_E2E_OUT"
 cat >"$repo/pool.lua" <<'LUA'
 local M = {}
 
