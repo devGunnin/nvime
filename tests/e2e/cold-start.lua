@@ -14,7 +14,6 @@ if ping.claudePath == nil then
   lib.die('the sidecar found no claude CLI on PATH')
 end
 lib.say('PING claude=' .. tostring(ping.claudeVersion))
-lib.say('STORE ' .. tostring(ping.storePath))
 
 require('nvime').dashboard()
 local shown = nil

@@ -97,6 +97,16 @@ for log in "${logs[@]}" "$bundle"; do
   fi
 done
 
+# A missing sha reaches here as the string "nil", which the bundle would match
+# somewhere and turn the next check green on exactly the regression it names.
+case "$base" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+  *)
+    echo "the build reported no base sha (BASE '$base')"
+    exit 1
+    ;;
+esac
+
 # What the bundle IS for: the change is identifiable from it.
 grep -q "$session" "$bundle" || { echo "the bundle does not name the change ($session)"; exit 1; }
 grep -q "$base" "$bundle" || { echo "the bundle does not name the base sha ($base)"; exit 1; }

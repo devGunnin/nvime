@@ -64,7 +64,8 @@ function readRecord(path) {
 }
 
 function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+  // `> 1`, not `> 0`: a corrupt record naming pid 1 must never reach init.
+  if (!Number.isInteger(pid) || pid <= 1) return false;
   try {
     process.kill(pid, 0);
     return true;

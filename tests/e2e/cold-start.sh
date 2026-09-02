@@ -77,7 +77,7 @@ store="$(awk '/^BIGSTORE /{print $2}' "$NVIME_E2E_OUT")"
 session="$(awk '/^SESSION /{print $2}' "$NVIME_E2E_OUT")"
 case "$store" in
   "$XDG_DATA_HOME"/*) ;;
-  *) echo "the build stored its session outside the scratch home: $store"; exit 1 ;;
+  *) echo "the build store is not under the scratch data home: $store"; exit 1 ;;
 esac
 [ -n "$(find "$store" -maxdepth 2 -name "$session" 2>/dev/null)" ] ||
   { echo "the cold start left no session record under $store"; exit 1; }

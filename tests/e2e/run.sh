@@ -104,6 +104,7 @@ timeout_for() {
 
 keep=0
 wanted=""
+argc=$#
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep) keep=1 ;;
@@ -111,7 +112,15 @@ while [ $# -gt 0 ]; do
       printf '%s\n' "$SCENARIOS" | awk -F: 'NF { printf "%-16s %ss\n", $1, $2 }'
       exit 0
       ;;
-    --selftest) exec "$here/selftest.sh" ;;
+    --selftest)
+      # It runs its own scenarios with its own deadlines, so every other
+      # argument — before it or after it — would be silently discarded.
+      if [ "$argc" -ne 1 ]; then
+        echo "run.sh: --selftest takes no other arguments" >&2
+        exit 2
+      fi
+      exec "$here/selftest.sh"
+      ;;
     -h | --help)
       usage
       exit 0
@@ -236,23 +245,54 @@ group_kill() {
   kill "-$1" -- "-$2" 2>/dev/null || true
 }
 
+# Whether any process is still in group `pgid`. The leader itself may be long
+# gone — what matters is whether the group still holds anything to stop.
+group_alive() {
+  [ -n "$1" ] || return 1
+  ps -eo pgid= 2>/dev/null | tr -d ' ' | grep -qx -- "$1"
+}
+
+# A vouched runner leads its own session, so its process group id IS its pid,
+# and that group holds exactly its own descendants — the `claude` the SDK
+# spawned included. Checked rather than assumed: a pgid that is not the pid
+# would make the group somebody else's, and this ends in a SIGKILL.
+runner_group_of() {
+  local pid="$1" pgid
+  pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
+    echo "$pid"
+  fi
+}
+
+anything_alive() {
+  local pgid="$1" others="$2" one
+  if group_alive "$pgid"; then
+    return 0
+  fi
+  for one in $others; do
+    if kill -0 "$one" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Set when the reaper could not read the store. A run that cannot see its own
 # runners has no token guard, and must never be reported as a pass.
 reaper_blind=0
 
-# Everything one scenario started: its process group, and every build runner
-# outside it — those are setsid'd and reparented to init, so the group does not
-# contain them and a group kill alone leaves them spending.
+# Everything one scenario started: its whole process group, and every build
+# runner outside it — those are setsid'd and reparented to init, so the group
+# does not contain them and a group kill alone leaves them spending.
 #
 # Only LIVE runners are signalled. The helper vouches for a pid off the store's
 # own claim, because `session.runner` outlives the process it names and the
 # number is free for reuse the moment the runner exits.
 #
-# Pids are read ONCE up front — a runner clears its own record as it goes down,
-# and a list gathered after the TERM would be short.
-# `pid` may be empty, to reap runners belonging to a scenario that already ended.
+# Pids and their groups are read ONCE up front — a runner clears its record as
+# it goes down, and a dead leader can no longer name the group its orphan is in.
 reap_scenario() {
-  local pid="$1" work="$2" runners="" runner alive=0 status=0
+  local pid="$1" work="$2" runners="" runner leaders="" leader status=0
   if [ -d "$work" ]; then
     # stderr is NOT swallowed: the helper names the record it could not read.
     runners="$(node "$pids_helper" "$work")" || status=$?
@@ -261,29 +301,35 @@ reap_scenario() {
       echo "run.sh: WARNING the runner reaper failed (exit $status) — a detached build may still be running and spending." >&2
     fi
   fi
+  for runner in $runners; do
+    leaders="$leaders $(runner_group_of "$runner")"
+  done
+
+  # TERM the runner itself, not its group: the graceful path is the runner
+  # aborting its own turn and releasing the claim.
   if [ -n "$pid" ]; then
     group_kill TERM "$pid"
   fi
   for runner in $runners; do
     kill -TERM "$runner" 2>/dev/null || true
   done
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    alive=1
+
+  if ! anything_alive "$pid" "$runners"; then
+    return
+  fi
+  sleep 2
+  if [ -n "$pid" ]; then
+    group_kill KILL "$pid"
   fi
   for runner in $runners; do
-    if kill -0 "$runner" 2>/dev/null; then
-      alive=1
-    fi
+    kill -KILL "$runner" 2>/dev/null || true
   done
-  if [ "$alive" = 1 ]; then
-    sleep 2
-    if [ -n "$pid" ]; then
-      group_kill KILL "$pid"
-    fi
-    for runner in $runners; do
-      kill -KILL "$runner" 2>/dev/null || true
-    done
-  fi
+  # And the runner's own group, so a `claude` that outlived it is not orphaned
+  # and left spending. The group's id is the pid the store already vouched for,
+  # so this is no wider than the kill above.
+  for leader in $leaders; do
+    group_kill KILL "$leader"
+  done
 }
 
 # The scenario in flight, for the signal handlers. Empty between scenarios, so
@@ -361,15 +407,24 @@ for name in $wanted; do
   echo "== $name (timeout ${limit}s)"
   started="$(date +%s)"
   reaper_blind=0
-  "$scenario_dir/$name.sh" >"$console" 2>&1 &
+  # A sentinel started INSIDE the scenario's own process group (`set +m`, so it
+  # is not given a group of its own), outliving the deadline. It holds the
+  # group's id reserved after the scenario exits: a group whose members are all
+  # gone can have its id reused, and a sweep would then hit a stranger. The
+  # sweep below kills it along with anything else left in there.
+  (
+    set +m
+    sleep $((limit + 600)) &
+    exec "$scenario_dir/$name.sh"
+  ) >"$console" 2>&1 &
   pid=$!
   current_pid="$pid"
   current_work="$work"
   wait_bounded "$pid" "$limit" "$work"
   status="$scenario_status"
-  # The scenario is reaped; its build must not outlive it either. No group kill
-  # here — `wait` has already reaped `pid`, and that number is free for reuse.
-  reap_scenario "" "$work"
+  # Whatever the verdict: nothing the scenario started may outlive it — not a
+  # wedged editor left in its group, not a build runner outside it.
+  reap_scenario "$pid" "$work"
   current_pid=""
   elapsed=$(($(date +%s) - started))
 
@@ -399,6 +454,12 @@ for name in $wanted; do
   echo "== $name $verdict in ${elapsed}s"
   results="$results$name|$verdict|$elapsed|$console
 "
+  # BLIND means nobody knows whether a build from this scenario is still
+  # spending. Starting the next one would spend more on top of that.
+  if [ "$verdict" = BLIND ]; then
+    echo "run.sh: stopping here — the cost guard is broken, so no further scenario is started." >&2
+    break
+  fi
 done
 
 # ---- summary ---------------------------------------------------------------
