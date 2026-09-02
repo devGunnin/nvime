@@ -284,14 +284,30 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'prompt · <CR> send · <C-n> new · <C-r> sessions · <C-c> stop',
+    prompt_hint = 'prompt · <CR> send (i_<C-s>) · <C-c> stop · <C-r> sessions · n_<C-n> new',
     root = state.root,
     on_submit = M.send,
     on_close = on_panel_close,
     keys = {
+      -- Insert bindings are named one by one. `<C-n>` is NOT one of them:
+      -- `i_CTRL-N` walks this very box's `@`-path completion popup.
       { mode = 'n', lhs = '<C-n>', fn = M.new_session, desc = 'nvime: start a new conversation', where = 'both' },
-      { mode = 'n', lhs = '<C-r>', fn = M.pick_session, desc = 'nvime: pick a session', where = 'both' },
-      { mode = 'n', lhs = '<C-c>', fn = M.cancel, desc = 'nvime: stop the running turn', where = 'both' },
+      {
+        mode = 'n',
+        lhs = '<C-r>',
+        fn = M.pick_session,
+        desc = 'nvime: pick a session',
+        where = 'both',
+        insert = 'when-empty',
+      },
+      {
+        mode = 'n',
+        lhs = '<C-c>',
+        fn = M.cancel,
+        desc = 'nvime: stop the running turn',
+        where = 'both',
+        insert = true,
+      },
       { mode = 'n', lhs = ']o', fn = M.jump_to_offer, desc = 'nvime: jump to the pending choice', where = 'both' },
     },
   })

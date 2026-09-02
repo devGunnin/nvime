@@ -79,6 +79,8 @@ function M.all(opts)
     { scope = 'panel-prompt', mode = 'n', lhs = '<C-n>', desc = 'nvime: start a new session' },
     { scope = 'panel-prompt', mode = 'n', lhs = '<C-c>', desc = 'nvime: stop the running turn' },
     { scope = 'panel-prompt', mode = 'i', lhs = '<C-s>', desc = 'nvime: send the prompt' },
+    { scope = 'panel-prompt', mode = 'i', lhs = '<C-c>', desc = 'nvime: stop the running turn' },
+    { scope = 'panel-prompt', mode = 'i', lhs = '<C-r>', desc = 'nvime: pick a session (empty box only)' },
     { scope = 'picker', mode = 'n', lhs = '<CR>', desc = 'nvime: choose' },
     { scope = 'picker', mode = 'n', lhs = 'q', desc = 'nvime: dismiss' },
     { scope = 'picker', mode = 'n', lhs = '<Esc>', desc = 'nvime: dismiss' },

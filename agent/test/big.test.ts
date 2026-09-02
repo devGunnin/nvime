@@ -1503,7 +1503,8 @@ describe('the local merge', () => {
     assert.equal(readFileSync(join(repo, 'tool.py'), 'utf8'), 'def main():\n    print("v1")\n');
     assert.equal(gitIn(repo, 'status', '--porcelain'), '');
     assert.match(result.session.merge?.branch ?? '', /^nvime\/big\//);
-    assert.equal(gitIn(repo, 'log', '-1', '--format=%s'), 'version flag');
+    assert.equal(gitIn(repo, 'log', '-1', '--format=%s'), 'add a --version flag', 'the subject is the spec goal');
+    assert.equal(gitIn(repo, 'log', '-1', '--format=%b').trim(), 'argparse');
   });
 
   it('refuses while a thread is still open, and touches nothing', async () => {
@@ -1605,7 +1606,8 @@ describe('the local merge', () => {
       });
 
     assert.equal(result.merged, true, 'the commit is on their branch and nothing here can un-land it');
-    assert.equal(gitIn(repo, 'log', '-1', '--format=%s'), 'version flag');
+    assert.equal(gitIn(repo, 'log', '-1', '--format=%s'), 'add a --version flag', 'the subject is the spec goal');
+    assert.equal(gitIn(repo, 'log', '-1', '--format=%b').trim(), 'argparse');
     assert.equal(result.session.display, 'merged');
     assert.ok(
       events.some(

@@ -1,6 +1,8 @@
 --- A small floating list. Deliberately not `vim.fn.inputlist`/`confirm`: nvime
 --- never opens a modal prompt, so every choice is a float with keybinds that
 --- the user can dismiss without answering.
+local modes = require('nvime.modes')
+
 local M = {}
 
 local MAX_HEIGHT = 12
@@ -41,6 +43,7 @@ local function confirm(prompt, on_answer)
   -- corrupted an unrelated strdisplaywidth() measurement made from this one.
   vim.wo[win].wrap = true
   vim.wo[win].breakindent = false
+  modes.normal()
   local answered = false
   local function finish(yes)
     -- A key mapped twice (y and q both bound, say) must answer once, not
@@ -140,6 +143,7 @@ function M.open(items, opts)
   })
   vim.wo[win].cursorline = true
   vim.wo[win].winhighlight = 'CursorLine:NvimeCursorLine'
+  modes.normal()
   -- Explicit, not inherited: each row is one item, sized to fit — a picker
   -- row must never wrap, whatever window-local 'wrap' this float would
   -- otherwise copy from whatever window happened to be current.

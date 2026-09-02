@@ -9,6 +9,7 @@ import { DEFAULT_DIFFICULTY } from '../src/gate.js';
 import {
   branchNameFor,
   checkMerge,
+  commitMessageFor,
   expectedTree,
   holderMessage,
   landDiff,
@@ -154,6 +155,91 @@ describe('branchNameFor', () => {
     const name = branchNameFor('a'.repeat(38) + ' and then some more words', 'x1');
     assert.ok(!name.endsWith('-'), name);
     assert.ok(name.length <= 'nvime/big/'.length + 40);
+  });
+});
+
+describe('commitMessageFor', () => {
+  const spec = {
+    goal: 'add a --version flag to the CLI',
+    scope: ['tool.py'],
+    approach: 'argparse, so --help stays generated',
+    acceptance: [],
+    outOfScope: [],
+  };
+
+  it('takes the subject from the spec goal, not the clipped first prompt', () => {
+    const message = commitMessageFor({
+      title: 'Add a jitter option to RetryOptions: when jitter is true, multiply each delay by',
+      spec,
+    });
+    assert.equal(message.split('\n')[0], 'add a --version flag to the CLI');
+    assert.equal(message.split('\n')[1], '');
+    assert.equal(message.split('\n\n')[1], 'argparse, so --help stays generated');
+  });
+
+  it('keeps the first prompt as the body when the spec has no approach', () => {
+    const message = commitMessageFor({ title: 'make retries jittered', spec: { ...spec, approach: '' } });
+    assert.equal(message, 'add a --version flag to the CLI\n\nmake retries jittered');
+  });
+
+  it('falls back to the title when there is no spec at all', () => {
+    assert.equal(commitMessageFor({ title: 'make retries jittered', spec: null }), 'make retries jittered');
+  });
+
+  it('cuts an overlong goal on a word boundary, never mid-clause', () => {
+    const long = 'rewrite the retry layer so every backoff decision is taken in one place and tested there';
+    const subject = commitMessageFor({ title: 't', spec: { ...spec, goal: long } }).split('\n')[0] ?? '';
+    assert.ok(subject.length <= 72, subject);
+    assert.ok(long.startsWith(subject), subject);
+    assert.ok(!subject.endsWith(' '), subject);
+    assert.equal(subject, long.slice(0, subject.length));
+    assert.ok(long[subject.length] === ' ', 'cut on a word boundary');
+  });
+
+  it('keeps a CJK subject inside git’s 72-BYTE soft limit', () => {
+    const goal = '重试层的退避决策集中到一个地方并在那里测试它们以免每个调用点各自实现一遍';
+    const subject = commitMessageFor({ title: 't', spec: { ...spec, goal } }).split('\n')[0] ?? '';
+    assert.ok(Buffer.byteLength(subject) <= 72, `${Buffer.byteLength(subject)} bytes: ${subject}`);
+    assert.ok(goal.startsWith(subject), subject);
+  });
+
+  it('never cuts an astral character in half', () => {
+    const goal = `${'x'.repeat(68)}🚀 and more`;
+    const subject = commitMessageFor({ title: 't', spec: { ...spec, goal } }).split('\n')[0] ?? '';
+    assert.ok(Buffer.byteLength(subject) <= 72, subject);
+    assert.equal(subject, [...subject].join(''), 'no lone surrogate survived the cut');
+    assert.ok(!subject.includes('\uFFFD'));
+  });
+
+  it('never ends a subject with half a ZWJ sequence', () => {
+    // A joiner left as the last code point is an invisible control character
+    // in `git log`, and the family emoji is four people joined by three of them.
+    for (const pad of [63, 64, 65, 66]) {
+      // No space to cut at: the cut lands inside the joined sequence itself.
+      const goal = `${'w'.repeat(pad)}👨‍👩‍👧‍👦`;
+      const subject = commitMessageFor({ title: 't', spec: { ...spec, goal } }).split('\n')[0] ?? '';
+      assert.ok(Buffer.byteLength(subject) <= 72, `${pad}: ${Buffer.byteLength(subject)} bytes`);
+      assert.ok(!/\u200d$/.test(subject), `${pad}: trailing ZWJ in ${JSON.stringify(subject)}`);
+      assert.ok(!/\p{M}$/u.test(subject), `${pad}: dangling combining mark`);
+      assert.ok(goal.startsWith(subject), `${pad}: ${subject}`);
+    }
+  });
+
+  it('cuts a spaceless goal rather than emitting nothing', () => {
+    const goal = 'a'.repeat(200);
+    const subject = commitMessageFor({ title: 't', spec: { ...spec, goal } }).split('\n')[0] ?? '';
+    assert.equal(subject, 'a'.repeat(72));
+  });
+
+  it('never produces an empty subject', () => {
+    assert.equal(commitMessageFor({ title: '', spec: { ...spec, goal: '   ' } }).split('\n')[0], 'big change');
+    assert.equal(commitMessageFor({ title: '', spec: null }), 'big change', 'nothing to say, but never an empty commit message');
+    assert.equal(commitMessageFor({ title: 'make retries jittered', spec: { ...spec, goal: '' } }).split('\n')[0], 'make retries jittered');
+  });
+
+  it('flattens a multi-line goal and drops its trailing full stop', () => {
+    const message = commitMessageFor({ title: 't', spec: { ...spec, goal: 'add a\n  --version flag.' } });
+    assert.equal(message.split('\n')[0], 'add a --version flag');
   });
 });
 

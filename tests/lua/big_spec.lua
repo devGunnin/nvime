@@ -532,6 +532,8 @@ local function running_detached(overrides)
     display = 'building',
     heldElsewhere = true,
     runnerLive = true,
+    -- What the sidecar reports for a runner behind a live control socket.
+    steerable = true,
     runner = { pid = 4242, socket = '/run/x.sock', log = '/store/events.ndjson', what = 'build' },
   }, overrides or {}))
 end
@@ -539,7 +541,7 @@ end
 describe('a build that outlives the editor', function()
   it('reads as a detached build rather than as another editor', function()
     eq('building (detached — keeps running)', big.describe(running_detached()))
-    ok(big.next_step(running_detached()):match('s steers it'), 'and says how to steer it')
+    ok(big.next_step(running_detached()):match('type to steer it'), 'and says how to steer it')
   end)
 
   it('reads a killed runner as a build that died, still resumable', function()
@@ -676,7 +678,11 @@ describe('a build that outlives the editor', function()
   it('opens the steer box on a live build, and sends what was typed', function()
     local _, path = sandbox()
     open_on(path)
-    big.state().session = running_detached()
+    -- Selected the way the panel really selects it: a live runner is attached
+    -- to, and it is that attach which makes this editor a follower.
+    fake.replies['big.open'] = { result = { session = running_detached() } }
+    big.select('abc123')
+    ok(big.state().attach_id ~= nil, 'the panel is following the detached build')
     big.open_steer()
     local float = require('nvime.compose').current()
     ok(float ~= nil, 'the compose float is open')
@@ -684,6 +690,146 @@ describe('a build that outlives the editor', function()
     vim.api.nvim_set_current_win(float.win)
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<CR>', true, false, true), 'x', false)
     eq('prefer the existing helper', sent('big.steer').params.text)
+    cleanup()
+  end)
+
+  it('advertises only keys that work in the window showing the hint', function()
+    local _, path = sandbox()
+    open_on(path)
+    local view = panel.get('big')
+    ok(view.prompt_hint:find('i_<C-s>', 1, true) ~= nil, view.prompt_hint)
+    eq(nil, view.prompt_hint:find(' s steer', 1, true), '`s` is `substitute` in the box being typed in')
+    local insert = {}
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(view.prompt_buf, 'i')) do
+      insert[map.lhs] = true
+    end
+    for _, lhs in ipairs({ '<C-R>', '<C-C>', '<C-S>' }) do
+      ok(insert[lhs], lhs .. ' is advertised on a box that opens in insert mode')
+    end
+    for lhs, advertised in pairs({ ['<C-N>'] = 'n_<C-n>', ['<C-T>'] = 'n_<C-t>' }) do
+      eq(nil, insert[lhs], lhs .. ' is Vim’s in insert and stays Vim’s')
+      ok(view.prompt_hint:find(advertised, 1, true) ~= nil, 'the hint marks it normal-only: ' .. view.prompt_hint)
+    end
+    eq(nil, insert['s'], '`s` is never bound where the reader is typing prose')
+    cleanup()
+  end)
+
+  --- The real path an owner's build takes: `approve` replies with a BUILDING
+  --- view that has no runner (the runner does not exist yet — `approve`
+  --- returns before `big.build` is even sent), `M.build` goes out and stays in
+  --- flight, and the sidecar hands the editor a fresh view over `big.view`
+  --- once the runner is really behind its control socket.
+  --- @param steerable boolean|nil what that later view says; nil sends none
+  local function owner_building(steerable)
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ display = 'drafting' })
+    fake.replies['big.approve'] = {
+      result = { session = session({ state = 'building', display = 'building' }), worktree = {}, base = {} },
+    }
+    big.approve()
+    ok(sent('big.build') ~= nil, 'the build request is out')
+    ok(big.state().request_id ~= nil, 'and this editor is following it')
+    if steerable ~= nil then
+      fake.subscriber('big.view', {
+        id = big.state().request_id,
+        session = session({ state = 'building', display = 'building', steerable = steerable }),
+      })
+    end
+    return path
+  end
+
+  it('steers the build this editor started, through the flow that starts one', function()
+    owner_building(true)
+    ok(big.steerable(), 'the sidecar said the runner is behind its socket')
+    ok(big.next_step(big.state().session):find('type to steer it', 1, true) ~= nil, 'and the hint says so')
+    big.send('prefer the existing helper')
+    local steer = sent('big.steer')
+    ok(steer ~= nil, 'typing at a streaming build steers it rather than being refused')
+    eq('prefer the existing helper', steer.params.text)
+    ok(not has_line('the build is running'), 'and it is not answered with a hint')
+    big.open_steer()
+    ok(require('nvime.compose').current() ~= nil, '`s` opens the steer box on your own build')
+    require('nvime.compose').dismiss()
+    cleanup()
+  end)
+
+  it('will not offer to steer a build running inside the sidecar', function()
+    -- The fallback build has no runner and no control socket, so every steer
+    -- would be refused: `s`, the prompt and the hint decline together.
+    owner_building(false)
+    eq(false, big.steerable(), 'the sidecar said there is nothing to steer')
+    eq(nil, big.next_step(big.state().session):find('steer', 1, true), 'and the hint agrees')
+    big.send('prefer the existing helper')
+    eq(nil, sent('big.steer'), 'the prompt does not send a steer that would always be refused')
+    ok(not has_line('type to steer it'), 'nor is the reader told to do what was just refused')
+    big.open_steer()
+    eq(nil, require('nvime.compose').current(), 'and `s` refuses')
+    cleanup()
+  end)
+
+  it('does not promise steering on the pre-runner snapshot alone', function()
+    -- The view `approve` returns cannot know: the runner starts afterwards.
+    owner_building(nil)
+    eq(false, big.steerable(), 'no word from the sidecar yet')
+    big.send('prefer the existing helper')
+    eq(nil, sent('big.steer'))
+    ok(not has_line('type to steer it'), 'the refusal must not advertise what it just refused')
+    cleanup()
+  end)
+
+  it('refuses to steer a session another editor is driving', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ display = 'building', heldElsewhere = true, steerable = true })
+    eq(false, big.steerable(), 'a steerable runner is still not ours to drive from here')
+    big.open_steer()
+    eq(nil, require('nvime.compose').current())
+    cleanup()
+  end)
+
+  it('hands the words back when the sidecar refuses the steer', function()
+    owner_building(true)
+    fake.replies['big.steer'] = { err = { message = 'there is no running build to steer' } }
+    local before = #scrollback()
+    big.send('prefer the existing helper')
+    local prompt = panel.get('big').prompt_buf
+    eq(
+      'prefer the existing helper',
+      table.concat(vim.api.nvim_buf_get_lines(prompt, 0, -1, false), '\n'),
+      'a refused steer must not eat what was typed'
+    )
+    ok(has_line('no running build to steer'), 'and the refusal is on screen')
+    ok(#scrollback() > before, 'the reason is printed, not swallowed')
+    cleanup()
+  end)
+
+  it('keeps a refused steer the box cannot take back in the unnamed register', function()
+    owner_building(true)
+    fake.replies['big.steer'] = { err = { message = 'there is no running build to steer' } }
+    vim.fn.setreg('"', 'something else')
+    -- The reader has typed again since: `restore_prompt` must not overwrite
+    -- that, so the words have to survive somewhere they can be read.
+    local prompt = panel.get('big').prompt_buf
+    big.send('prefer the existing helper')
+    vim.api.nvim_buf_set_lines(prompt, 0, -1, false, { 'a new thought' })
+    big.steer('a second refused steer')
+    eq('a second refused steer', vim.fn.getreg('"'), 'a notify is one transient line; the register is not')
+    eq(
+      'a new thought',
+      table.concat(vim.api.nvim_buf_get_lines(prompt, 0, -1, false), '\n'),
+      'and what they typed stands'
+    )
+    cleanup()
+  end)
+
+  it('keeps resume and discard meaning what they say while a build runs', function()
+    local _, path = sandbox()
+    open_on(path)
+    big.state().session = session({ display = 'building', detached = true, runner = { pid = 1 } })
+    big.send('discard')
+    eq(nil, sent('big.steer'), 'a word that decides the build’s fate is never a steer')
+    ok(sent('big.discard') ~= nil, 'it discards, as the hint promised')
     cleanup()
   end)
 

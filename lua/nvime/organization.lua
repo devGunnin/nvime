@@ -2,6 +2,7 @@ local agent = require('nvime.agent')
 local config = require('nvime.config')
 local context = require('nvime.context')
 local palette = require('nvime.palette')
+local modes = require('nvime.modes')
 
 local M = {}
 
@@ -96,6 +97,7 @@ local function show_enrollment(record)
     footer_pos = 'right',
   })
   view.win, view.buf = win, buf
+  modes.normal()
   vim.keymap.set('n', 'q', close, { buffer = buf, nowait = true, silent = true })
   vim.keymap.set('n', '<Esc>', close, { buffer = buf, nowait = true, silent = true })
   vim.keymap.set('n', 'y', function()

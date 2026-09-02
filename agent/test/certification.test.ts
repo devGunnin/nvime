@@ -95,7 +95,7 @@ function session(): SessionView {
     blocks: [{ id: 'thread1', title: 'behavior', files: ['file.txt'], hunkIds: ['h1'], substantial: true,
       rationale: 'behavior changed', state: 'resolved', reopened: false, signatures: ['s1'],
       rounds: [{ at: now, answer: 'it replaces the base behavior', result: { grade: 92, verdict: 'clear', hint: '', followup: '' } }] }],
-    display: 'merged', detached: false, heldElsewhere: false, runnerLive: false,
+    display: 'merged', detached: false, heldElsewhere: false, runnerLive: false, steerable: false,
     worktreeExists: false, hasDiff: true, counts: { total: 1, open: 0, substantial: 1, defended: 1 },
   };
 }

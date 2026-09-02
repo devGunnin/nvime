@@ -8,7 +8,7 @@ describe('ApprovalGate', () => {
     const waiting = gate.request('a');
     assert.equal(gate.pending, 1);
     assert.equal(gate.answer('a', true), true);
-    assert.deepEqual(await waiting, { allowed: true, reason: 'allowed in the editor' });
+    assert.deepEqual(await waiting, { allowed: true, cause: 'answered', reason: 'allowed in the editor' });
     assert.equal(gate.pending, 0);
   });
 
@@ -32,7 +32,7 @@ describe('ApprovalGate', () => {
     const abort = new AbortController();
     const waiting = gate.request('a', abort.signal);
     abort.abort();
-    assert.deepEqual(await waiting, { allowed: false, reason: 'the run was cancelled' });
+    assert.deepEqual(await waiting, { allowed: false, cause: 'aborted', reason: 'the run was cancelled' });
   });
 
   it('denies immediately when the run was already cancelled', async () => {
@@ -47,7 +47,7 @@ describe('ApprovalGate', () => {
     const gate = new ApprovalGate(5_000);
     const waiting = gate.request('a');
     assert.equal(gate.deny('a', 'the edit run ended'), true);
-    assert.deepEqual(await waiting, { allowed: false, reason: 'the edit run ended' });
+    assert.deepEqual(await waiting, { allowed: false, cause: 'aborted', reason: 'the edit run ended' });
     assert.equal(gate.deny('a', 'again'), false, 'and denying twice settles nothing new');
   });
 
@@ -64,7 +64,7 @@ describe('ApprovalGate', () => {
     assert.match(duplicate.reason, /already pending/);
     assert.equal(gate.pending, 1, 'the ask on screen is untouched');
     assert.equal(gate.answer('a', true), true, 'and answering it still reaches the first caller');
-    assert.deepEqual(await waiting, { allowed: true, reason: 'allowed in the editor' });
+    assert.deepEqual(await waiting, { allowed: true, cause: 'answered', reason: 'allowed in the editor' });
   });
 
   it('reports whether an id is still on the editor screen', async () => {
@@ -80,4 +80,14 @@ describe('ApprovalGate', () => {
   it('refuses a nonsensical deadline instead of never timing out', () => {
     assert.throws(() => new ApprovalGate(0), /positive timeout/);
   });
+  it('names a duplicate id as a duplicate, not as an abort', async () => {
+    const gate = new ApprovalGate(50);
+    const first = gate.request('r1:t1');
+    const second = await gate.request('r1:t1');
+    assert.equal(second.cause, 'duplicate', 'the run is fine and the first ask is still on screen');
+    assert.equal(second.allowed, false);
+    gate.answer('r1:t1', true);
+    await first;
+  });
+
 });

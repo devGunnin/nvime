@@ -35,6 +35,10 @@ end
 --- never collide with a real (sidecar-issued) session id.
 local NEW_CHANGE = {}
 
+--- Words that decide a build's fate. They keep their meaning while a build
+--- runs instead of being handed to it as a steer.
+local BUILD_WORDS = { resume = true, retriage = true, discard = true }
+
 local state = {
   root = nil,
   --- The last SessionView the sidecar returned, or nil when none is selected.
@@ -164,12 +168,16 @@ function M.next_step(session)
     return nil
   end
   if session.runnerLive then
-    return 'building outside the editor — s steers it, <C-c> stops it, closing Neovim does not'
+    local how = session.steerable and 'type to steer it, ' or ''
+    return 'building outside the editor — ' .. how .. '<C-c> stops it, closing Neovim does not'
   end
   if session.heldElsewhere then
     return 'another editor is driving this — watch it there, or <C-r> to pick a different change'
   end
-  local building = 'building — <C-c> stops it'
+  -- The sidecar's word, never a guess: a build with no runner behind a live
+  -- socket (the in-sidecar fallback) is stopped, not nudged.
+  local building = session.steerable and 'building — type to steer it, <C-c> stops it'
+    or 'building — <C-c> stops it'
   if session.detached then
     building = session.runner ~= nil and 'the build died part-way — type `resume` to pick it back up, or `discard`'
       or 'type `resume` to pick the build back up, or `discard` to throw it away'
@@ -242,6 +250,12 @@ local function on_event(name, params)
     surface():interject('  → build finished', 'NvimeSession')
   elseif name == 'big.failed' then
     show_error({ message = params.message or 'the detached build failed', detail = params.detail })
+  elseif name == 'big.view' then
+    -- The sidecar's own read of this session, sent once the build is really
+    -- running: the view this panel adopted at `approve` predates the runner.
+    if type(params.session) == 'table' then
+      adopt(params.session)
+    end
   elseif name == 'big.started' then
     surface():interject(string.format('  %s · %s', params.phase, params.model or '?'), 'NvimeDim')
   elseif name == 'big.delta' then
@@ -542,6 +556,17 @@ function M.send(text, echo)
       text, echo = pick, options.echo(pick)
     end
   end
+  local word = vim.trim(text):lower()
+  -- While the build runs, the prompt steers it: that is what a reader typing
+  -- into a panel that is streaming a build expects, and `s` in the transcript
+  -- is only a shortcut to the same thing. The words that decide the build's
+  -- fate keep their meaning. The steer is echoed by `big.steer` when the
+  -- sidecar accepts it, so it is not echoed here as well.
+  if state.session ~= nil and state.session.display == 'building' and not BUILD_WORDS[word] and M.steerable() then
+    M.steer(text)
+    return
+  end
+
   surface():append('you', 'NvimeUser')
   surface():append_markdown(echo or text, 'NvimeUserBody')
   surface():blank()
@@ -550,7 +575,6 @@ function M.send(text, echo)
     start_new(text)
     return
   end
-  local word = vim.trim(text):lower()
   local display = state.session.display
   if display == 'drafting' then
     if word == 'approve' then
@@ -620,7 +644,7 @@ function M.resume_or_discard(word)
     surface():append('  ' .. hint, 'NvimeActivity')
     surface():blank()
   else
-    surface():append('  the build is running — <C-c> stops it', 'NvimeActivity')
+    surface():append('  ' .. hint, 'NvimeActivity')
     surface():blank()
   end
 end
@@ -695,18 +719,40 @@ function M.steer(text)
     sessionId = state.session.id,
     text = text,
   }, function(err)
-    if err ~= nil then
-      show_error(err)
-      M.refresh()
+    if err == nil then
+      return
     end
+    show_error(err)
+    -- The box was cleared on send and only an ACCEPTED steer is echoed back,
+    -- so a refusal would otherwise take the words with it.
+    local live = panel.get(PANEL)
+    if live == nil or not live:restore_prompt(text) then
+      -- The box has moved on (closed, or typed into since). A notify is one
+      -- transient line, so the words go where they can still be read.
+      vim.fn.setreg('"', text)
+      vim.notify('nvime: the steer was refused — "p pastes your text back: ' .. text, vim.log.levels.WARN)
+    end
+    M.refresh()
   end)
+end
+
+--- Whether what the reader types now is a nudge for a build in flight.
+---
+--- The sidecar decides whether a steer has anywhere to go (`steerable`): only
+--- it knows whether a runner is behind a live control socket, and it says so
+--- again on `big.view` once that runner exists — the view this panel adopted
+--- at `approve` was taken before it. This editor adds the half it owns: that
+--- it is following the run at all.
+--- @return boolean
+function M.steerable()
+  local session = state.session
+  return session ~= nil and session.steerable == true and M.is_running()
 end
 
 --- `s`: the compose float for one steer.
 function M.open_steer()
-  local session = state.session
-  if session == nil or not session.runnerLive then
-    vim.notify('nvime: no build is running outside the editor to steer', vim.log.levels.INFO)
+  if not M.steerable() then
+    vim.notify('nvime: no build is running to steer', vim.log.levels.INFO)
     return
   end
   require('nvime.compose').open({
@@ -846,14 +892,30 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'describe · <CR> send · <C-n> new · <C-r> changes · <C-t> review · <C-c> stop',
+    prompt_hint = 'describe · <CR> send (i_<C-s>) · <C-c> stop · <C-r> changes · n_<C-n> new · n_<C-t> review',
     on_submit = M.send,
     on_close = on_panel_close,
     keys = {
+      -- Insert bindings are named one by one: `<C-n>` and `<C-t>` are Vim's
+      -- there (completion, and indent-one-shiftwidth) and stay Vim's.
       { mode = 'n', lhs = '<C-n>', fn = M.new_change, desc = 'nvime: start a new big change', where = 'both' },
-      { mode = 'n', lhs = '<C-r>', fn = M.pick_session, desc = 'nvime: pick a big change', where = 'both' },
+      {
+        mode = 'n',
+        lhs = '<C-r>',
+        fn = M.pick_session,
+        desc = 'nvime: pick a big change',
+        where = 'both',
+        insert = 'when-empty',
+      },
       { mode = 'n', lhs = '<C-t>', fn = M.open_threads, desc = 'nvime: open the review threads', where = 'both' },
-      { mode = 'n', lhs = '<C-c>', fn = M.cancel, desc = 'nvime: stop the big change', where = 'both' },
+      {
+        mode = 'n',
+        lhs = '<C-c>',
+        fn = M.cancel,
+        desc = 'nvime: stop the big change',
+        where = 'both',
+        insert = true,
+      },
       { mode = 'n', lhs = ']o', fn = M.jump_to_offer, desc = 'nvime: jump to the pending choice', where = 'both' },
       -- Scrollback only: `s` is `substitute` in the prompt buffer, which the
       -- user is typing in.

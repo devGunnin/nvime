@@ -500,9 +500,32 @@ describe('when the runner cannot start', () => {
     inlineTurns.push([init(), result('built it')]);
     inlineTurns.push([init(), result('triaged', { blocks: [] })]);
 
-    await inline.start(1, 'build', { root: repo, id: session.id });
+    const view = await inline.start(1, 'build', { root: repo, id: session.id });
     assert.equal(events.some((entry) => entry.event === 'big.notice'), false);
     assert.equal(existsSync(store.logPathFor(repo, session.id)), false, 'and writes no run log');
+    // No runner, so no control socket: the editor reads this as unsteerable
+    // rather than offering a steer every attempt would refuse.
+    assert.equal(view.runner, null);
+    assert.equal(view.runnerLive, false);
+    assert.equal(view.steerable, false);
+  });
+
+  it('tells the editor the build is steerable once the runner is behind its socket', async () => {
+    // `approve` replies before the runner exists, so the editor's snapshot
+    // cannot know — the view has to reach it again, on an event.
+    const session = await approved();
+    writeScript({ holdMs: 60_000, readyOut: join(root, 'ready') });
+    const running = detached.start(1, 'build', { root: repo, id: session.id });
+    await until('the build to start', () => existsSync(join(root, 'ready')));
+    await until(
+      'the sidecar to hand the editor a steerable view',
+      () => events.some((entry) => entry.event === 'big.view' && entry.params.session !== undefined),
+    );
+    const view = events.find((entry) => entry.event === 'big.view')?.params.session as SessionView;
+    assert.equal(view.steerable, true, 'a live runner with a control socket');
+    assert.equal(view.runnerLive, true);
+    await detached.stop({ root: repo, id: session.id });
+    await assert.rejects(running);
   });
 
   it('refuses to start a second build over a live one', async () => {

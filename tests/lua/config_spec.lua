@@ -1,7 +1,7 @@
 local t = require('harness')
 local config = require('nvime.config')
 
-local describe, it, eq = t.describe, t.it, t.eq
+local describe, it, eq, ok = t.describe, t.it, t.eq, t.ok
 
 describe('config.setup', function()
   it('returns the defaults when given nothing', function()
@@ -173,6 +173,82 @@ describe('the gate difficulty', function()
     t.throws(function()
       config.setup({ big = { cleanup_on_merge = 'yes' } })
     end, 'cleanup_on_merge')
+    config.setup()
+  end)
+end)
+
+describe('unknown keys', function()
+  it('rejects a misspelt key with the path the user wrote, at every level', function()
+    t.throws(function()
+      config.setup({ pannel = { width = 80 } })
+    end, 'unknown option pannel')
+    t.throws(function()
+      config.setup({ panel = { widht = 80 } })
+    end, 'unknown option panel%.widht')
+    t.throws(function()
+      config.setup({ models = { bigg = { effort = 'high' } } })
+    end, 'unknown option models%.bigg')
+    t.throws(function()
+      config.setup({ models = { chat = { efort = 'high' } } })
+    end, 'unknown option models%.chat%.efort')
+    config.setup()
+  end)
+
+  it('still accepts every key that has no default value of its own', function()
+    local opts = config.setup({
+      agent = { claude = '/usr/local/bin/claude' },
+      models = { chat = { model = 'sonnet', effort = 'high' } },
+      organization = { control_plane_url = 'https://example.test', trust_core = '/opt/trust' },
+    })
+    eq('/usr/local/bin/claude', opts.agent.claude)
+    eq('sonnet', opts.models.chat.model)
+    config.setup()
+  end)
+
+  it('keeps the retired key’s own message rather than calling it a typo', function()
+    t.throws(function()
+      config.setup({ agent = { model = 'sonnet' } })
+    end, 'agent%.model was replaced')
+    config.setup()
+  end)
+end)
+
+describe('agent.node', function()
+  --- `setup` with `vim.notify` captured.
+  local function setup_saying(user)
+    local said = {}
+    local real = vim.notify
+    vim.notify = function(message, level)
+      said[#said + 1] = { message = message, level = level }
+    end
+    local ok_run, result = pcall(config.setup, user)
+    vim.notify = real
+    if not ok_run then
+      error(result, 0)
+    end
+    return result, said
+  end
+
+  it('warns about a binary that is not there, and leaves the config standing', function()
+    local opts, said = setup_saying({ agent = { node = '/nonexistent/bin/node' } })
+    eq('/nonexistent/bin/node', opts.agent.node, 'setup returns normally — doctor is the authority')
+    eq(1, #said, vim.inspect(said))
+    ok(said[1].message:find('/nonexistent/bin/node', 1, true) ~= nil, said[1].message)
+    ok(said[1].message:find(':Nvime doctor', 1, true) ~= nil, said[1].message)
+    eq(vim.log.levels.WARN, said[1].level)
+    config.setup()
+  end)
+
+  it('expands a ~ path rather than spawning it verbatim', function()
+    local opts = setup_saying({ agent = { node = '~/.nvm/versions/node/v20/bin/node' } })
+    eq(vim.fn.expand('~') .. '/.nvm/versions/node/v20/bin/node', opts.agent.node)
+    config.setup()
+  end)
+
+  it('accepts one that resolves on PATH without a word', function()
+    local opts, said = setup_saying({ agent = { node = 'node' } })
+    eq('node', opts.agent.node, 'a bare name is left for PATH to resolve')
+    eq(0, #said, vim.inspect(said))
     config.setup()
   end)
 end)

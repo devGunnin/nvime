@@ -1,6 +1,6 @@
 import { rmSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { BigSession } from './bigstore.js';
+import type { BigSession, BigSpec } from './bigstore.js';
 import { git, readHead, resolveRef, trackedChanges, type RepoHead } from './git.js';
 import { ProtocolError } from './protocol.js';
 import type { TriageCounts } from './triage.js';
@@ -57,7 +57,7 @@ export interface LandRequest {
   baseCommit: string;
   /** Absolute path of the verified diff on disk. */
   patchPath: string;
-  /** Commit message: the session title, and nothing about who wrote it. */
+  /** Commit message (`commitMessageFor`), and nothing about who wrote it. */
   message: string;
   /** Absolute path for the private index. Must be outside the repository. */
   indexFile: string;
@@ -185,6 +185,60 @@ export function branchNameFor(title: string, sessionId: string): string {
     .slice(0, 40)
     .replace(/-+$/g, '');
   return `nvime/big/${slug === '' ? sessionId : slug}`;
+}
+
+/** Git's soft subject limit, in BYTES — three of those is one CJK character. */
+const MAX_SUBJECT_BYTES = 72;
+
+/**
+ * The commit a change lands as. The subject is the spec's one-line goal —
+ * what the change was FOR — because the title is the reader's first prompt
+ * clipped to 80 characters, which ends mid-clause and is permanent once it is
+ * on their branch. The body keeps the provenance the subject dropped.
+ */
+export function commitMessageFor(session: { title: string; spec: BigSpec | null }): string {
+  const goal = oneLine(session.spec?.goal ?? '');
+  const title = oneLine(session.title);
+  // Never empty: `git commit-tree -m ''` writes a commit with no message at
+  // all, and it lands on the operator's branch.
+  const subject = clipSubject(goal) || clipSubject(title) || 'big change';
+  // `git commit-tree -m ''` writes a commit with no message at all, onto the
+  // operator's branch: the fallback chain above must never come back empty.
+  if (subject === '') throw new Error('a commit message needs a subject');
+  const approach = oneLine(session.spec?.approach ?? '');
+  const body = approach === '' ? title : approach;
+  if (body === '' || body === subject) return subject;
+  return `${subject}\n\n${body}`;
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/**
+ * Trailing punctuation off, then cut to fit the byte budget at the last space
+ * that fits — a hard cut only when the subject has no space at all.
+ *
+ * Grapheme by grapheme, not code point: a family emoji is four people joined
+ * by three ZWJs, and a cut inside it leaves an invisible joiner as the last
+ * character of a commit subject.
+ */
+function clipSubject(text: string): string {
+  const trimmed = text.replace(/[.\s]+$/, '');
+  if (Buffer.byteLength(trimmed) <= MAX_SUBJECT_BYTES) return trimmed;
+  let fits = '';
+  let lastSpace: number | null = null;
+  for (const { segment } of GRAPHEMES.segment(trimmed)) {
+    if (Buffer.byteLength(fits + segment) > MAX_SUBJECT_BYTES) break;
+    fits += segment;
+    if (segment === ' ') lastSpace = fits.length - 1;
+  }
+  const cut = lastSpace === null ? fits : fits.slice(0, lastSpace);
+  // A joiner or a combining mark left at the end renders as nothing, or as a
+  // different letter than the one that was cut off.
+  return cut.replace(/[.,;:\s]+$/, '').replace(/[\p{M}\p{Default_Ignorable_Code_Point}]+$/u, '');
 }
 
 /**

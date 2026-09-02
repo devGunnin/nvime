@@ -150,6 +150,27 @@ describe('chat.open', function()
     panel.close('chat')
     vim.fn.delete(dir, 'rf')
   end)
+
+  it('advertises only keys that work in the window showing the hint', function()
+    local dir = sandbox()
+    from_elsewhere(function()
+      open_on(dir)
+      local view = panel.get('chat')
+      local hint = view.prompt_hint
+      ok(hint:find('i_<C-s>', 1, true) ~= nil, hint)
+      local insert = {}
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(view.prompt_buf, 'i')) do
+        insert[map.lhs] = true
+      end
+      for _, lhs in ipairs({ '<C-R>', '<C-C>', '<C-S>' }) do
+        ok(insert[lhs], lhs .. ' is advertised on a box that opens in insert mode')
+      end
+      eq(nil, insert['<C-N>'], 'i_CTRL-N belongs to this box’s own completion popup')
+      ok(hint:find('n_<C-n>', 1, true) ~= nil, 'so the hint marks it normal-only: ' .. hint)
+    end)
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
 end)
 
 describe('chat.send', function()

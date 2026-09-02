@@ -5,6 +5,7 @@
 local diagnostics = require('nvime.diagnostics')
 local icons = require('nvime.icons')
 local text = require('nvime.text')
+local modes = require('nvime.modes')
 
 local M = {}
 
@@ -147,6 +148,7 @@ function M.open()
   -- backstop; `linebreak` keeps that backstop off the middle of a word.
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
+  modes.normal()
   view.win, view.buf = win, buf
   for _, lhs in ipairs({ 'q', '<Esc>' }) do
     vim.keymap.set('n', lhs, close, { buffer = buf, nowait = true, silent = true, desc = 'nvime: close' })

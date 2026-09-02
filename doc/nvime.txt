@@ -125,10 +125,24 @@ Global ~
 Prompt buffer ~
     <CR>            normal      send the prompt
     <C-s>           insert      send the prompt (<CR> still inserts a newline)
+    <C-c>           both        stop the running turn (chat, edit, big). In
+                                 insert it acts without leaving insert — it no
+                                 longer drops the box into normal mode
+    <C-r>           both        session / change picker (chat, big; the edit
+                                 panel has none) — in insert only while the box
+                                 is EMPTY; with anything typed it is
+                                 |i_CTRL-R|, the register paste, as always
     <C-n>           normal      start a new conversation / big change
-    <C-r>           normal      session / change picker
-    <C-c>           normal      stop the running turn
+    <C-t>           normal      open the review threads (big panel)
     ]o              normal      jump to the pending choice
+
+    Which keys reach into insert mode is decided key by key, never by the
+    key's shape. The box is left in insert after every send, so `<C-c>` and
+    `<C-r>` answer there; `<C-n>` and `<C-t>` do NOT, because insert mode
+    already owns them (|i_CTRL-N| walks the @-path completion popup this very
+    box offers, |i_CTRL-T| indents the line). The hint marks a normal-only key
+    `n_<key>`. While the completion popup is up, every insert mapping hands the
+    key back to Neovim.
 
 Session / change picker ~
     <CR>                        open the row under the cursor
@@ -152,7 +166,12 @@ Big-change panel ~
     <C-n>                       start a new big change
     <C-r>                       pick a big change
     <C-t>                       open the review threads
-    s                           steer the running build
+    s                           steer the running build (scrollback; typing in
+                                 the prompt while it builds steers it too).
+                                 Offered only while the sidecar reports the
+                                 build steerable — a build that fell back to
+                                 running inside the sidecar has no runner to
+                                 reach, and says so instead
     <C-c>                       stop the run
     ]o                          jump to the pending choice
     q                           close
@@ -185,7 +204,10 @@ Dashboard ~
 Answer box (paste-blocked) ~
     <CR>                        submit
     <C-s>            insert     submit
-    <Esc>, q                    cancel
+    <Esc>            both       cancel (one press, from insert too); with the
+                                 completion popup up it closes the popup only
+    q, <C-c>         normal      cancel
+    A cancelled draft is put in the unnamed register: "p pastes it back.
     p, P, gp, gP, ]p, [p, ]P, [P, i_<C-r>   refused: type it
 
 ==============================================================================
@@ -486,7 +508,9 @@ big.cleanup_on_merge   boolean. Throw the build clone away once the change
                        lands. Off by default: the clone is the only place the
                        build's own history still exists.
 
-agent.node             string. The node binary.
+agent.node             string. The node binary; `~` is expanded. Not
+                       executable? setup() warns and carries on — `:Nvime
+                       doctor` is where that is diagnosed.
 agent.claude           string or nil. Absolute path to `claude`; nil resolves
                        it from PATH.
 agent.request_timeout_ms

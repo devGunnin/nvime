@@ -12,6 +12,7 @@
 --- they were shown three quarters of.
 local keymaps = require('nvime.keymaps')
 local text = require('nvime.text')
+local modes = require('nvime.modes')
 
 local M = {}
 
@@ -186,10 +187,43 @@ function M.render(request, width)
 
   append_keys(page)
 
-  if shown ~= nil and shown ~= '' then
+  if shown ~= nil and shown ~= '' and not M.summarised(request.summary, detail) then
     append_payload(page, detail, shown)
   end
   return page.lines, page.alerts, page.marks
+end
+
+--- Whether the summary at the top already shows the whole payload VERBATIM, so
+--- repeating it below would only say the same short command twice.
+---
+--- The summary is rendered through `text.wrap`, which collapses runs of
+--- whitespace — so a payload whose own whitespace would not survive that is
+--- never treated as shown: what the reader consented to has to be the bytes
+--- the tool will run, tabs and alignment included.
+--- @param summary string|nil
+--- @param detail table|nil kind, text, bytes, truncated
+--- @return boolean
+function M.summarised(summary, detail)
+  if type(summary) ~= 'string' or type(detail) ~= 'table' or type(detail.text) ~= 'string' then
+    return false
+  end
+  local payload = detail.text
+  if detail.truncated then
+    return false
+  end
+  -- A bare word is what ordinary prose can carry by accident (`make`, `rm`);
+  -- a space or a path separator is what makes a payload unmistakable. Length
+  -- is not the test — `ls -la` is short and shown in full.
+  if payload:find('[%s/]') == nil then
+    return false
+  end
+  if payload ~= payload:gsub('%s+', ' ') then
+    return false
+  end
+  -- The whole payload, at the END of the summary: today the only
+  -- payload-bearing summary is `describeTool`'s Bash arm, whose lead-in is the
+  -- fixed literal `running ` (pinned by a test in stream.test.ts).
+  return vim.endswith(summary, payload)
 end
 
 --- Opens the float for `ask` and wires the approval keys to `answer`.
@@ -233,6 +267,7 @@ local function show(ask, answer)
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
   active = { win = win, buf = buf, request = ask.request, on_answer = ask.on_answer }
+  modes.normal()
 
   for _, key in ipairs(keymaps.APPROVAL) do
     vim.keymap.set('n', key.lhs, function()

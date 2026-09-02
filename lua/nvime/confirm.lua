@@ -5,6 +5,7 @@
 --- lists, so the leaf-only check cannot go blind to a live mapping.
 local keymaps = require('nvime.keymaps')
 local text = require('nvime.text')
+local modes = require('nvime.modes')
 
 local M = {}
 
@@ -140,6 +141,7 @@ function M.ask(question, on_answer)
   })
   active = { win = win, buf = buf, on_answer = on_answer }
   watch(win, buf)
+  modes.normal()
   for _, key in ipairs(keymaps.CONFIRM) do
     vim.keymap.set('n', key.lhs, function()
       settle(key.allow)

@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+- **Input modes are fundamentals now.** Every surface driven by normal-mode
+  keys — panels without a prompt, pickers, the dashboard, the doctor, the
+  enrollment and explain floats, the confirm and approval floats, the review
+  tree — leaves insert mode when it takes focus, so a documented key acts
+  instead of typing itself into the window. A prompt box answers `<C-c>` and
+  `<C-r>` in insert as well, because the box is left in insert after every
+  send, which is exactly when they are wanted: `<C-r>` opens the picker only
+  while the box is empty, so `i_CTRL-R` stays the register paste mid-prompt.
+  Which keys reach into insert is decided key by key — `<C-n>` and `<C-t>` are
+  Neovim's there and stay Neovim's — and while a completion popup is up every
+  one of them hands the key back. No hint advertises a key that does something
+  else in the window showing it: the prompt hints name the insert-mode send
+  (`i_<C-s>`) and mark a normal-only key `n_<key>`, and the running-build line
+  no longer says `s steers it` where `s` is Vim's `substitute`.
+
+- **One `<Esc>` cancels a compose float**, from insert too — it opens there, so
+  a normal-only mapping needed two presses while the footer promised one. With
+  a completion popup up, `<Esc>` closes the popup and nothing else. A cancelled
+  draft is never lost: it goes to the unnamed register — linewise when it has
+  more than one line, so `"p` puts the lines back rather than splicing them —
+  and the message says so, which matters most in the paste-blocked gate answer.
+
+- **Steer the build you started.** Typing into the prompt while a build runs
+  sends it as a steer instead of being answered with a hint, and `s` steers the
+  same build; `resume`, `retriage` and `discard` keep their meaning. Whether a
+  steer has anywhere to go is the sidecar's call — a `steerable` flag on the
+  session view, re-sent on `big.view` the moment a runner is behind its control
+  socket, because the view the editor holds during its own build was taken
+  before that runner existed. A build that fell back to running inside the
+  sidecar has no runner to reach, and `s`, the prompt and the hint all say so
+  together instead of offering a steer that would be refused.
+
+- **The merge commit says what the change was for.** Its subject is the spec's
+  one-line goal, not the first prompt clipped to 80 characters mid-clause; the
+  body keeps that first prompt (or the spec's approach).
+
+- **Unknown config keys are refused at `setup()`** at every level —
+  `pannel`, `panel.widht`, `models.bigg` — each named by the exact path the
+  README promised. `agent.node` is expanded (`~` works) and warns when it is
+  not executable, rather than taking the whole config — and `:Nvime doctor`
+  with it — down over a `PATH` a GUI Neovim never had.
+
+- **Edit mode says less and says it once.** A file left alone because you have
+  unsaved edits is reported once per run instead of on every write to it, an
+  approval nobody answered now shows `× denied (timed out)` — or
+  `(duplicate request)`, which is not an abort — rather than staying pending
+  forever, and the approval float prints a short command once instead of as
+  both summary and payload — unless collapsing its whitespace would change it,
+  or the payload is a bare word that prose could carry by accident.
+  A third-party write to the same file is still reported every time.
+
 - **The review pane is the file.** Selecting a thread now opens the build
   clone's own copy of the changed file as an ordinary buffer — real path,
   filetype, treesitter and your own LSP — with the diff drawn over it as

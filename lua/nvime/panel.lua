@@ -8,6 +8,7 @@
 --- that name rather than stacking splits.
 local completion = require('nvime.completion')
 local markdown = require('nvime.markdown')
+local modes = require('nvime.modes')
 
 local M = {}
 
@@ -240,6 +241,42 @@ local function bind(buf, mode, lhs, fn, desc)
   vim.keymap.set(mode, lhs, fn, { buffer = buf, nowait = true, silent = true, desc = desc })
 end
 
+--- Whether the prompt box is empty. What `<C-r>` decides on: an empty box has
+--- nothing to paste into, a box with a half-written prompt in it does.
+local function prompt_is_empty(self)
+  if self.prompt_buf == nil or not vim.api.nvim_buf_is_valid(self.prompt_buf) then
+    return true
+  end
+  return vim.trim(table.concat(vim.api.nvim_buf_get_lines(self.prompt_buf, 0, -1, false), '\n')) == ''
+end
+
+--- One insert-mode mapping for a prompt key, opt-in per key (`insert = true`,
+--- or `'when-empty'`). Never inferred from the key's shape: that swept in
+--- `<C-n>` and took the panel's own completion popup with it.
+---
+--- Vim owns every key that gets here, so the native key wins whenever nvime's
+--- action would surprise — the completion popup is up, or the box already has
+--- text and `<C-r>` is the register paste it has always been. `<expr>`, so the
+--- action runs on `vim.schedule`: an expression mapping may not open a window.
+local function bind_prompt_insert(self, key)
+  assert(key.insert == true or key.insert == 'when-empty', 'a prompt key’s insert binding must be true or when-empty')
+  local only_when_empty = key.insert == 'when-empty'
+  vim.keymap.set('i', key.lhs, function()
+    if vim.fn.pumvisible() == 1 or (only_when_empty and not prompt_is_empty(self)) then
+      return key.lhs
+    end
+    vim.schedule(key.fn)
+    return ''
+  end, {
+    buffer = self.prompt_buf,
+    expr = true,
+    replace_keycodes = true,
+    nowait = true,
+    silent = true,
+    desc = key.desc,
+  })
+end
+
 --- Prompt text, then clear it ready for the next message.
 local function take_prompt(self)
   local lines = vim.api.nvim_buf_get_lines(self.prompt_buf, 0, -1, false)
@@ -428,6 +465,9 @@ function M.open(opts)
   for _, key in ipairs(opts.keys or {}) do
     for _, buf in ipairs(self:_key_buffers(key.where)) do
       bind(buf, key.mode, key.lhs, key.fn, key.desc)
+      if key.insert ~= nil and buf == self.prompt_buf then
+        bind_prompt_insert(self, key)
+      end
     end
   end
   bind(self.buf, 'n', 'q', function()
@@ -487,10 +527,17 @@ function M.close(name)
   panels[name] = nil
 end
 
+--- A prompt panel keeps insert mode — that window is for typing. A panel
+--- without one is driven by normal-mode keys, so it must not inherit the
+--- insert mode of whatever the user was in when it opened.
 function Panel:focus()
   local win = win_valid(self.prompt_win) and self.prompt_win or self.win
-  if win_valid(win) then
-    vim.api.nvim_set_current_win(win)
+  if not win_valid(win) then
+    return
+  end
+  vim.api.nvim_set_current_win(win)
+  if win ~= self.prompt_win then
+    modes.normal()
   end
 end
 

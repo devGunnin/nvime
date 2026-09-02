@@ -228,7 +228,8 @@ function M.open(opts)
   vim.bo[buf].bufhidden = 'wipe'
   vim.bo[buf].filetype = 'markdown'
 
-  local keys = opts.no_paste and ' typed only · <CR> send · <Esc> cancel ' or ' <CR> send · <Esc> cancel '
+  local keys = opts.no_paste and ' typed only · <CR> send (i_<C-s>) · <Esc> cancel '
+    or ' <CR> send (i_<C-s>) · <Esc> cancel '
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
     width = width,
@@ -265,8 +266,50 @@ function M.open(opts)
   end
   bind('n', '<CR>', submit)
   bind('i', '<C-s>', submit)
-  bind('n', 'q', close)
-  bind('n', '<Esc>', close)
+  --- <Esc> cancels from insert too — the float opens there, so an <Esc> bound
+  --- only in normal needs two presses while the footer promises one, and the
+  --- float looks unresponsive.
+  ---
+  --- The draft goes to the unnamed register on the way out: this box is
+  --- paste-blocked and wiped on close, so a gate answer cancelled by reflex is
+  --- otherwise gone for good and cannot even be pasted back.
+  local function cancel()
+    -- The insert <Esc> is <expr>: it schedules this, so two fast presses queue
+    -- two cancels against a buffer the first one wipes.
+    if active == nil or not vim.api.nvim_buf_is_valid(buf) then
+      return
+    end
+    local lines = lines_of(buf)
+    local held = vim.trim(table.concat(lines, '\n'))
+    close()
+    if held == '' then
+      return
+    end
+    if #lines > 1 then
+      -- Linewise: a charwise put would splice a multi-line answer into
+      -- whatever line the cursor happens to be on.
+      vim.fn.setreg('"', lines, 'l')
+      vim.notify('nvime: draft discarded — "p pastes it back below the cursor', vim.log.levels.INFO)
+      return
+    end
+    vim.fn.setreg('"', held)
+    vim.notify('nvime: draft discarded — "p pastes it back', vim.log.levels.INFO)
+  end
+  bind('n', 'q', cancel)
+  bind('n', '<Esc>', cancel)
+  -- Normal mode only: <C-c> is how the reader reaches normal mode from a box
+  -- whose <Esc> now cancels.
+  bind('n', '<C-c>', cancel)
+  -- The popup owns <Esc> while it is up (dismiss it, keep the draft); a
+  -- window may not be closed from an <expr> mapping, so the cancel is
+  -- scheduled.
+  vim.keymap.set('i', '<Esc>', function()
+    if vim.fn.pumvisible() == 1 then
+      return '<C-e>'
+    end
+    vim.schedule(cancel)
+    return ''
+  end, { buffer = buf, expr = true, replace_keycodes = true, nowait = true, silent = true })
 
   if opts.no_paste then
     local function refuse()

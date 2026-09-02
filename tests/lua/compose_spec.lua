@@ -69,9 +69,10 @@ end
 --- Types `text` as real keystrokes: enters insert mode, feeds it, leaves
 --- insert mode, all in one synchronous batch — so `InsertCharPre` fires for
 --- every character exactly as it would for a reader typing them.
+--- Not `<Esc>` to leave insert: in this float that key cancels the box.
 local function type_text(text)
-  local esc = vim.api.nvim_replace_termcodes('<Esc>', true, true, true)
-  vim.api.nvim_feedkeys('i' .. text .. esc, 'x', false)
+  vim.api.nvim_feedkeys('i' .. text, 'x', false)
+  vim.cmd('stopinsert')
 end
 
 local function text_of(buf)
@@ -267,8 +268,8 @@ describe('the answer box', function()
       eq('', vim.bo[buf].completefunc)
 
       local ctrl_n = vim.api.nvim_replace_termcodes('<C-n>', true, true, true)
-      local esc = vim.api.nvim_replace_termcodes('<Esc>', true, true, true)
-      vim.api.nvim_feedkeys('ireticu' .. ctrl_n .. esc, 'x', false)
+      vim.api.nvim_feedkeys('ireticu' .. ctrl_n, 'x', false)
+      vim.cmd('stopinsert')
       eq({ 'reticu' }, text_of(buf), 'a diff-buffer word must not complete into the answer box')
       compose.dismiss()
     end)

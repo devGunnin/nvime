@@ -386,4 +386,106 @@ describe('the approval float is tall enough for what it shows', function()
     end
     eq(rows, #lines, 'each rendered line must be exactly one screen row, or the height is undercounted')
   end)
+
+  it('prints a short command once, not as a summary and a payload block', function()
+    local lines = approval.render({
+      approvalId = 'a1',
+      tool = 'Bash',
+      summary = 'running find . -name *.py',
+      reason = 'runs a shell command',
+      detail = { kind = 'command', text = 'find . -name *.py', bytes = 17 },
+    }, 72)
+    local body = table.concat(lines, '\n')
+    eq(nil, body:find('the exact command', 1, true), 'the summary already showed the whole command')
+    ok(body:find('find . -name *.py', 1, true) ~= nil, 'and it is still there in full')
+  end)
+
+  it('still prints the payload when the summary does not carry all of it', function()
+    local long = string.rep('x', 200)
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Bash',
+        summary = 'running ' .. long:sub(1, 119) .. '…',
+        reason = 'runs a shell command',
+        detail = { kind = 'command', text = long, bytes = #long, truncated = false },
+      }, 72),
+      '\n'
+    )
+    ok(body:find('the exact command', 1, true) ~= nil, 'nobody can consent to a clipped command')
+  end)
+
+  it('never collapses a multi-line payload into its whitespace-flattened summary', function()
+    local text = 'line one\nline two'
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Write',
+        summary = 'writing line one line two',
+        reason = 'writes a file',
+        detail = { kind = 'contents', text = text, bytes = #text },
+      }, 72),
+      '\n'
+    )
+    ok(body:find('the exact contents', 1, true) ~= nil, 'the line breaks are part of what is consented to')
+  end)
+
+  it('never suppresses a payload whose whitespace the summary flattened', function()
+    -- The summary is rendered through `text.wrap`, which collapses runs of
+    -- whitespace: consenting to it would be consenting to a different command.
+    local text = 'grep -n\t--color=never  needle .'
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Bash',
+        summary = 'running ' .. text,
+        reason = 'runs a shell command',
+        detail = { kind = 'command', text = text, bytes = #text },
+      }, 72),
+      '\n'
+    )
+    ok(body:find('the exact command', 1, true) ~= nil, 'the aligned command is shown verbatim')
+  end)
+
+  it('never suppresses a bare word, which prose can carry by accident', function()
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Bash',
+        summary = 'running make',
+        reason = 'runs a shell command',
+        detail = { kind = 'command', text = 'make', bytes = 4 },
+      }, 72),
+      '\n'
+    )
+    ok(body:find('the exact command', 1, true) ~= nil, 'one word is not proof the reader saw the command')
+  end)
+
+  it('prints a short flagged command once — length is not what makes it ambiguous', function()
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Bash',
+        summary = 'running ls -la',
+        reason = 'runs a shell command',
+        detail = { kind = 'command', text = 'ls -la', bytes = 6 },
+      }, 72),
+      '\n'
+    )
+    eq(nil, body:find('the exact command', 1, true), 'the summary already showed all six characters of it')
+  end)
+
+  it('suppresses only when the summary carries the payload as a whole', function()
+    local body = table.concat(
+      approval.render({
+        approvalId = 'a1',
+        tool = 'Bash',
+        summary = 'running find . -name *.pyc -delete',
+        reason = 'runs a shell command',
+        detail = { kind = 'command', text = 'find . -name *.py', bytes = 17 },
+      }, 72),
+      '\n'
+    )
+    ok(body:find('the exact command', 1, true) ~= nil, 'a prefix of the summary is not the whole command')
+  end)
 end)
