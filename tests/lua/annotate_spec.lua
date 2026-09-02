@@ -64,6 +64,37 @@ describe('what a hunk marks on the file', function()
     eq({ { row = 1, hl = 'NvimeEditChange' } }, marks.bands)
     eq({ { row = 1, lines = { 'two' } } }, marks.removals)
   end)
+
+  --- What `git diff` emits for a tracked file truncated to zero bytes: the
+  --- new side starts at 0, so the row before it is -1 — which raises out of
+  --- the draw instead of degrading it.
+  it('anchors a file emptied by the change at row 0, never below it', function()
+    local marks = annotate.hunk_marks('@@ -1,2 +0,0 @@', { '-first', '-second' })
+    eq(0, marks.row)
+    eq({}, marks.bands)
+    eq({ { row = 0, lines = { 'first', 'second' } } }, marks.removals)
+  end)
+end)
+
+describe('the line a hunk can be checked against', function()
+  it('offers a + line, whose row and text the patch both fix', function()
+    local marks = annotate.hunk_marks('@@ -1,3 +1,4 @@', { ' one', '-old', '+new', ' three' })
+    eq({ row = 1, text = 'new' }, marks.check)
+  end)
+
+  it('falls back to a context line when the hunk adds nothing', function()
+    local marks = annotate.hunk_marks('@@ -1,4 +1,3 @@', { '', ' two', '-three', ' four' })
+    eq({ row = 1, text = 'two' }, marks.check, 'the blank first line proves nothing and is skipped')
+  end)
+
+  it('offers nothing for a hunk with neither', function()
+    eq(nil, annotate.hunk_marks('@@ -1,2 +0,0 @@', { '-first', '-second' }).check)
+  end)
+
+  it('drops the line ending a CRLF file keeps out of the buffer', function()
+    eq('local M = {}', annotate.strip_cr('local M = {}\r'))
+    eq('a\rb', annotate.strip_cr('a\rb'), 'only a trailing one')
+  end)
 end)
 
 describe('a rendered line as virtual-line chunks', function()

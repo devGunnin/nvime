@@ -160,13 +160,16 @@ Review threads ~
     e                           explain a cleared thread
     r                           request changes on this thread
     X                           re-open (or re-clear) a trivial thread
-    R                           rebase the build onto a moved base
-    M                           merge into your branch
+    R                           rebase the build onto a moved base (asks y/n
+                                 first when pressed on the file pane)
+    M                           merge into your branch (asks y/n first when
+                                 pressed on the file pane)
     <C-c>                       give up waiting on a wedged request (does not
                                  stop it — unlike the panel's <C-c>, which
                                  reaches the runner and actually stops the run)
     <CR>                        open this file in the build clone (refused
-                                 while the pane already is that file)
+                                 for any file the review already holds a
+                                 buffer of — the pane is that buffer)
     q                           close the review
 
 Dashboard ~
@@ -322,7 +325,15 @@ The review pane ~
     Selecting a thread opens the build clone's own copy of the changed file as
     an ordinary buffer: real path, real filetype, treesitter highlighting, and
     your own LSP attaching as it would to any file you opened. It is
-    `nomodifiable` — the clone is a sandbox to read, not to edit.
+    `nomodifiable` and `readonly` — the clone is a sandbox to read, not to
+    edit — and that holds for every buffer the pane shows, one you already had
+    open included. Such a buffer stays yours: it is handed back listed and
+    writable as you had it, while the buffers the review opened itself are
+    wiped when it closes.
+
+    `M` and `R` ask a y/n question before they run when you press them on the
+    file, where both are ordinary motions. On the thread list they stay
+    immediate.
 
     The diff is extmarks over that buffer, never text: changed and added rows
     carry a band, removed lines render as dim virtual lines above whatever
@@ -332,7 +343,9 @@ The review pane ~
 
     `t` toggles the plain unified diff for pure patch reading. A thread with
     no file to annotate — binary content, a deleted file — falls back to it on
-    its own, and so does a build clone that is gone, which says so once.
+    its own, and so does a build clone that is gone, which says so once. So
+    does a file that has moved on since the capture: one line per hunk is
+    checked against the buffer before anything is drawn.
 
 The gate ~
     `a` on an open substantial thread opens an answer box that takes typed

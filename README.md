@@ -300,8 +300,16 @@ it, so you always know everything that changed.
 Selecting a thread opens the build clone's own copy of the changed file as an
 **ordinary buffer** — real path, real filetype, treesitter highlighting, and
 your own LSP attaching exactly as it would to a file you opened yourself, so
-`gd` and diagnostics work while you review. It is `nomodifiable`: the clone is a
-sandbox to read, not to edit.
+`gd` and diagnostics work while you review. It is `nomodifiable` and
+`readonly` — the clone is a sandbox to read, not to edit — and that holds for
+every buffer the pane shows, a file you already had open included. Such a
+buffer stays yours: the review borrows it, then hands it back listed and
+writable exactly as you had it, while the buffers the review opened itself are
+wiped when it closes.
+
+Because `M`, `R` and `t` are ordinary motions on a page of code, `M` (merge)
+and `R` (rebase) ask a y/n question first when you press them on the file. On
+the thread list, which is not a code surface, they stay immediate.
 
 The diff is drawn *over* that buffer as extmarks, never as text, so the bytes
 stay the file's and nothing downstream is reading a rendering. Changed and added
@@ -313,7 +321,9 @@ more than one.
 `t` toggles the plain unified diff, which is still there for pure patch reading.
 A thread with nothing to annotate — binary content, a deleted file — falls back
 to it on its own, and so does a build clone that has been cleaned up, which says
-so once.
+so once. So does a file that has moved on since the capture: one line per hunk
+is checked against the buffer before anything is drawn, because a band on the
+wrong row reads exactly like a band on the right one.
 
 ### The gate
 
@@ -490,7 +500,7 @@ Off until `keymaps.enabled = true`.
 | `]t` / `[t` | review | next · previous thread |
 | `]c` / `[c` / `t` | review | next · previous hunk in the thread · toggle the unified diff |
 | `a` / `e` / `r` | review | defend this thread · explain a cleared one · request changes |
-| `X` / `R` / `M` | review | re-open a trivial thread · rebase onto a moved base · merge |
+| `X` / `R` / `M` | review | re-open a trivial thread · rebase onto a moved base · merge (`R`/`M` confirm on the file pane) |
 | `<C-c>` | review | give up waiting on a wedged request — does not stop it, unlike the panel's `<C-c>` |
 | `<CR>` | review | open this file in the build clone |
 | `c` `e` `b` `d` / `<CR>` | dashboard | chat · edit · big · changeset / open the change under the cursor |
@@ -857,6 +867,7 @@ lua/nvime/
   threads.lua         the review threads, the gate overlay, merge and rebase
   reviewbuf.lua       the clone's files as read-only review buffers
   annotate.lua        pure: where a hunk lands in the post-change file
+  confirm.lua         a y/n float for an action that cannot be taken back
   dashboard.lua       :Nvime — the front door and this project's big changes
   doctor.lua          :Nvime doctor — the preflight as one list
   compose.lua         a float for one piece of free text; paste-blocked for a defense

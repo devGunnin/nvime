@@ -17,6 +17,17 @@ M.APPROVAL = {
   { lhs = '<Esc>', allow = false, desc = 'nvime: deny' },
 }
 
+--- The confirmation float's keys, bound by `confirm.lua`. Same shape and same
+--- registry rule as `APPROVAL`, but its own table: the two floats ask
+--- different questions and their descriptions must not drift into each other.
+M.CONFIRM = {
+  { lhs = 'y', allow = true, desc = 'nvime: yes, go ahead' },
+  { lhs = 'Y', allow = true, desc = 'nvime: yes, go ahead' },
+  { lhs = 'n', allow = false, desc = 'nvime: no' },
+  { lhs = 'N', allow = false, desc = 'nvime: no' },
+  { lhs = '<Esc>', allow = false, desc = 'nvime: no' },
+}
+
 --- The normal-mode puts the paste-blocked answer box refuses. Listed here
 --- because they are ordinary editing keys: the leaf-only check has to see them,
 --- and `compose.lua` binds exactly this table so the two cannot drift.
@@ -74,6 +85,9 @@ function M.all(opts)
   }
   for _, key in ipairs(M.APPROVAL) do
     entries[#entries + 1] = { scope = 'approval', mode = 'n', lhs = key.lhs, desc = key.desc }
+  end
+  for _, key in ipairs(M.CONFIRM) do
+    entries[#entries + 1] = { scope = 'confirm', mode = 'n', lhs = key.lhs, desc = key.desc }
   end
   for _, key in ipairs(require('nvime.dashboard').KEYS) do
     entries[#entries + 1] = { scope = 'dashboard', mode = 'n', lhs = key.lhs, desc = key.desc }

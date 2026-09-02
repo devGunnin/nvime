@@ -15,6 +15,15 @@ local CHANGE = 'NvimeEditChange'
 --- What a removed line is prefixed with in the virtual line standing in for it.
 M.REMOVED_PREFIX = '- '
 
+--- A patch line's text as the buffer holds it. A CRLF file's `\r` belongs to
+--- the line ending, which nvim keeps out of the buffer for a dos file.
+--- @param text string
+--- @return string
+function M.strip_cr(text)
+  assert(type(text) == 'string', 'annotate.strip_cr needs a string')
+  return (text:gsub('\r$', ''))
+end
+
 local HEADER = '^@@ %-%d+,?%d* %+(%d+),?%d* @@'
 
 --- The new-side start line of a hunk header (1-based), or nil when `header` is
@@ -38,18 +47,28 @@ end
 --- they attach to the row that took their place (the first line of the `+` run
 --- that replaced them, or the context line that follows a pure deletion) and
 --- render above it as virtual lines.
+--- `check` is one line of this hunk whose text AND post-change row are both
+--- known, so a caller can tell a correct placement from row arithmetic laid
+--- over a file that has since moved. A blank line proves nothing, so only a
+--- `+` line or a non-empty context line is ever offered; a hunk with neither
+--- has no check.
 --- @param header string the `@@` line
 --- @param body string[] the hunk body, each line keeping its ` `/`+`/`-` prefix
---- @return table|nil { row, bands = {{row, hl}}, removals = {{row, lines}} }, nil for a non-header
+--- @return table|nil { row, bands, removals, check }, nil for a non-header
 function M.hunk_marks(header, body)
   local start = M.new_start(header)
   if start == nil then
     return nil
   end
   assert(type(body) == 'table', 'annotate.hunk_marks needs a body list')
-  local row = start - 1
+  -- `@@ -1,3 +0,0 @@` — a file emptied but not deleted — starts the new side
+  -- at 0, and a row of -1 raises out of the draw rather than degrading it.
+  local start_row = math.max(start - 1, 0)
+  local row = start_row
   local bands, removals = {}, {}
   local first = nil
+  --- The integrity-check candidates, `+` preferred over context.
+  local added, context = nil, nil
   --- Texts of the `-` run being read, nil outside one.
   local removed = nil
   --- The `+` run being read replaces a `-` run, so it is a change, not an add.
@@ -77,15 +96,21 @@ function M.hunk_marks(header, body)
       end
       bands[#bands + 1] = { row = row, hl = changing and CHANGE or ADD }
       first = first or row
+      added = added or { row = row, text = line:sub(2) }
       row = row + 1
     elseif kind ~= '\\' then
       flush(row)
       changing = false
+      if context == nil and line:sub(2) ~= '' then
+        context = { row = row, text = line:sub(2) }
+      end
       row = row + 1
     end
   end
   flush(row)
-  return { row = first or (start - 1), bands = bands, removals = removals }
+  local at = first or start_row
+  assert(at >= 0, 'annotate.hunk_marks must never report a negative row')
+  return { row = at, bands = bands, removals = removals, check = added or context }
 end
 
 --- One rendered line as `virt_lines` chunks: each mark colours its own byte
