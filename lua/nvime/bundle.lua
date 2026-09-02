@@ -204,8 +204,9 @@ function M.render(parts)
   })
   section(lines, string.format('debug log — last %d lines', M.LOG_LINES), fenced(status.tail or {}))
 
-  -- Redacted on top of the allow-list: two independent reasons a secret would
-  -- have to survive to reach the file.
+  -- Redacted on top of the allow-list: two independent rules a secret would
+  -- have to survive to reach the file — this section names its fields, and the
+  -- log's redactor writes a string only under a name it has vouched for.
   section(lines, 'big change', session_lines(log.redact(parts.session)))
   section(
     lines,
@@ -295,7 +296,9 @@ function M.probe_versions(claude, root, cb)
     return function(output, err)
       -- A probe that missed its deadline says so: an empty row would read as
       -- "not installed", which is a different bug report entirely.
-      facts[key] = output or ((err == nil or err == '') and '(timed out)' or ('(failed: ' .. err .. ')'))
+      -- A probe's stderr is machine output, not the reader's text — but it is
+      -- unbounded, so the same clip the log uses bounds it here too.
+      facts[key] = output or ((err == nil or err == '') and '(timed out)' or ('(failed: ' .. log.clip(err) .. ')'))
       done()
     end
   end

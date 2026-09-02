@@ -59,11 +59,16 @@ export class Dispatcher {
   async #dispatch(request: RequestFrame): Promise<void> {
     const handler = this.#handlers.get(request.method);
     if (handler === undefined) {
+      // Logged like any other request: a plugin/sidecar version mismatch is
+      // what this log exists to diagnose, and a reply with no request above it
+      // reads as a frame the timeline lost.
+      this.#log?.request(request.method, request.id, request.params);
       this.#write({
         id: request.id,
         ok: false,
         error: rpcError('unknown_method', `unknown method ${request.method}`),
       });
+      this.#log?.reply(request.method, request.id, 0, 'unknown_method');
       return;
     }
     this.#inflight += 1;

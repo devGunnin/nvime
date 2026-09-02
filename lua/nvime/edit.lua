@@ -365,9 +365,9 @@ function M.send(text)
   surface():begin_stream('claude', 'NvimeAgentBody')
   surface():start_activity()
 
-  -- `scope` is a content key — BigSpec's scope lines are the reader's own
-  -- words — so the RPC line collapses this run's target too. Named here in
-  -- fields of its own, rather than loosening a key two meanings share.
+  -- The log writes a string only under a name it has vouched for, and `scope`
+  -- is not one — BigSpec's scope lines are the reader's own words. Named here
+  -- in fields that are vouched for, rather than vouching for a shared name.
   local log = require('nvime.log')
   if log.enabled('info') then
     local range = scope.startLine ~= nil and string.format('%d-%d', scope.startLine, scope.endLine) or nil

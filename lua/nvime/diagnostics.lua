@@ -140,7 +140,7 @@ local function report_node(entries, probed)
     return nil
   end
   if probed.version == nil then
-    fail(entries, 'could not run node: ' .. tostring(probed.err))
+    fail(entries, 'could not run node: ' .. require('nvime.log').clip(tostring(probed.err)))
     return nil
   end
   local major = tonumber(probed.version:match('^v(%d+)'))
@@ -226,6 +226,17 @@ local function check_sidecar(entries)
   proc:write('{"id":2,"method":"shutdown","params":{}}\n')
   proc:write(nil)
   local done = proc:wait(PROBE_TIMEOUT_MS)
+  -- `wait` answers nil on a missed deadline. A sidecar that never replies is
+  -- exactly the state this check exists to describe, so it must be a row, not
+  -- a crash of the command asking.
+  if done == nil then
+    fail(
+      entries,
+      string.format('the sidecar timed out after %dms', PROBE_TIMEOUT_MS),
+      'check that node and the claude CLI respond, then :Nvime doctor again'
+    )
+    return
+  end
   local ping = nil
   local organization = nil
   for _, line in ipairs(vim.split(done.stdout or '', '\n', { plain = true, trimempty = true })) do
@@ -237,7 +248,7 @@ local function check_sidecar(entries)
     end
   end
   if ping == nil or ping.ok ~= true then
-    fail(entries, 'the sidecar did not answer a ping', vim.trim(done.stderr or ''))
+    fail(entries, 'the sidecar did not answer a ping', require('nvime.log').clip(vim.trim(done.stderr or '')))
     return
   end
   ok(entries, 'sidecar answers: nvime-agent ' .. tostring(ping.result.agentVersion))
@@ -268,7 +279,11 @@ local function report_git_identity(entries, probed)
   -- A probe that never answered is a different problem with a different fix
   -- from a repository that genuinely has no identity set.
   if probed.err ~= nil then
-    fail(entries, 'git identity could not be read: ' .. probed.err, 'check that `git` responds: git config user.name')
+    fail(
+      entries,
+      'git identity could not be read: ' .. require('nvime.log').clip(probed.err),
+      'check that `git` responds: git config user.name'
+    )
     return
   end
   if probed.name == nil or probed.name == '' or probed.email == nil or probed.email == '' then
@@ -477,7 +492,7 @@ local function assemble(probed, skip_sidecar)
   check_keymaps(entries)
   local exit = agent().last_exit()
   if exit ~= nil and exit.code ~= 0 then
-    warn(entries, 'the sidecar exited with code ' .. tostring(exit.code), exit.stderr)
+    warn(entries, 'the sidecar exited with code ' .. tostring(exit.code), require('nvime.log').clip(exit.stderr or ''))
   end
   facts.node = report_node(entries, probed.node)
   if facts.node ~= nil and check_build(entries) then

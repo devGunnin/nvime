@@ -52,6 +52,12 @@ local TIMESTAMP_BYTES = 24
 --- Another process's log is pruned once it is this old AND its pid is gone.
 local PRUNE_AFTER_SECONDS = 7 * 24 * 60 * 60
 
+--- How much of each file a merged read looks at. The live log is capped at
+--- 5 MB and its rotated half at another 5 MB, PER PROCESS — reading all of it
+--- to render 200 lines is work nobody asked for. A window that starts
+--- mid-line drops that line: it belongs to the part not read.
+M.MAX_TAIL_BYTES = 256 * 1024
+
 --- DENY BY DEFAULT. A string is written out only under a name on this list;
 --- every other string is recorded as its size. Four rounds of enumerating what
 --- to HIDE each ended one name short of the payload — the runner record, then
@@ -60,9 +66,12 @@ local PRUNE_AFTER_SECONDS = 7 * 24 * 60 * 60
 --- name been vouched for".
 ---
 --- Every entry is a name that can only ever hold nvime's own vocabulary, an
---- identifier, or a filesystem path. Nothing here can carry a sentence the
---- reader wrote. `reason` is deliberately ABSENT despite looking enum-shaped:
---- the policy layer builds it as prose around an error message and a path.
+--- identifier, or a filesystem path, AND has a producer that vouches for it —
+--- a name nothing produces is a free pass for whatever gets it next. Refused
+--- after checking the producers: `reason` (the policy layer builds it as prose
+--- around an error message and a path), `origin` (a steer's label is whatever
+--- the peer sent; it is only ever rendered), `model` (typed at `:Nvime
+--- model`), and `outcome` (nothing emits it).
 local SAFE_KEYS = {
   -- Identifiers. Correlating a stuck run is the whole point of the log.
   id = true,
@@ -74,7 +83,6 @@ local SAFE_KEYS = {
   policyId = true,
   session = true,
   target = true,
-  origin = true,
   seq = true,
   -- nvime's own vocabulary: closed sets, all of them defined in this codebase.
   state = true,
@@ -87,14 +95,13 @@ local SAFE_KEYS = {
   level = true,
   code = true,
   cause = true,
-  outcome = true,
   difficulty = true,
   effort = true,
   op = true,
   -- The tool's NAME (Read/Write/Bash), never its arguments or its summary.
   tool = true,
-  -- Model ids and version strings: vendor vocabulary, not the reader's.
-  model = true,
+  -- Version strings are the vendor's; a model id is NOT here, because
+  -- `:Nvime model` has the reader type one by hand.
   version = true,
   -- Object names: hex, and nothing else.
   sha = true,
@@ -596,6 +603,28 @@ function M.files()
   return out
 end
 
+--- The last `M.MAX_TAIL_BYTES` of one file, as whole lines. A window that
+--- begins mid-line drops that first partial line — it belongs to the part not
+--- read, and half a line is not a record.
+--- @param path string
+--- @return string[]
+local function tail_lines(path)
+  local file = io.open(path, 'r')
+  if file == nil then
+    return {}
+  end
+  local size = file:seek('end')
+  local from = math.max(size - M.MAX_TAIL_BYTES, 0)
+  file:seek('set', from)
+  local body = file:read('*a') or ''
+  file:close()
+  local lines = vim.split(body, '\n', { plain = true, trimempty = true })
+  if from > 0 then
+    table.remove(lines, 1)
+  end
+  return lines
+end
+
 --- The last `count` lines across every process's log, oldest first — what
 --- `:Nvime log` renders and what the bundle attaches. Merged on the timestamp
 --- each line starts with: one editor's file is only half the story when two
@@ -606,14 +635,10 @@ function M.tail(count)
   assert(type(count) == 'number' and count > 0, 'log.tail needs a positive count')
   local entries = {}
   for rank, path in ipairs(M.files()) do
-    local file = io.open(path, 'r')
-    if file ~= nil then
-      local index = 0
-      for line in file:lines() do
-        index = index + 1
-        entries[#entries + 1] = { at = line:sub(1, TIMESTAMP_BYTES), rank = rank, index = index, line = line }
-      end
-      file:close()
+    local index = 0
+    for _, line in ipairs(tail_lines(path)) do
+      index = index + 1
+      entries[#entries + 1] = { at = line:sub(1, TIMESTAMP_BYTES), rank = rank, index = index, line = line }
     end
   end
   -- Not a stable sort, so the comparison is made total: same timestamp falls

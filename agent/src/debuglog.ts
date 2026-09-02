@@ -53,8 +53,12 @@ const SECRET_PARTS = ['token', 'secret', 'password', 'passwd', 'authorization', 
  * for". Kept in step with `lua/nvime/log.lua`'s list, which is the same rule
  * on the other half of the same file.
  *
- * `reason` is deliberately absent despite looking enum-shaped: the policy
- * layer builds it as prose around an error message and a path.
+ * Every entry also needs a producer that vouches for it — a name nothing
+ * produces is a free pass for whatever gets it next. Refused after checking
+ * the producers: `reason` (the policy layer builds it as prose around an error
+ * message and a path), `origin` (a steer's label is whatever the peer sent;
+ * `runsock` only ever renders it), `model` (typed at `:Nvime model`), and
+ * `outcome` (nothing emits it).
  */
 export const SAFE_KEYS: readonly string[] = [
   // Identifiers. Correlating a stuck run is the whole point of the log.
@@ -67,7 +71,6 @@ export const SAFE_KEYS: readonly string[] = [
   'policyId',
   'session',
   'target',
-  'origin',
   'seq',
   // nvime's own vocabulary: closed sets, all defined in this codebase.
   'state',
@@ -80,14 +83,13 @@ export const SAFE_KEYS: readonly string[] = [
   'level',
   'code',
   'cause',
-  'outcome',
   'difficulty',
   'effort',
   'op',
   // The tool's NAME, never its arguments or its summary.
   'tool',
-  // Model ids and version strings: vendor vocabulary, not the reader's.
-  'model',
+  // Version strings are the vendor's; a model id is NOT here, because
+  // `:Nvime model` has the reader type one by hand.
   'version',
   // Object names: hex, and nothing else.
   'sha',

@@ -109,6 +109,29 @@ describe('deny by default: a string needs a safe name', function()
   end)
 end)
 
+describe('deny by default: a safe key needs a producer that vouches for it', function()
+  -- F1 MEDIUM: `origin` was allowed as "which editor sent a steer". It is not
+  -- machine identity on the way IN: `runsock.ts` accepts any string as a
+  -- steer's `from` and only ever renders it, so a peer chooses the label. The
+  -- plugin only ever type-checks it — the value is never read.
+  it('denies a steer origin, which a peer chooses the text of', function()
+    local bytes, rendered = capture(function()
+      log.event('big.steer', { state = 'queued', origin = 'from-' .. MARKER, mine = false })
+    end)
+    ok(bytes:find(MARKER, 1, true) == nil, 'a peer-supplied label is not machine identity: ' .. bytes)
+    ok(rendered:find(MARKER, 1, true) == nil, 'and the bundle attaches the log verbatim')
+    ok(bytes:find('queued', 1, true) ~= nil, 'the steer state is nvime’s own and stays')
+  end)
+
+  -- F7: a safe name with no producer is a free pass for whatever gets that
+  -- name next; `model` is typed by hand at `:Nvime model`.
+  it('denies a name nothing produces, and one the reader types', function()
+    local redacted = log.redact({ outcome = MARKER, model = 'my-' .. MARKER .. '-model' })
+    eq('<7 chars>', redacted.outcome, 'no producer means no vouching')
+    eq('<16 chars>', redacted.model, 'a model id is typed by hand at :Nvime model')
+  end)
+end)
+
 describe('deny by default: the timeline stays readable', function()
   it('renders every safe key that carries a string', function()
     for _, key in ipairs(log.SAFE_KEYS) do

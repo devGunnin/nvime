@@ -353,6 +353,90 @@ describe('a probe that timed out says so', function()
   end)
 end)
 
+describe('the doctor survives a sidecar that never answers', function()
+  -- F2 MEDIUM: `run()` was guarded against `proc:wait` answering nil on a
+  -- missed deadline, but `check_sidecar` indexes `done.stdout` directly — so
+  -- `:Nvime doctor` and `:checkhealth` still crashed on a hung sidecar, which
+  -- is exactly the state they exist to describe.
+  it('reports a hung sidecar as a timeout instead of raising', function()
+    local dir = scratch_dir()
+    local shim = dir .. '/node'
+    local handle = assert(io.open(shim, 'w'))
+    handle:write('#!/bin/sh\ncase "$1" in --version) echo v22.0.0 ;; *) sleep 30 ;; esac\n')
+    handle:close()
+    vim.uv.fs_chmod(shim, 493)
+    local dist = dir .. '/dist.js'
+    assert(io.open(dist, 'w')):close()
+
+    local config = require('nvime.config')
+    local agent = require('nvime.agent')
+    local real_dist = agent.dist_path
+    agent.dist_path = function()
+      return dist
+    end
+    local entries
+    local finished, err = pcall(function()
+      config.setup({ agent = { node = shim } })
+      entries = require('nvime.diagnostics').run(vim.uv.cwd(), { probe_timeout_ms = 300 })
+    end)
+    agent.dist_path = real_dist
+    config.setup()
+    ok(finished, 'a hung sidecar must not raise out of the doctor: ' .. tostring(err))
+    local said = nil
+    for _, entry in ipairs(entries or {}) do
+      if entry.message:find('sidecar', 1, true) ~= nil then
+        said = entry.message
+      end
+    end
+    ok(said ~= nil, 'the sidecar check must report something: ' .. vim.inspect(entries))
+    ok(said:find('timed out', 1, true) ~= nil, said)
+  end)
+end)
+
+describe('the log tail is bounded', function()
+  -- F4 LOW: `M.tail` read every byte of every file. The live log is capped at
+  -- 5 MB and the rotated `.1` at another 5 MB, per process — an editor that
+  -- has been up for a week could ask `:Nvime log` to read tens of megabytes
+  -- to render two hundred lines.
+  it('reads only the tail of a file larger than the bound', function()
+    local path = scratch_dir() .. '/nvime-' .. vim.uv.os_getpid() .. '.log'
+    local handle = assert(io.open(path, 'w'))
+    local filler = string.rep('x', 512)
+    for index = 1, 900 do
+      handle:write(string.format('2026-01-01T00:00:00.%03dZ old %d %s\n', index % 1000, index, filler))
+    end
+    handle:write('2026-01-02T00:00:00.000Z the newest line\n')
+    handle:close()
+    ok(vim.uv.fs_stat(path).size > log.MAX_TAIL_BYTES, 'the fixture must exceed the bound')
+
+    log.set_level('info', path)
+    log.close()
+    local tail = log.tail(5)
+    eq(5, #tail)
+    ok(tail[5]:find('the newest line', 1, true) ~= nil, tail[5])
+    ok(tail[1]:find('old ', 1, true) ~= nil, tail[1])
+    -- The bound is what makes this cheap; assert it exists and is sane.
+    ok(log.MAX_TAIL_BYTES <= 256 * 1024, 'the per-file tail bound must stay small')
+    log.set_level('off')
+  end)
+
+  it('never returns a line the window only half contains', function()
+    local path = scratch_dir() .. '/nvime-' .. vim.uv.os_getpid() .. '.log'
+    local handle = assert(io.open(path, 'w'))
+    handle:write(string.rep('y', log.MAX_TAIL_BYTES + 100) .. '\n')
+    handle:write('2026-01-02T00:00:00.000Z whole line\n')
+    handle:close()
+    log.set_level('info', path)
+    log.close()
+    local tail = log.tail(10)
+    for _, line in ipairs(tail) do
+      ok(line:find('yyyy', 1, true) == nil, 'a half-read line must be dropped, not rendered: ' .. line:sub(1, 40))
+    end
+    ok(tail[#tail]:find('whole line', 1, true) ~= nil, vim.inspect(tail))
+    log.set_level('off')
+  end)
+end)
+
 describe('clipping is UTF-8 safe', function()
   -- F13: the Lua cut was a raw byte slice, so a multi-byte character straddling
   -- the budget went into the log — and into the bundle's markdown — in pieces.

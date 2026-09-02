@@ -31,6 +31,24 @@ describe('Dispatcher', () => {
     assert.equal(seen, 42);
   });
 
+  // F6: an unknown method was answered but never logged, so a plugin/sidecar
+  // version mismatch — exactly what the log exists to diagnose — left a reply
+  // in the timeline with no request above it.
+  it('logs the request for a method it does not know', async () => {
+    const lines: string[] = [];
+    const log = {
+      enabled: () => true,
+      request: (method: string, id: number) => lines.push(`req ${method} #${id}`),
+      reply: (method: string, id: number, ms: number, code?: string) =>
+        lines.push(`rep ${method} #${id} ${code ?? 'ok'}`),
+    };
+    const frames: OutgoingFrame[] = [];
+    const dispatcher = new Dispatcher((frame) => frames.push(frame), log as never);
+    dispatcher.handleLine('{"id":9,"method":"nope"}');
+    await settled();
+    assert.deepEqual(lines, ['req nope #9', 'rep nope #9 unknown_method'], lines.join(' | '));
+  });
+
   it('reports an unknown method against its own id', async () => {
     const h = harness();
     h.dispatcher.handleLine('{"id":2,"method":"nope"}');

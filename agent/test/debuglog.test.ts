@@ -377,3 +377,22 @@ describe('DebugLog round-5: deny by default', () => {
     }
   });
 });
+
+describe('DebugLog round-6: a safe key needs a producer', () => {
+  const MARKER = 'hunter2';
+
+  // F1: `runsock.ts` accepts any string as a steer's `from` and only ever
+  // renders it, so the label is the peer's, not machine identity.
+  it('denies a steer origin, which a peer chooses the text of', () => {
+    const rendered = renderParams({ state: 'queued', origin: `from-${MARKER}`, mine: false });
+    assert.ok(!rendered.includes(MARKER), rendered);
+    assert.ok(rendered.includes('queued'), 'the steer state is nvime’s own and stays');
+  });
+
+  // F7: a safe name with no producer is a free pass for whatever gets that
+  // name next; `model` is typed by hand at `:Nvime model`.
+  it('denies a name nothing produces, and one the reader types', () => {
+    assert.ok(!renderParams({ outcome: MARKER }).includes(MARKER));
+    assert.ok(!renderParams({ model: `my-${MARKER}-model` }).includes(MARKER));
+  });
+});
