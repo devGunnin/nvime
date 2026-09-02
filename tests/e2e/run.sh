@@ -325,8 +325,12 @@ reap_scenario() {
     kill -KILL "$runner" 2>/dev/null || true
   done
   # And the runner's own group, so a `claude` that outlived it is not orphaned
-  # and left spending. The group's id is the pid the store already vouched for,
-  # so this is no wider than the kill above.
+  # and left spending. Sampled before the TERM on purpose: once the leader is
+  # gone it can no longer name the group its orphan is in — which is the case
+  # this exists for. The cost is that nothing pins the id in between, and a
+  # recycled pgid would take a stranger's whole group, not one stray process.
+  # No fix without giving up the orphan: re-checking at kill time finds the
+  # leader already gone exactly when the sweep is needed.
   for leader in $leaders; do
     group_kill KILL "$leader"
   done
@@ -364,14 +368,18 @@ trap 'on_signal terminated 143' TERM
 trap 'if [ -n "$current_pid" ]; then stop_everything "exiting early"; fi' EXIT
 
 # Waits out `pid` for at most `limit` seconds, leaving the exit status — or
-# 124 for a missed deadline, the way `timeout` reports one — in `scenario_status`.
+# 124 for a missed deadline, the way `timeout` reports one — in `scenario_status`,
+# and whether it already swept the scenario's group in `scenario_reaped`.
 # Not a command substitution: `wait` only works on the shell's own children.
 scenario_status=0
+scenario_reaped=0
 wait_bounded() {
   local pid="$1" limit="$2" work="$3" waited=0
+  scenario_reaped=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$limit" ]; then
       reap_scenario "$pid" "$work"
+      scenario_reaped=1
       wait "$pid" 2>/dev/null || true
       scenario_status=124
       return
@@ -423,8 +431,14 @@ for name in $wanted; do
   wait_bounded "$pid" "$limit" "$work"
   status="$scenario_status"
   # Whatever the verdict: nothing the scenario started may outlive it — not a
-  # wedged editor left in its group, not a build runner outside it.
-  reap_scenario "$pid" "$work"
+  # wedged editor left in its group, not a build runner outside it. On the
+  # deadline path the group is already swept, and with it the sentinel that
+  # pinned its id: naming it again would signal whatever now holds that number.
+  if [ "$scenario_reaped" = 1 ]; then
+    reap_scenario "" "$work"
+  else
+    reap_scenario "$pid" "$work"
+  fi
   current_pid=""
   elapsed=$(($(date +%s) - started))
 
