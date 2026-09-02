@@ -155,6 +155,66 @@ describe('palette.groups', function()
   end)
 end)
 
+--- The whole point of the role hierarchy: five foregrounds, each with one job,
+--- and no way to add a sixth without this failing.
+describe('palette role tiers', function()
+  it('paints every conversation group in exactly its own tier', function()
+    local p = palette.resolve()
+    local groups, tiers = palette.groups(p), palette.tiers(p)
+    for name, tier in pairs(palette.ROLE_GROUPS) do
+      ok(groups[name] ~= nil, name .. ' is pinned to a tier but never defined')
+      ok(tiers[tier] ~= nil, name .. ' names an unknown tier ' .. tier)
+      eq(tiers[tier], groups[name].fg, name .. ' must be the ' .. tier .. ' foreground')
+    end
+  end)
+
+  --- Code and inline code are set apart by their ground; emphasis by weight
+  --- and slant. Neither may quietly become another colour to learn.
+  it('sets code apart by ground and emphasis by weight, never by a new colour', function()
+    local groups = palette.groups(palette.resolve())
+    for _, name in ipairs({ 'NvimeCode', 'NvimeInlineCode' }) do
+      ok(groups[name].bg ~= nil, name .. ' must carry a ground')
+    end
+    eq(nil, groups.NvimeBold.fg)
+    eq(nil, groups.NvimeItalic.fg)
+    eq(true, groups.NvimeBold.bold)
+  end)
+
+  --- Every group a text-bearing surface names has to be accounted for: either
+  --- it is a reading tier, or it is one of the axes that are deliberately not
+  --- (the diff colours, the chrome of a bar, a chip's ground).
+  it('leaves no text group unaccounted for', function()
+    local outside = {
+      NvimeAdded = true,
+      NvimeBar = true,
+      NvimeBarDim = true,
+      NvimeBarKey = true,
+      NvimeBold = true,
+      NvimeChanged = true,
+      NvimeCursorLine = true,
+      NvimeEditAdd = true,
+      NvimeEditChange = true,
+      NvimeEditDelete = true,
+      NvimeEditFade = true,
+      NvimeItalic = true,
+      NvimeOk = true,
+      NvimeRemoved = true,
+      NvimeThreadAuto = true,
+      NvimeThreadClear = true,
+      NvimeThreadDefend = true,
+      NvimeThreadOpen = true,
+      NvimeUserBody = true,
+      NvimeAgentBody = true,
+    }
+    for name in pairs(palette.groups(palette.resolve())) do
+      ok(
+        palette.ROLE_GROUPS[name] ~= nil or outside[name],
+        name .. ' is neither a reading tier nor a declared exception'
+      )
+    end
+  end)
+end)
+
 describe('palette.apply', function()
   it('installs the groups it defines', function()
     palette.apply()

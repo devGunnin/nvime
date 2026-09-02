@@ -249,7 +249,7 @@ describe('review thread list', function()
     open_review({ block({ hunkIds = { 'h1.1', 'h2.1' }, files = { 'pool.py', 'notes.md' } }) })
     local pane = pane_text()
     eq('jitter strategy', pane[1])
-    eq('# behaviour', pane[2])
+    eq('why · behaviour', pane[2])
     eq('--- pool.py', pane[4])
     eq('@@ -1,2 +1,3 @@', pane[5])
     eq('+new', pane[8])
@@ -559,7 +559,7 @@ describe('the comprehension gate in the review', function()
     }
     open_review({ block({ state = 'resolved', rounds = rounds }) })
     local pane = table.concat(pane_text(), '\n')
-    ok(pane:match('── the gate ──') ~= nil, pane)
+    ok(pane:match('\nthe gate\n') ~= nil, pane)
     ok(pane:match('you · it retries') ~= nil, pane)
     ok(pane:match('41 · too generic') ~= nil, pane)
     ok(pane:match('hint: what collides%?') ~= nil, pane)
@@ -919,12 +919,48 @@ describe('the review’s own typography', function()
       end)
       :totable()
     eq({ 'NvimeUserBody', 'NvimeAgentBody', 'NvimeAgentBody' }, bands)
-    ok(
-      vim.iter(marks):any(function(mark)
-        return mark.hl == 'NvimeAgent' and mark.col ~= nil
-      end),
-      'the verdict uses the agent foreground instead of disappearing into grey metadata'
-    )
+  end)
+
+  --- github.com/devGunnin/nvime/issues/9: the pane rendered as an
+  --- undifferentiated grey/white mix, with the reader's own answer and the
+  --- grader's verdict in different colours for no reason a reader could learn.
+  --- One rule now: the LABEL carries the colour, the content is always body.
+  it('colours the label and leaves every piece of content in one body colour', function()
+    local _, marks = threads.gate_lines(block({
+      state = 'open',
+      rounds = {
+        round(41, {
+          answer = 'it retries',
+          result = { grade = 41, verdict = 'too generic', hint = 'what collides?', followup = 'and self.cap?' },
+        }),
+      },
+    }))
+    local by_group = {}
+    for _, mark in ipairs(marks) do
+      by_group[mark.hl] = (by_group[mark.hl] or 0) + 1
+    end
+    -- The gate header, plus the two guidance labels.
+    eq(3, by_group.NvimeDim)
+    eq(1, by_group.NvimeUser, 'the speaker label')
+    eq(1, by_group.NvimeWarn, 'the score')
+    eq(4, by_group.NvimeBody, 'the answer, the verdict, the hint and the follow-up')
+  end)
+
+  it('does not draw a rule across the pane to introduce the gate', function()
+    local lines = threads.gate_lines(block({ rounds = { round(90) } }))
+    eq('the gate', lines[2])
+    for _, line in ipairs(lines) do
+      ok(line:match('──') == nil, 'a rule survived: ' .. line)
+    end
+  end)
+
+  --- Context used to render in the same white as an added line, leaving a
+  --- faint band as the only thing telling the change from what surrounds it.
+  it('recedes diff context and gives an added or removed line its own colour', function()
+    eq('NvimeAdded', threads.hunk_fg('+    added'))
+    eq('NvimeRemoved', threads.hunk_fg('-    removed'))
+    eq('NvimeDim', threads.hunk_fg(' context'))
+    eq('NvimeDim', threads.hunk_fg('@@ -1,2 +1,3 @@'))
   end)
 
   it('bands a changed diff line, ignores context and the hunk marker', function()

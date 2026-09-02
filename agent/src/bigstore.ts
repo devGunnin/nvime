@@ -14,6 +14,7 @@ import {
 import { homedir, hostname } from 'node:os';
 import { basename, join } from 'node:path';
 import { DEFAULT_DIFFICULTY, isDifficulty, thresholdFor, type Difficulty } from './gate.js';
+import type { OptionsBlock } from './options.js';
 import { ProtocolError } from './protocol.js';
 import type { TriageBlock } from './triage.js';
 
@@ -107,6 +108,8 @@ export interface BigTurn {
   role: 'user' | 'agent';
   text: string;
   at: number;
+  /** The choice an agent turn offered, when its question was a choice. */
+  options?: OptionsBlock;
 }
 
 /**

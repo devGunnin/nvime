@@ -63,8 +63,38 @@ and nvime binds no global key until `keymaps.enabled = true`.
 
 ![Chat mid-stream, with a resumed transcript above it](assets/chat-dark.png)
 
-Streaming markdown, rendered as it arrives: headings, fenced code with the real
-grammar for its language, inline code, the tool calls the model is making.
+Streaming markdown, rendered as it arrives: headings, fenced code on its own
+ground, inline code, the tool calls the model is making. nvime classifies every
+line itself and paints nothing else over it, so a line never changes colour
+between streaming and settled, and `**bold**`, `` `code` `` and `~~struck~~`
+read as what they mean rather than as their own punctuation. A `---` separator
+becomes a short gap marker, not a rule across the panel.
+
+**A question with alternatives becomes a list you pick from.** When the model's
+question is a choice rather than an open one, it offers the alternatives and the
+panel renders them numbered, inline in the conversation:
+
+```
+  Which configuration mechanism should greet.py use?
+  1  CLI flag
+     Add argparse so `greet.py --greeting hi` sets the text; no new files.
+  2  Environment variable
+     Read GREET_MESSAGE via os.environ with a default; no argument parsing.
+  3  Config file
+     Most flexible, but adds I/O, a file format and error handling.
+  1-3 picks · ]o returns here · o for something else
+```
+
+Press the digit and it answers, echoing your pick into the transcript as
+`→ 2: Environment variable` — but only while your cursor sits on the block's
+own rows; anywhere else in the scrollback a digit is the ordinary vim count it
+always is, so a count like `12G` still lands on line 12 rather than being
+swallowed as a pick. `]o` jumps the cursor onto the pending choice from
+wherever you are, prompt included. Some questions take several answers at
+once; those toggle, and `<CR>` sends them, scoped the same way. `o` — or just
+typing in the prompt — answers in your own words instead, and typing the
+number works too. The digit, `<CR>` and `o` keys are buffer-local to the panel
+and released the moment you answer.
 
 **Context is deliberate.** Write `@path/to/file` or `@path/to/dir` in a prompt
 and nvime attaches it — a file as its contents, a directory as a bounded
@@ -432,6 +462,7 @@ Off until `keymaps.enabled = true`.
 | `<C-s>` | prompt, insert | send (so `<CR>` still inserts a newline) |
 | `<C-n>` / `<C-r>` | chat panel | new conversation · resume one |
 | `<C-c>` | panel | stop the running turn |
+| `]o` | chat/big panel | jump to the pending choice |
 | `q` | scrollback | close |
 | `y` / `n` / `<Esc>` | approval float | allow once / deny / deny |
 | `<CR>` / `r` / `d` | changeset | open the file · revert the hunk · unified diff |

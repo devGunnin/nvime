@@ -10,6 +10,7 @@
 --- merge while anything is open.
 local agent = require('nvime.agent')
 local models = require('nvime.models')
+local panel = require('nvime.panel')
 local shape = require('nvime.text')
 
 local M = {}
@@ -144,49 +145,61 @@ local CONTINUE = string.rep(' ', vim.fn.strdisplaywidth(SPEAKER))
 --- @param block table
 --- @return string[] lines
 --- @return table[] marks each { row = 0-based within these lines, col, end_col, hl }
+--- One rule per line: the LABEL carries the colour, the content is always body.
+--- That is the whole separation — grey means "this names something", never
+--- "this is more text" — and it is why a verdict no longer reads as an aside
+--- while the answer it judges reads as the loudest thing on the pane.
 function M.gate_lines(block)
   local rounds = (block or {}).rounds or {}
   if #rounds == 0 then
     return {}, {}
   end
   local cleared = (block or {}).state ~= 'open'
-  local lines, marks = { '', '── the gate ──' }, {}
+  local lines, marks = { '', 'the gate' }, {}
   local function mark(col, end_col, hl)
     marks[#marks + 1] = { row = #lines - 1, col = col, end_col = end_col, hl = hl }
   end
+  --- Tints the whole row's background, under whatever foreground `labelled`
+  --- or `mark` paints on top — the same per-speaker surface the conversation
+  --- panel uses, extended into the gate.
   local function band(hl)
     marks[#marks + 1] = { row = #lines - 1, hl = hl }
+  end
+  --- A labelled line: the label in `hl`, everything after it in body.
+  local function labelled(indent, label, body, hl)
+    lines[#lines + 1] = indent .. label .. body
+    mark(0, #indent + #label, hl)
+    mark(#indent + #label, #lines[#lines], 'NvimeBody')
   end
   mark(0, #lines[2], 'NvimeDim')
 
   for index, round in ipairs(rounds) do
     for at, line in ipairs(vim.split(round.answer or '', '\n', { plain = true })) do
-      lines[#lines + 1] = (at == 1 and SPEAKER or CONTINUE) .. line
-      band('NvimeUserBody')
       if at == 1 then
-        mark(0, #SPEAKER, 'NvimeUser')
+        labelled('', SPEAKER, line, 'NvimeUser')
+      else
+        lines[#lines + 1] = CONTINUE .. line
+        mark(0, #lines[#lines], 'NvimeBody')
       end
+      band('NvimeUserBody')
     end
     if round.result == nil then
       lines[#lines + 1] = '  ! ' .. (round.ungraded or 'this answer was not graded')
-      band('NvimeAgentBody')
       mark(0, #lines[#lines], 'NvimeError')
+      band('NvimeAgentBody')
       lines[#lines + 1] = '  the thread stays open — answer again'
-      band('NvimeAgentBody')
       mark(0, #lines[#lines], 'NvimeDim')
-    else
-      local grade = string.format('  %d', round.result.grade or 0)
-      lines[#lines + 1] = string.format('%s · %s', grade, round.result.verdict or '')
       band('NvimeAgentBody')
+    else
       -- Green only for the round that actually cleared the thread; every
       -- other score is a score that was not enough.
-      mark(0, #grade, (cleared and index == #rounds) and 'NvimeOk' or 'NvimeWarn')
-      mark(#grade, #lines[#lines], 'NvimeAgent')
+      local grade = string.format('%d · ', round.result.grade or 0)
+      labelled('  ', grade, round.result.verdict or '', (cleared and index == #rounds) and 'NvimeOk' or 'NvimeWarn')
+      band('NvimeAgentBody')
       for _, entry in ipairs({ { 'hint: ', round.result.hint }, { 'next: ', round.result.followup } }) do
         if entry[2] ~= nil and entry[2] ~= '' then
-          lines[#lines + 1] = '  ' .. entry[1] .. entry[2]
+          labelled('  ', entry[1], entry[2], 'NvimeDim')
           band('NvimeAgentBody')
-          mark(0, 2 + #entry[1], 'NvimeDim')
         end
       end
     end
@@ -217,6 +230,22 @@ function M.hunk_band(line)
   return nil
 end
 
+--- The foreground one raw diff line reads in. Without it a context line and an
+--- added line are the same white, and the reader has only a faint band to tell
+--- what the change actually is; context recedes so the change stands out.
+--- @param line string
+--- @return string highlight group
+function M.hunk_fg(line)
+  local head = line:sub(1, 1)
+  if head == '+' then
+    return 'NvimeAdded'
+  end
+  if head == '-' then
+    return 'NvimeRemoved'
+  end
+  return 'NvimeDim'
+end
+
 --- The hunks of one thread, sliced out of the captured diff, then its gate.
 --- @param block table
 --- @return string[] lines
@@ -228,8 +257,12 @@ function M.pane_lines(block)
   local lines = { block.title, '' }
   local marks = { { row = 0, col = 0, end_col = #block.title, hl = 'NvimeHeading' } }
   if block.rationale ~= nil and block.rationale ~= '' then
-    lines = { block.title, '# ' .. block.rationale, '' }
-    marks[#marks + 1] = { row = 1, col = 0, end_col = #lines[2], hl = 'NvimeDim' }
+    -- `why · ` rather than the old `# `: a hash right above a diff reads as
+    -- part of it, and the label says whose note this is.
+    local label = 'why · '
+    lines = { block.title, label .. block.rationale, '' }
+    marks[#marks + 1] = { row = 1, col = 0, end_col = #label, hl = 'NvimeDim' }
+    marks[#marks + 1] = { row = 1, col = #label, end_col = #lines[2], hl = 'NvimeBody' }
   end
   local shown_file = nil
   for _, id in ipairs(block.hunkIds or {}) do
@@ -245,10 +278,12 @@ function M.pane_lines(block)
       end
       if hunk.note ~= nil then
         lines[#lines + 1] = hunk.note
+        marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #hunk.note, hl = 'NvimeDim' }
       else
         for at = hunk.offset + 1, hunk.offset + hunk.lineCount do
           local line = view.diff_lines[at] or ''
           lines[#lines + 1] = line
+          marks[#marks + 1] = { row = #lines - 1, col = 0, end_col = #line, hl = M.hunk_fg(line) }
           local band = M.hunk_band(line)
           if band ~= nil then
             marks[#marks + 1] = { row = #lines - 1, hl = band }
@@ -1163,7 +1198,9 @@ local function build_tab()
   vim.wo[view.pane_win].wrap = true
   vim.wo[view.pane_win].linebreak = true
   vim.wo[view.pane_win].breakindent = true
-  vim.wo[view.pane_win].breakindentopt = 'shift:2'
+  -- Same shift as the main panel: the "you · " answer text wraps next to
+  -- its own two-space-indented grade/hint lines, the same aliasing risk.
+  vim.wo[view.pane_win].breakindentopt = 'shift:' .. panel.WRAP_SHIFT
   vim.wo[view.tree_win].cursorline = true
 
   local group = vim.api.nvim_create_augroup('NvimeThreads', { clear = true })

@@ -334,6 +334,143 @@ describe('closing the panel', function()
   end)
 end)
 
+--- The reply the sidecar hands back when the model offered a choice.
+local function done_with_options(block)
+  return {
+    err = nil,
+    result = {
+      sessionId = 's1',
+      usage = { output = 1 },
+      costUsd = 0,
+      options = block,
+    },
+  }
+end
+
+local function two_choices()
+  return { prompt = 'which retry?', options = { { label = 'fixed backoff' }, { label = 'exponential' } } }
+end
+
+describe('chat: a choice offered in the conversation', function()
+  it('renders the choice under the reply and answers it on a digit', function()
+    local dir = sandbox()
+    open_on(dir)
+    fake.replies['chat.send'] = done_with_options(two_choices())
+    chat.send('how should retries work?')
+
+    local rendered = scrollback()
+    ok(vim.tbl_contains(rendered, '  1  fixed backoff'), vim.inspect(rendered))
+    ok(chat.state().offer ~= nil, 'the choice is live until it is answered')
+
+    fake.requests = {}
+    fake.replies['chat.send'] = done_with_options(nil)
+    vim.api.nvim_set_current_win(panel.get('chat').win)
+    vim.api.nvim_feedkeys('2', 'x', false)
+    eq('2: exponential', sent('chat.send').params.prompt)
+    ok(vim.tbl_contains(scrollback(), '→ 2: exponential'), 'the pick reads back as the reply it was')
+    eq(nil, chat.state().offer, 'answering retires the choice')
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('reads a typed number as the pick it plainly is', function()
+    local dir = sandbox()
+    open_on(dir)
+    fake.replies['chat.send'] = done_with_options(two_choices())
+    chat.send('how should retries work?')
+    fake.requests = {}
+    chat.send('1')
+    eq('1: fixed backoff', sent('chat.send').params.prompt)
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  it('sends anything else as the reader’s own words, and retires the choice', function()
+    local dir = sandbox()
+    open_on(dir)
+    fake.replies['chat.send'] = done_with_options(two_choices())
+    chat.send('how should retries work?')
+    fake.requests = {}
+    fake.replies['chat.send'] = done_with_options(nil)
+    chat.send('neither — just fail loudly')
+    eq('neither — just fail loudly', sent('chat.send').params.prompt)
+    eq(nil, chat.state().offer)
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  --- `M.offer` retires whatever was open before attaching a new block, so a
+  --- caller cannot leave a stale handle's spare keys bound no matter how it
+  --- got there — not just on the one path (`M.send`) that happens to retire
+  --- first today.
+  it('retires a still-open choice before offering a new one, so its stray keys go dead', function()
+    local dir = sandbox()
+    open_on(dir)
+    local function block(count)
+      local options = {}
+      for index = 1, count do
+        options[index] = { label = 'choice ' .. index }
+      end
+      return { options = options }
+    end
+
+    chat.offer(block(9))
+    vim.api.nvim_set_current_win(panel.get('chat').win)
+    ok(vim.fn.maparg('9', 'n') ~= '', 'the first block bound all nine digits')
+
+    chat.offer(block(2))
+    ok(vim.fn.maparg('9', 'n') == '', 'the retired block gives its spare digit back')
+    ok(vim.fn.maparg('2', 'n') ~= '', 'the new block is live')
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  --- <CR> used to answer (or swallow) from anywhere in the scrollback for a
+  --- multi-select question; now it is scoped like the digits, and `]o` is the
+  --- reader's way back onto the block from wherever they scrolled to.
+  it('scopes <CR> to the block, and lets ]o jump onto it from anywhere', function()
+    local dir = sandbox()
+    open_on(dir)
+    fake.replies['chat.send'] = done_with_options({
+      prompt = 'which retries?',
+      multi = true,
+      options = { { label = 'fixed backoff' }, { label = 'exponential' } },
+    })
+    chat.send('how should retries work?')
+
+    local win = panel.get('chat').win
+    vim.api.nvim_set_current_win(win)
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+
+    vim.api.nvim_feedkeys('\r', 'x', false)
+    ok(chat.state().offer ~= nil, '<CR> far from the block must not have answered it')
+    eq(2, vim.api.nvim_win_get_cursor(win)[1], '<CR> must still move the cursor down a line')
+
+    chat.jump_to_offer()
+    vim.api.nvim_feedkeys('1', 'x', false)
+    fake.requests = {}
+    fake.replies['chat.send'] = done_with_options(nil)
+    vim.api.nvim_feedkeys('\r', 'x', false)
+    eq('1: fixed backoff', sent('chat.send').params.prompt, '<CR> answers once ]o put the cursor on the block')
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+
+  --- The block crosses a process boundary. An unusable one is not a choice —
+  --- the prose question is already in the transcript and still gets answered.
+  it('offers nothing when the sidecar sent no usable block', function()
+    local dir = sandbox()
+    open_on(dir)
+    for _, bad in ipairs({ vim.NIL, {}, { options = { { label = 'only' } } } }) do
+      fake.replies['chat.send'] = done_with_options(bad ~= vim.NIL and bad or nil)
+      chat.send('ask me something')
+      eq(nil, chat.state().offer, vim.inspect(bad))
+    end
+    panel.close('chat')
+    vim.fn.delete(dir, 'rf')
+  end)
+end)
+
 -- `chat.lua` captured the stub when it was required; every later spec gets the
 -- real module back.
 package.loaded['nvime.agent'] = real_agent

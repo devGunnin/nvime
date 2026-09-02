@@ -20,8 +20,9 @@
 - **Speaker surfaces that survive light and dark themes (#9).** User prose,
   agent prose and tool activity now occupy distinct, subtle full-width bands
   blended from the active colorscheme. The same visual grammar reaches the
-  comprehension gate, while fenced code keeps its stronger code background
-  and syntax colours.
+  comprehension gate, while fenced code keeps its code background; syntax
+  colours inside fences are currently off in panels because colours never
+  change after a line is read, and will return painted-once-at-commit (planned).
 
 - **The review tab says what it is doing.** `R`, `M`, `a`, `r`, `e` and `X` all
   run through one indicator: past ~300ms the left bar spins with what is
@@ -34,7 +35,35 @@
   runner said "another editor is driving this change", which reads as a dead
   end when it is your rebase still going. It now says the change is still
   running outside the editor, and what it is running.
-
+- **A question with alternatives is a list you pick from.** When the agent's
+  question is a choice rather than an open one — in big-change intake and in
+  chat — it offers the alternatives and the panel renders them numbered, inline
+  in the conversation. `1`-`9` answers, a multiple-choice question toggles and
+  sends on `<CR>`, `o` (or just typing) answers in your own words, and typing
+  the number works too — but only while the cursor sits on the block's own
+  rows, so a digit anywhere else in the scrollback stays the ordinary vim count
+  it always is; `]o` jumps to the pending choice from wherever you are. Your
+  pick reads back into the transcript as `→ 2: Environment variable`, so the
+  history still reads as dialogue. The keys are buffer-local to the panel and
+  released the moment the question is answered. Intake carries the block in
+  its structured output; chat's model opts in with a fenced `nvime-options`
+  block the panel never shows.
+- **One text colour system, and no lines through anything.** The conversation
+  surface used to let vim's own markdown syntax paint under nvime's highlights:
+  `~~struck~~` came out with a literal rule through it, `---` drew a separator
+  across the panel, and a partial line was coloured differently from the
+  finished one. Panels now use a filetype with no syntax of their own and
+  classify every line themselves. Markup delimiters are concealed, a thematic
+  break is a short gap marker, and every text-bearing group across chat, intake,
+  edit and the review threads resolves to one of five roles — body, dim, accent,
+  role label, error — pinned by a test. In the review pane the label carries the
+  colour and the content is always body, so the grader's verdict no longer reads
+  as an aside while the answer it judges reads as the loudest thing on screen
+  (devGunnin/nvime#9).
+- **Intake says its answer once.** A structured turn's streamed text is a draft
+  of a payload the panel renders from the parsed result; it used to stream that
+  draft and then repeat the answer as a second `claude` turn, with the SDK's own
+  `StructuredOutput` tool announced in between. Both are suppressed.
 - **Big-change builds outlive the editor.** `big.build`, `big.revise` and
   `big.rebase` now run in a detached runner process instead of Neovim's
   sidecar. It holds the session's claim, owns the build's agent session, and

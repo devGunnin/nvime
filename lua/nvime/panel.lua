@@ -14,9 +14,9 @@ local M = {}
 local NS = vim.api.nvim_create_namespace('nvime.panel')
 local SPINNER_MS = 90
 
---- A line highlight has to sit UNDER the fence grammar (priority 120) and
---- under the span highlights, so a code block gets its background without
---- flattening the syntax colours painted on top of it.
+--- Under every inline span, which run at the default priority: the line's own
+--- ground and its base foreground are what a marker paints over, never the
+--- other way round.
 local LINE_PRIORITY = 90
 
 local Panel = {}
@@ -31,14 +31,26 @@ local function write_lines(buf, first, last, lines)
   vim.bo[buf].modifiable = false
 end
 
-local function apply_spans(buf, row, spans)
+local function apply_spans(buf, row, spans, priority)
   for _, span in ipairs(spans) do
     vim.api.nvim_buf_set_extmark(buf, NS, row, span[1], {
       end_col = span[2],
       hl_group = span[3],
+      priority = priority,
       strict = false,
     })
   end
+end
+
+--- The line's own foreground, under every inline span on it. A span, not a
+--- `line_hl_group`: a line highlight sits OVER an extmark's foreground, so
+--- pinning the body colour that way would flatten every heading and marker
+--- painted on top of it.
+local function apply_body_hl(buf, row, hl, text)
+  if hl == nil then
+    return
+  end
+  apply_spans(buf, row, { { 0, #text, hl } }, LINE_PRIORITY)
 end
 
 --- Paints `hl` across the whole rendered row, window width included.
@@ -51,6 +63,19 @@ local function apply_line_hl(buf, row, hl)
     priority = LINE_PRIORITY,
     strict = false,
   })
+end
+
+--- Renders the markup's own delimiters as nothing, so `**x**` reads as `x`
+--- while the buffer still holds the text a reader might yank. Only the
+--- scrollback window sets `conceallevel`; a panel without it just shows them.
+local function apply_conceal(buf, row, ranges)
+  for _, range in ipairs(ranges or {}) do
+    vim.api.nvim_buf_set_extmark(buf, NS, row, range[1], {
+      end_col = range[2],
+      conceal = '',
+      strict = false,
+    })
+  end
 end
 
 local function line_count(buf)
@@ -97,42 +122,6 @@ local function unpin_on_move(self)
   })
 end
 
---- Highlights a completed fenced block with the real grammar for its language.
---- Best-effort: an unknown or unavailable parser leaves the plain code colour.
---- `rows[n]` is the buffer row holding `lines[n]`; a tool line interjected mid
---- fence makes those non-contiguous, so parsed rows are never added to a base.
-local function highlight_fence(buf, rows, lines, lang)
-  if lang == nil or #lines == 0 then
-    return
-  end
-  local source = table.concat(lines, '\n')
-  local ok, parser = pcall(vim.treesitter.get_string_parser, source, lang)
-  if not ok or parser == nil then
-    return
-  end
-  local query = vim.treesitter.query.get(lang, 'highlights')
-  if query == nil then
-    return
-  end
-  local trees = parser:parse()
-  if trees == nil or trees[1] == nil then
-    return
-  end
-  for id, node in query:iter_captures(trees[1]:root(), source, 0, -1) do
-    local srow, scol, erow, ecol = node:range()
-    local start_row, end_row = rows[srow + 1], rows[erow + 1]
-    if start_row ~= nil and end_row ~= nil then
-      pcall(vim.api.nvim_buf_set_extmark, buf, NS, start_row, scol, {
-        end_row = end_row,
-        end_col = ecol,
-        hl_group = '@' .. query.captures[id],
-        priority = 120,
-        strict = false,
-      })
-    end
-  end
-end
-
 --- Appends `text` as a new last line. The very first write replaces the empty
 --- line every fresh buffer starts with, so the panel never opens with a gap.
 local function append_row(self, text)
@@ -146,11 +135,27 @@ local function append_row(self, text)
   return 0
 end
 
+--- What a thematic break is drawn as. A model reaching for `---` means "and
+--- now something else"; a rule the width of the panel says far more than that,
+--- so it becomes a short gap marker instead.
+local function rendered(info, text)
+  if info.kind ~= 'rule' then
+    return text
+  end
+  local dot = require('nvime.icons').get().dot
+  return '  ' .. dot .. ' ' .. dot .. ' ' .. dot
+end
+
 --- Appends one already-classified line and returns the row it landed on.
+--- A line the classifier re-renders carries no columns of its own (only a
+--- thematic break does, and it has neither spans nor conceal ranges).
 local function commit(self, text, info)
-  local row = append_row(self, text)
+  local rendered_text = rendered(info, text)
+  local row = append_row(self, rendered_text)
   apply_line_hl(self.buf, row, info.line_hl)
+  apply_body_hl(self.buf, row, info.body_hl, rendered_text)
   apply_spans(self.buf, row, info.spans)
+  apply_conceal(self.buf, row, info.conceal)
   return row
 end
 
@@ -235,6 +240,11 @@ end
 
 --- One space of left gutter, and a wrapped line that keeps its own indent —
 --- the difference between a wall of text and something laid out.
+---
+--- Not 2: a tool/detail/status line opens with a literal two-space indent of
+--- its own, and a wrapped continuation landing there reads as another one.
+local WRAP_SHIFT = 4
+M.WRAP_SHIFT = WRAP_SHIFT
 local function tune_window(win)
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
@@ -242,10 +252,22 @@ local function tune_window(win)
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
   vim.wo[win].breakindent = true
-  vim.wo[win].breakindentopt = 'shift:2'
+  vim.wo[win].breakindentopt = 'shift:' .. WRAP_SHIFT
   vim.wo[win].statuscolumn = ' '
   vim.wo[win].fillchars = 'eob: '
   vim.wo[win].winhighlight = 'CursorLine:NvimeCursorLine'
+  -- Explicit: `split` copies the window it splits from, so the prompt would
+  -- otherwise inherit the scrollback's conceal and hide the reader's own `**`
+  -- as they type it.
+  vim.wo[win].conceallevel = 0
+end
+
+--- Scrollback only. `concealcursor` covers every mode: without it the line the
+--- cursor sits on renders its markers again, and the cursor follows the stream
+--- — so the newest line would be the one line spelling out its own `**`.
+local function tune_scrollback(win)
+  vim.wo[win].conceallevel = 2
+  vim.wo[win].concealcursor = 'nvic'
 end
 
 local function open_windows(self)
@@ -254,6 +276,7 @@ local function open_windows(self)
   vim.api.nvim_win_set_buf(self.win, self.buf)
   vim.api.nvim_win_set_width(self.win, self.width)
   tune_window(self.win)
+  tune_scrollback(self.win)
 
   if self.prompt_buf == nil then
     return
@@ -318,7 +341,12 @@ function M.open(opts)
     prompt_height = opts.prompt_height or 3,
     prompt_hint = opts.prompt_hint or DEFAULT_PROMPT_HINT,
     -- No `scheme://`: this name is what the tabline and the statusline show.
-    buf = make_buffer('nvime-' .. opts.name, opts.filetype or 'markdown'),
+    -- Filetype `nvime` on purpose: nvime classifies every scrollback line
+    -- itself, and `markdown` here let vim's own syntax paint on top of it —
+    -- a literal strikethrough rule through `~~x~~`, list markers and `---` in
+    -- a colour of their own, and a partial line highlighted differently from
+    -- the finished one. There is no syntax file for `nvime`, which is the point.
+    buf = make_buffer('nvime-' .. opts.name, opts.filetype or 'nvime'),
     prompt_buf = nil,
     status_text = nil,
     status_hint = opts.status_hint,
@@ -329,6 +357,9 @@ function M.open(opts)
     spinner = nil,
     spinner_frame = 1,
     stream = nil,
+    --- Callbacks queued by `after_stream` while a stream is open; run once,
+    --- in order, the moment `finish_stream` closes it.
+    stream_waiters = nil,
     on_close = opts.on_close,
   }, Panel)
   if wants_prompt then
@@ -487,41 +518,73 @@ function Panel:replace(lines, marks)
   end
 end
 
+--- Appends already-laid-out lines together with the spans that colour them —
+--- the one primitive for a block a caller composed itself (a spec, a choice),
+--- as against `append`, which paints a whole line one colour.
+--- @param lines string[]
+--- @param marks table[] each { row = 1-based index into `lines`, col, end_col, hl }
+--- @return integer the 0-based scrollback row `lines[1]` landed on
+function Panel:append_marked(lines, marks)
+  assert(self.stream == nil, 'panel:append_marked cannot run while a stream is open')
+  assert(#lines > 0, 'panel:append_marked needs at least one line')
+  local first = self.written and line_count(self.buf) or 0
+  for _, line in ipairs(lines) do
+    append_row(self, line)
+  end
+  for _, mark in ipairs(marks) do
+    apply_spans(self.buf, first + mark.row - 1, { { mark.col, mark.end_col, mark.hl } })
+  end
+  follow(self)
+  return first
+end
+
+--- Rewrites a run of already-committed rows in place, marks and all. Used by a
+--- choice block redrawing itself as the reader toggles a selection; never while
+--- a stream is open, which owns the tail row.
+--- @param row integer 0-based first row of the run
+--- @param lines string[] as many lines as the run holds
+--- @param marks table[] each { row = 1-based index into `lines`, col, end_col, hl }
+function Panel:rewrite(row, lines, marks)
+  assert(self.stream == nil, 'panel:rewrite cannot run while a stream is open')
+  assert(type(row) == 'number' and row >= 0, 'panel:rewrite needs a 0-based row')
+  local last = row + #lines
+  assert(last <= line_count(self.buf), 'panel:rewrite would run past the end of the scrollback')
+  vim.api.nvim_buf_clear_namespace(self.buf, NS, row, last)
+  write_lines(self.buf, row, last, lines)
+  for _, mark in ipairs(marks) do
+    apply_spans(self.buf, row + mark.row - 1, { { mark.col, mark.end_col, mark.hl } })
+  end
+end
+
 --- @param row integer 0-based scrollback row
 --- @param hl string highlight group applied to the whole row
 function Panel:highlight_row(row, hl)
   apply_spans(self.buf, row, { { 0, #(vim.api.nvim_buf_get_lines(self.buf, row, row + 1, false)[1] or ''), hl } })
 end
 
---- @return table markdown render context: carried fence state + open fence rows
+--- @return table markdown render context: the carried fence state, plus
+---   whether the fence currently open is an options block being swallowed
 local function new_ctx(line_hl)
-  return { md = markdown.new_state(), fence = nil, line_hl = line_hl }
+  return { md = markdown.new_state(), swallow = false, line_hl = line_hl }
 end
 
-local function close_fence(self, ctx)
-  local fence = ctx.fence
-  if fence == nil then
-    return
-  end
-  highlight_fence(self.buf, fence.rows, fence.lines, fence.lang)
-  ctx.fence = nil
-end
-
---- Commits one finished markdown line into the scrollback.
+--- Commits one finished markdown line into the scrollback, or swallows it when
+--- it belongs to an options block: that block's JSON is a payload for the
+--- reader's choice widget, never something to read.
 local function commit_md(self, ctx, text)
   local info = markdown.scan(text, ctx.md)
+  if info.kind == 'fence_open' and info.lang == markdown.OPTIONS_LANG then
+    ctx.swallow = true
+    return
+  end
+  if ctx.swallow then
+    ctx.swallow = info.kind ~= 'fence_close'
+    return
+  end
   if info.line_hl == nil then
     info.line_hl = ctx.line_hl
   end
-  local row = commit(self, text, info)
-  if info.kind == 'fence_open' then
-    ctx.fence = { lang = info.lang, lines = {}, rows = {} }
-  elseif info.kind == 'code' and ctx.fence ~= nil then
-    table.insert(ctx.fence.lines, text)
-    table.insert(ctx.fence.rows, row)
-  elseif info.kind == 'fence_close' then
-    close_fence(self, ctx)
-  end
+  commit(self, text, info)
 end
 
 --- Renders a complete markdown message (a resumed turn, or a one-shot reply).
@@ -532,7 +595,6 @@ function Panel:append_markdown(text, line_hl)
   for _, line in ipairs(vim.split(text, '\n', { plain = true })) do
     commit_md(self, ctx, line)
   end
-  close_fence(self, ctx)
   follow(self)
 end
 
@@ -547,21 +609,48 @@ function Panel:begin_stream(speaker, line_hl)
   self.stream = { pending = '', ctx = new_ctx(line_hl), tail_row = nil, swallow_newline = false }
 end
 
---- Rewrites the volatile tail line; completed lines above it are never touched.
-local function draw_tail(self, text)
-  local row = self.stream.tail_row
-  if row == nil then
-    row = append_row(self, text)
-    self.stream.tail_row = row
-  else
-    write_lines(self.buf, row, row + 1, { text })
+--- @return boolean whether a stream currently owns the tail row
+function Panel:is_streaming()
+  return self.stream ~= nil
+end
+
+--- Runs `fn` now if nothing is streaming, otherwise queues it to run once the
+--- open stream closes. Lets a caller that must write a whole block at once —
+--- `append_marked`/`rewrite` never run mid-stream — wait for the tail row
+--- rather than raising or corrupting it.
+--- @param fn fun()
+function Panel:after_stream(fn)
+  if self.stream == nil then
+    fn()
+    return
   end
-  vim.api.nvim_buf_clear_namespace(self.buf, NS, row, row + 1)
-  -- The tail is not final, so classify it against a copy of the fence state.
+  self.stream_waiters = self.stream_waiters or {}
+  self.stream_waiters[#self.stream_waiters + 1] = fn
+end
+
+--- Rewrites the volatile tail line; completed lines above it are never touched.
+--- The tail is classified by exactly the call that will classify it again when
+--- it commits, against a COPY of the fence state — so the groups a line is
+--- painted with never change as it goes from volatile to final.
+local function draw_tail(self, text)
+  if self.stream.ctx.swallow then
+    return
+  end
   local probe = vim.deepcopy(self.stream.ctx.md)
   local info = markdown.scan(text, probe)
+  local rendered_text = rendered(info, text)
+  local row = self.stream.tail_row
+  if row == nil then
+    row = append_row(self, rendered_text)
+    self.stream.tail_row = row
+  else
+    write_lines(self.buf, row, row + 1, { rendered_text })
+  end
+  vim.api.nvim_buf_clear_namespace(self.buf, NS, row, row + 1)
   apply_line_hl(self.buf, row, info.line_hl)
+  apply_body_hl(self.buf, row, info.body_hl, rendered_text)
   apply_spans(self.buf, row, info.spans)
+  apply_conceal(self.buf, row, info.conceal)
 end
 
 --- Drops the volatile tail line so the next write commits a final one.
@@ -607,9 +696,13 @@ function Panel:finish_stream()
   if self.stream.pending ~= '' then
     commit_md(self, self.stream.ctx, self.stream.pending)
   end
-  close_fence(self, self.stream.ctx)
   self.stream = nil
   self:blank()
+  local waiters = self.stream_waiters
+  self.stream_waiters = nil
+  for _, fn in ipairs(waiters or {}) do
+    fn()
+  end
 end
 
 --- Inserts a line into a message that is still streaming (a tool one-liner).

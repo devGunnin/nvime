@@ -300,25 +300,29 @@ describe('panel', function()
     panel.close(NAME)
   end)
 
-  it('anchors treesitter highlights to the rows the code really landed on', function()
-    ok(pcall(vim.treesitter.get_string_parser, 'local a = 1', 'lua'), 'needs the bundled lua parser')
+  --- A code block is set apart by its GROUND, not by a grammar applied once
+  --- the fence closes: that re-highlight was the one thing that changed a
+  --- line's colour after it had already been read, which is what this whole
+  --- surface now forbids. A tool line still lands mid-fence without breaking
+  --- the block's classification.
+  it('keeps a fence interrupted by a tool line as one code block, uncoloured by a grammar', function()
     open()
     current():begin_stream('claude')
     current():push_delta('```lua\nlocal a = 1\n')
-    -- A tool line lands between the two statements, so the fence is not contiguous.
     current():interject('  reading src/foo.py', 'NvimeDim')
     current():push_delta('local b = 2\n```\n')
     current():finish_stream()
 
-    local rendered = lines()
-    eq({ 'claude', '```lua', 'local a = 1', '  reading src/foo.py', 'local b = 2', '```', '' }, rendered)
+    eq({ 'claude', '```lua', 'local a = 1', '  reading src/foo.py', 'local b = 2', '```', '' }, lines())
+    local code = vim.tbl_filter(function(mark)
+      return mark[4].line_hl_group == 'NvimeCode'
+    end, marks())
+    eq(2, #code, 'both code lines keep the code ground')
     for _, mark in ipairs(marks()) do
-      if mark[4].hl_group == '@keyword' then
-        ok(
-          rendered[mark[2] + 1]:find('local', 1, true) ~= nil,
-          'a keyword highlight landed on ' .. vim.inspect(rendered[mark[2] + 1])
-        )
-      end
+      ok(
+        mark[4].hl_group == nil or mark[4].hl_group:sub(1, 1) ~= '@',
+        'no grammar group may appear: ' .. tostring(mark[4].hl_group)
+      )
     end
     panel.close(NAME)
   end)
@@ -428,6 +432,204 @@ describe('panel following', function()
       'back at the tail means following again'
     )
     current():finish_stream()
+    panel.close(NAME)
+  end)
+end)
+
+--- Everything the operator reported about the conversation surface, pinned.
+describe('panel — the calm surface', function()
+  --- Every extmark on one row, as plain comparable data.
+  local function row_marks(row)
+    local out = {}
+    for _, mark in
+      ipairs(vim.api.nvim_buf_get_extmarks(current().buf, panel.NS, { row, 0 }, { row, -1 }, {
+        details = true,
+      }))
+    do
+      local details = mark[4]
+      out[#out + 1] = {
+        col = mark[3],
+        end_col = details.end_col,
+        hl = details.hl_group,
+        line_hl = details.line_hl_group,
+        conceal = details.conceal,
+      }
+    end
+    table.sort(out, function(a, b)
+      return (a.col == b.col) and tostring(a.hl) < tostring(b.hl) or a.col < b.col
+    end)
+    return out
+  end
+
+  --- No vim syntax paints the scrollback: nvime classifies every line itself,
+  --- and `markdown` here let `htmlStrike` put a line through `~~x~~` and
+  --- markdownRule colour a `---` under nvime's own fg-only extmarks.
+  it('gives the scrollback a filetype with no syntax of its own', function()
+    local self = open()
+    eq('nvime', vim.bo[self.buf].filetype)
+    eq('markdown', vim.bo[self.prompt_buf].filetype)
+    -- Concealing markers is right for rendered output and wrong for a prompt
+    -- the reader is typing markdown into.
+    eq(2, vim.wo[self.win].conceallevel)
+    eq('nvic', vim.wo[self.win].concealcursor)
+    eq(0, vim.wo[self.prompt_win].conceallevel)
+    panel.close(NAME)
+  end)
+
+  it('draws a thematic break as a short gap, never a rule across the panel', function()
+    local self = open()
+    self:append_markdown('before\n---\nafter')
+    eq({ 'before', '  · · ·', 'after' }, lines())
+    panel.close(NAME)
+  end)
+
+  --- The hard rule: a line must not change colour as it stops being volatile.
+  it('paints a streamed line exactly as it paints the committed one', function()
+    local self = open()
+    local text = '## Heading with **bold**, `code` and ~~struck~~ text'
+    self:begin_stream('claude')
+    self:push_delta(text)
+    local streamed_row = self.stream.tail_row
+    local streamed = row_marks(streamed_row)
+    ok(#streamed > 0, 'a streamed line carries marks of its own')
+    self:push_delta('\n')
+    self:finish_stream()
+    eq(streamed, row_marks(streamed_row), 'the groups changed when the line committed')
+    panel.close(NAME)
+  end)
+
+  it('keeps a code line the same group before and after its fence closes', function()
+    local self = open()
+    self:begin_stream(nil)
+    self:push_delta('```lua\nlocal x = 1')
+    local row = self.stream.tail_row
+    local streaming = row_marks(row)
+    self:push_delta('\n```\n')
+    self:finish_stream()
+    eq(streaming, row_marks(row), 'closing the fence re-coloured the code above it')
+    panel.close(NAME)
+  end)
+
+  --- The choice block's JSON is a payload for the widget, never something to
+  --- read: the panel swallows the fence whole, streaming or replayed.
+  it('swallows an options fence rather than showing its JSON', function()
+    local self = open()
+    self:append_markdown('pick one\n```nvime-options\n{"options":[{"label":"a"},{"label":"b"}]}\n```\ndone')
+    eq({ 'pick one', 'done' }, lines())
+    panel.close(NAME)
+  end)
+
+  it('swallows an options fence as it streams, one delta at a time', function()
+    local self = open()
+    self:begin_stream(nil)
+    for _, chunk in ipairs({ 'pick one\n```nvime-o', 'ptions\n{"options":', '[]}\n``', '`\ndone' }) do
+      self:push_delta(chunk)
+    end
+    self:finish_stream()
+    eq({ 'pick one', 'done', '' }, lines())
+    panel.close(NAME)
+  end)
+
+  it('appends composed lines with their own spans in one pass', function()
+    local self = open()
+    local row = self:append_marked({ 'goal  ship it', 'note' }, {
+      { row = 1, col = 0, end_col = 6, hl = 'NvimeDim' },
+      { row = 1, col = 6, end_col = 13, hl = 'NvimeBody' },
+    })
+    eq(0, row)
+    eq({ 'goal  ship it', 'note' }, lines())
+    eq(
+      { 'NvimeDim', 'NvimeBody' },
+      vim.tbl_map(function(mark)
+        return mark.hl
+      end, row_marks(0))
+    )
+    panel.close(NAME)
+  end)
+
+  it('rewrites a committed run in place instead of appending a second copy', function()
+    local self = open()
+    self:append_marked({ '1  a', '2  b' }, { { row = 1, col = 0, end_col = 1, hl = 'NvimeOptionKey' } })
+    self:rewrite(0, { '1 x a', '2   b' }, { { row = 1, col = 0, end_col = 3, hl = 'NvimeSelected' } })
+    eq({ '1 x a', '2   b' }, lines())
+    eq({ { col = 0, end_col = 3, hl = 'NvimeSelected', line_hl = nil, conceal = nil } }, row_marks(0))
+    panel.close(NAME)
+  end)
+
+  it('refuses to rewrite past the end of the scrollback', function()
+    local self = open()
+    self:append_marked({ 'only' }, {})
+    t.throws(function()
+      self:rewrite(0, { 'a', 'b' }, {})
+    end, 'past the end')
+    panel.close(NAME)
+  end)
+
+  --- `append_marked` writes several rows at once, like `replace`/`rewrite` —
+  --- mid-stream it would land in the middle of the volatile tail row those
+  --- two already refuse to touch.
+  it('refuses to append a marked block while a stream is open, like replace and rewrite do', function()
+    local self = open()
+    self:begin_stream(nil)
+    t.throws(function()
+      self:append_marked({ 'only' }, {})
+    end, 'stream is open')
+    self:finish_stream()
+    panel.close(NAME)
+  end)
+
+  it('runs an after_stream callback right away when nothing is streaming', function()
+    local self = open()
+    local ran = false
+    self:after_stream(function()
+      ran = true
+    end)
+    eq(true, ran)
+    panel.close(NAME)
+  end)
+
+  it('queues an after_stream callback until the open stream closes', function()
+    local self = open()
+    self:begin_stream(nil)
+    eq(true, self:is_streaming())
+    local ran = false
+    self:after_stream(function()
+      ran = true
+    end)
+    eq(false, ran, 'must not run while the stream is still open')
+    self:push_delta('mid-stream text')
+    eq(false, ran, 'a delta alone must not release it')
+    self:finish_stream()
+    eq(false, self:is_streaming())
+    eq(true, ran, 'released the moment the stream closes')
+    panel.close(NAME)
+  end)
+end)
+
+--- A `line_hl_group` sits OVER an extmark's foreground, so pinning the body
+--- colour that way silently flattened every heading, marker and struck span on
+--- the line. The body colour is a low-priority span for exactly that reason.
+describe('panel — the body colour never eats its own markup', function()
+  local function groups_on(row)
+    local out = {}
+    for _, mark in
+      ipairs(vim.api.nvim_buf_get_extmarks(current().buf, panel.NS, { row, 0 }, { row, -1 }, {
+        details = true,
+      }))
+    do
+      if mark[4].hl_group ~= nil then
+        out[#out + 1] = { mark[4].hl_group, mark[4].priority }
+      end
+    end
+    return out
+  end
+
+  it('leaves a heading its accent and a struck span its own strikethrough group', function()
+    local self = open()
+    self:append_markdown('## Findings')
+    self:append_markdown('the ~~simplest~~ option')
+    eq({ { 'NvimeBody', 90 }, { 'NvimeDim', 4096 }, { 'NvimeHeading', 4096 } }, groups_on(0))
+    eq({ { 'NvimeBody', 90 }, { 'NvimeStrike', 4096 } }, groups_on(1))
     panel.close(NAME)
   end)
 end)

@@ -87,15 +87,21 @@ export function composePrompt(
   blocks: readonly ContextBlock[],
   cwd: string,
   notes?: ProjectInstructions | null,
+  ui?: string | null,
 ): string {
+  const uiSection = ui == null || ui === '' ? '' : `<nvime-ui>\n${ui}\n</nvime-ui>\n\n`;
   const noteSection = notes == null ? '' : `${renderProjectNotesSection(notes)}\n\n`;
-  if (blocks.length === 0) return `${noteSection}${prompt}`;
+  if (blocks.length === 0) return `${uiSection}${noteSection}${prompt}`;
   const sections = blocks.map((block) => renderBlock(block, cwd));
-  return `${noteSection}${sections.join('\n\n')}\n\n${prompt}`;
+  return `${uiSection}${noteSection}${sections.join('\n\n')}\n\n${prompt}`;
 }
 
 /** One leading `<context …>` section, exactly as `renderBlock` writes it. */
 const CONTEXT_SECTION = /^<context [^>\n]*>\n[\s\S]*?\n<\/context>\n\n/;
+
+/** nvime's own standing instructions about the editor surface, prepended by
+ *  `composePrompt` and stripped back out of a replayed transcript. */
+const UI_SECTION = /^<nvime-ui>\n[\s\S]*?\n<\/nvime-ui>\n\n/;
 
 /** One leading `<project-notes …>` section, exactly as it is rendered below.
  *  The close tag's id must backreference the open tag's, so a forged close
@@ -112,8 +118,8 @@ const PROJECT_NOTES_SECTION =
  */
 export function stripContextSections(text: string): string {
   let rest = text;
-  while (CONTEXT_SECTION.test(rest) || PROJECT_NOTES_SECTION.test(rest)) {
-    rest = rest.replace(CONTEXT_SECTION, '').replace(PROJECT_NOTES_SECTION, '');
+  while (CONTEXT_SECTION.test(rest) || PROJECT_NOTES_SECTION.test(rest) || UI_SECTION.test(rest)) {
+    rest = rest.replace(CONTEXT_SECTION, '').replace(PROJECT_NOTES_SECTION, '').replace(UI_SECTION, '');
   }
   return rest;
 }
