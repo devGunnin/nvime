@@ -494,8 +494,8 @@ function Panel:highlight_row(row, hl)
 end
 
 --- @return table markdown render context: carried fence state + open fence rows
-local function new_ctx()
-  return { md = markdown.new_state(), fence = nil }
+local function new_ctx(line_hl)
+  return { md = markdown.new_state(), fence = nil, line_hl = line_hl }
 end
 
 local function close_fence(self, ctx)
@@ -510,6 +510,9 @@ end
 --- Commits one finished markdown line into the scrollback.
 local function commit_md(self, ctx, text)
   local info = markdown.scan(text, ctx.md)
+  if info.line_hl == nil then
+    info.line_hl = ctx.line_hl
+  end
   local row = commit(self, text, info)
   if info.kind == 'fence_open' then
     ctx.fence = { lang = info.lang, lines = {}, rows = {} }
@@ -522,8 +525,10 @@ local function commit_md(self, ctx, text)
 end
 
 --- Renders a complete markdown message (a resumed turn, or a one-shot reply).
-function Panel:append_markdown(text)
-  local ctx = new_ctx()
+function Panel:append_markdown(text, line_hl)
+  assert(type(text) == 'string', 'panel:append_markdown needs text')
+  assert(line_hl == nil or type(line_hl) == 'string', 'panel:append_markdown highlight must be a string')
+  local ctx = new_ctx(line_hl)
   for _, line in ipairs(vim.split(text, '\n', { plain = true })) do
     commit_md(self, ctx, line)
   end
@@ -533,11 +538,13 @@ end
 
 --- Opens a streaming assistant message. Deltas append to it until `finish_stream`.
 --- @param speaker string|nil header line; nil for a stream with no header
-function Panel:begin_stream(speaker)
+function Panel:begin_stream(speaker, line_hl)
+  assert(speaker == nil or type(speaker) == 'string', 'panel:begin_stream speaker must be a string')
+  assert(line_hl == nil or type(line_hl) == 'string', 'panel:begin_stream highlight must be a string')
   if speaker ~= nil then
     self:append(speaker, 'NvimeAgent')
   end
-  self.stream = { pending = '', ctx = new_ctx(), tail_row = nil, swallow_newline = false }
+  self.stream = { pending = '', ctx = new_ctx(line_hl), tail_row = nil, swallow_newline = false }
 end
 
 --- Rewrites the volatile tail line; completed lines above it are never touched.

@@ -58,7 +58,7 @@ and nvime binds no global key until `keymaps.enabled = true`.
 
 ## Chat
 
-`<leader>nc` — a persistent, read-only conversation with full session history.
+`<leader>nc` — a fresh, read-only conversation with resumable session history.
 
 ![Chat mid-stream, with a resumed transcript above it](assets/chat-dark.png)
 
@@ -72,10 +72,13 @@ on, not Neovim's cwd. Bad, binary or oversized paths are reported in the panel,
 never silently dropped. `<leader>ns` sends a visual selection with its file and
 line range.
 
-**Sessions resume.** The session for a project root is remembered, so reopening
-chat replays the earlier turns. `<C-r>` lists nvime's past sessions for that
-root by title and age; resume survives Neovim restarts, and several Neovim
-instances share the session file without overwriting each other.
+**Fresh by default, resumable by choice.** Opening chat always starts a new
+conversation, so yesterday's context cannot silently leak into today's task.
+`<C-r>` lists the project's past sessions by title and age; `<C-n>` clears the
+surface for another new conversation without deleting history. Resume survives
+Neovim restarts, and several Neovim instances share the session file without
+overwriting each other. A running turn must be stopped before switching, so its
+stream and cancellation handle cannot be orphaned.
 
 ![The session picker: past conversations by first prompt and age](assets/sessions-dark.png)
 
@@ -402,7 +405,7 @@ big change in this project with its review progress. `<CR>` opens one.
 | `:Nvime` | the dashboard |
 | `:Nvime chat` | open the chat panel |
 | `:Nvime edit` | instruct claude about the current file |
-| `:Nvime big` | start or resume a big change |
+| `:Nvime big` | start a big change (`<C-r>` resumes one) |
 | `:Nvime diff` | review the changeset |
 | `:Nvime cancel` | stop whichever run is going |
 | `:Nvime model` | pick a lane and its model/effort override |
@@ -425,12 +428,12 @@ Off until `keymaps.enabled = true`.
 | `<leader>nB` | normal | open a big change |
 | `<CR>` | prompt, normal | send |
 | `<C-s>` | prompt, insert | send (so `<CR>` still inserts a newline) |
-| `<C-r>` | chat panel | session picker |
+| `<C-n>` / `<C-r>` | chat panel | new conversation · resume one |
 | `<C-c>` | panel | stop the running turn |
 | `q` | scrollback | close |
 | `y` / `n` / `<Esc>` | approval float | allow once / deny / deny |
 | `<CR>` / `r` / `d` | changeset | open the file · revert the hunk · unified diff |
-| `<C-r>` / `<C-t>` | big panel | pick a change · open the review threads |
+| `<C-n>` / `<C-r>` / `<C-t>` | big panel | new change · resume one · open the review threads |
 | `]t` / `[t` | review | next · previous thread |
 | `a` / `e` / `r` | review | defend this thread · explain a cleared one · request changes |
 | `X` / `R` / `M` | review | re-open a trivial thread · rebase onto a moved base · merge |
@@ -530,7 +533,8 @@ Font codepoint, so it renders in any font a terminal is likely to have.
 `ui.icons = 'ascii'` swaps the whole set for pure ASCII.
 
 The highlight groups are all named `Nvime*` and can be overridden after setup:
-`NvimeUser`, `NvimeAgent`, `NvimeHeading`, `NvimeCode`, `NvimeFence`,
+`NvimeUser`, `NvimeAgent`, `NvimeUserBody`, `NvimeAgentBody`, `NvimeTool`,
+`NvimeHeading`, `NvimeCode`, `NvimeFence`,
 `NvimeInlineCode`, `NvimeDim`, `NvimeError`, `NvimeSession`, `NvimeSelected`,
 `NvimeBar`, `NvimeBarDim`, `NvimeCursorLine`, `NvimeLabel`, `NvimeKey`,
 `NvimeOk`, `NvimeWarn`, `NvimeFile`, `NvimeAdded`, `NvimeChanged`,

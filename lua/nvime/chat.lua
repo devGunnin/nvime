@@ -70,7 +70,7 @@ local function on_event(name, params)
   elseif name == 'chat.delta' then
     surface():push_delta(params.text)
   elseif name == 'chat.tool' then
-    surface():interject('  ' .. (params.summary or params.tool), 'NvimeDim')
+    surface():interject('  ↳ ' .. (params.summary or params.tool), 'NvimeTool')
   elseif name == 'rpc.error' then
     show_error(params.error or { message = 'the sidecar rejected a frame' })
   end
@@ -123,7 +123,7 @@ local function load_history(session_id)
     end
     for _, turn in ipairs(result.turns or {}) do
       surface():append(turn.role == 'user' and 'you' or 'claude', turn.role == 'user' and 'NvimeUser' or 'NvimeAgent')
-      surface():append_markdown(turn.text)
+      surface():append_markdown(turn.text, turn.role == 'user' and 'NvimeUserBody' or 'NvimeAgentBody')
       surface():blank()
     end
     surface():append('— resumed —', 'NvimeDim')
@@ -132,24 +132,14 @@ local function load_history(session_id)
   end)
 end
 
-local function restore_session()
-  agent.request('chat.list', { root = state.root, limit = 25 }, function(err, result)
-    if err ~= nil then
-      show_error(err)
-      finish_restore()
-      return
-    end
-    state.session_id = result.current
-    refresh_status(nil)
-    if result.current ~= nil then
-      load_history(result.current)
-    else
-      finish_restore()
-    end
-  end)
+local function render_fresh_start()
+  surface():append('new conversation', 'NvimeSession')
+  surface():append('Ask about the project, reference @files, or select code and send it here.', 'NvimeDim')
+  surface():append('<C-r> resumes earlier conversations. <C-n> always starts clean.', 'NvimeDim')
+  surface():blank()
 end
 
---- Opens (or focuses) the chat panel and resumes this project's session.
+--- Opens (or focuses) a fresh chat panel for this project.
 --- The root is captured once per panel, from the buffer the user was in — a
 --- second `M.open()` from inside the panel must not re-root the session on the
 --- prompt buffer, which has no path and would fall back to the cwd.
@@ -166,19 +156,22 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'prompt · <CR> send (i_<C-s>) · <C-r> sessions · <C-c> stop',
+    prompt_hint = 'prompt · <CR> send · <C-n> new · <C-r> resume · <C-c> stop',
     root = state.root,
     on_submit = M.send,
     on_close = on_panel_close,
     keys = {
+      { mode = 'n', lhs = '<C-n>', fn = M.new_session, desc = 'nvime: start a new conversation', where = 'both' },
       { mode = 'n', lhs = '<C-r>', fn = M.pick_session, desc = 'nvime: pick a session', where = 'both' },
       { mode = 'n', lhs = '<C-c>', fn = M.cancel, desc = 'nvime: stop the running turn', where = 'both' },
     },
   })
   if not existed then
-    state.restored = false
+    state.session_id = nil
+    state.pending_send = nil
+    state.restored = true
     refresh_status(nil)
-    restore_session()
+    render_fresh_start()
   end
 end
 
@@ -203,12 +196,12 @@ function M.send(text, extra)
   end
 
   surface():append('you', 'NvimeUser')
-  surface():append_markdown(text)
+  surface():append_markdown(text, 'NvimeUserBody')
   for _, warning in ipairs(warnings) do
     surface():append('  ' .. warning, 'NvimeError')
   end
   surface():blank()
-  surface():begin_stream('claude')
+  surface():begin_stream('claude', 'NvimeAgentBody')
   surface():start_activity()
 
   local dial = models.dial('chat')
@@ -280,6 +273,10 @@ end
 function M.pick_session()
   -- Only reachable from a panel keybind, so the panel's root is already captured.
   assert(type(state.root) == 'string', 'chat.pick_session needs an open panel')
+  if state.request_id ~= nil then
+    vim.notify('nvime: stop the running turn before switching conversations', vim.log.levels.WARN)
+    return
+  end
   agent.request('chat.list', { root = state.root, limit = 25 }, function(err, result)
     if err ~= nil then
       show_error(err)
@@ -299,7 +296,10 @@ function M.pick_session()
     picker.open(items, {
       title = ' sessions ',
       on_choice = function(session_id)
+        surface():replace({}, {})
         state.session_id = session_id
+        state.pending_send = nil
+        state.restored = false
         refresh_status('switched')
         surface():append('— switched to ' .. short(session_id) .. ' —', 'NvimeDim')
         surface():blank()
@@ -307,6 +307,21 @@ function M.pick_session()
       end,
     })
   end)
+end
+
+--- Starts a clean conversation without deleting any resumable history.
+function M.new_session()
+  assert(type(state.root) == 'string', 'chat.new_session needs an open panel')
+  if state.request_id ~= nil then
+    vim.notify('nvime: stop the running turn before starting a new conversation', vim.log.levels.WARN)
+    return
+  end
+  surface():replace({}, {})
+  state.session_id = nil
+  state.pending_send = nil
+  state.restored = true
+  refresh_status('fresh')
+  render_fresh_start()
 end
 
 --- Whether a turn is in flight for this surface.

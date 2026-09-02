@@ -121,6 +121,7 @@ Global ~
 Prompt buffer ~
     <CR>            normal      send the prompt
     <C-s>           insert      send the prompt (<CR> still inserts a newline)
+    <C-n>           normal      start a new conversation / big change
     <C-r>           normal      session / change picker
     <C-c>           normal      stop the running turn
 
@@ -138,6 +139,7 @@ Changeset ~
     q                           close
 
 Big-change panel ~
+    <C-n>                       start a new big change
     <C-r>                       pick a big change
     <C-t>                       open the review threads
     s                           steer the running build
@@ -184,10 +186,12 @@ Context ~
     dropped. `@` completion is gitignore-aware.
 
 Sessions ~
-    The session for a project root is remembered, so reopening chat replays
-    the earlier turns. <C-r> lists nvime's own past sessions for that root by
-    title and age. Resume survives Neovim restarts, and several Neovim
-    instances share the session file without overwriting each other.
+    Opening chat starts a fresh conversation. <C-r> lists nvime's past
+    sessions for that project root by title and age; <C-n> starts another
+    clean conversation without deleting history. Resume survives Neovim
+    restarts, and several Neovim instances share the session file without
+    overwriting each other. Switching is refused while a turn is running, so
+    its stream and cancellation handle cannot be orphaned.
 
 Chat can never touch your code: it gets Read, Glob, Grep, WebFetch and
 WebSearch, and file mutation and shell are denied through SDK options rather
@@ -445,6 +449,9 @@ Override any of them after `setup()` with |nvim_set_hl()|.
 
     NvimeUser           your own turns
     NvimeAgent          the agent's turns
+    NvimeUserBody       your prose's full-line surface
+    NvimeAgentBody      the agent prose's full-line surface
+    NvimeTool           tool activity between streamed prose
     NvimeHeading        markdown headings, page titles
     NvimeCode           a fenced code block's background
     NvimeFence          the fence lines around it

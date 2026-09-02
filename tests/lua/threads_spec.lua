@@ -866,6 +866,30 @@ describe('the review’s own typography', function()
     eq({ 'NvimeWarn' }, grade_groups(still_open))
   end)
 
+  it('bands human answers separately from grader feedback', function()
+    local _, marks = threads.gate_lines(block({
+      rounds = {
+        round(41, { answer = 'it retries', result = { grade = 41, verdict = 'too generic', hint = 'why?' } }),
+      },
+    }))
+    local bands = vim
+      .iter(marks)
+      :filter(function(mark)
+        return mark.col == nil
+      end)
+      :map(function(mark)
+        return mark.hl
+      end)
+      :totable()
+    eq({ 'NvimeUserBody', 'NvimeAgentBody', 'NvimeAgentBody' }, bands)
+    ok(
+      vim.iter(marks):any(function(mark)
+        return mark.hl == 'NvimeAgent' and mark.col ~= nil
+      end),
+      'the verdict uses the agent foreground instead of disappearing into grey metadata'
+    )
+  end)
+
   it('bands a changed diff line, ignores context and the hunk marker', function()
     eq('NvimeEditAdd', threads.hunk_band('+    added'))
     eq('NvimeEditDelete', threads.hunk_band('-    removed'))

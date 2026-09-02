@@ -23,6 +23,7 @@ local FALLBACK = {
 --- How far each painted background travels from Normal's toward its colour.
 local ALPHA = {
   surface = 0.07,
+  speaker = 0.055,
   badge = 0.20,
   code = 0.05,
   hunk = 0.16,
@@ -89,6 +90,8 @@ function M.resolve()
     code = pick({ 'String', 'Constant' }, 'fg') or fg,
   }
   p.surface = M.blend(p.fg, bg, ALPHA.surface)
+  p.user_surface = M.blend(p.accent, bg, ALPHA.speaker)
+  p.agent_surface = M.blend(p.agent, bg, ALPHA.speaker)
   p.code_bg = M.blend(p.fg, bg, ALPHA.code)
   p.fade_bg = M.blend(p.fg, bg, ALPHA.fade)
   p.add_bg = M.blend(p.added, bg, ALPHA.hunk)
@@ -107,6 +110,9 @@ function M.groups(p)
   return {
     NvimeUser = { fg = p.accent, bold = true },
     NvimeAgent = { fg = p.agent, bold = true },
+    NvimeUserBody = { bg = p.user_surface },
+    NvimeAgentBody = { bg = p.agent_surface },
+    NvimeTool = { fg = p.dim, bg = p.surface, italic = true },
     NvimeHeading = { fg = p.accent, bold = true },
     NvimeCode = { fg = p.code, bg = p.code_bg },
     NvimeFence = { fg = p.dim, bg = p.code_bg },
