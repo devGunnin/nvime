@@ -7,7 +7,9 @@ local model = vim.env.NVIME_E2E_MODEL
 
 require('nvime').setup({})
 
-local ping = lib.call('ping', {}, 120000)
+-- `vim.empty_dict()`, not `{}`: an empty Lua table encodes as `[]`, and the
+-- sidecar refuses params that are not an object.
+local ping = lib.call('ping', vim.empty_dict(), 120000)
 if ping.claudePath == nil then
   lib.die('the sidecar found no claude CLI on PATH')
 end
@@ -57,4 +59,5 @@ if diff == nil or diff == '' then
   lib.die('the first build on a fresh install produced no reviewable diff')
 end
 lib.say('DIFF ' .. #diff .. ' bytes')
+lib.say('BIGSTORE ' .. vim.fn.stdpath('data') .. '/nvime/big')
 os.exit(0)

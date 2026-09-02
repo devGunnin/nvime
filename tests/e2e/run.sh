@@ -18,14 +18,15 @@ plugin="$(dirname "$(dirname "$here")")"
 
 # Scenario name, then its default timeout in seconds. One flat list because
 # bash 3.2 (still the system bash on macOS) has no associative arrays.
-# The defaults are the observed run time with headroom: a build is minutes.
+# Deadlines, not estimates: each observed run is well under a minute, and these
+# leave room for a slow model or a slow machine before calling it wedged.
 SCENARIOS="
-cold-start:1800
-prompt-keys:900
-debug-bundle:2400
-review-buffers:1800
-rebase-merge:2700
-detached-build:2400
+cold-start:900
+prompt-keys:600
+debug-bundle:900
+review-buffers:900
+rebase-merge:1200
+detached-build:1200
 "
 
 usage() {

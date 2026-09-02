@@ -25,11 +25,10 @@ export NVIME_E2E_OUT="$work/report.txt"
 mkdir -p "$repo" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"
 : >"$NVIME_E2E_OUT"
 
-# The premise of the scenario, checked rather than assumed: nothing nvime owns
-# exists yet.
+# The premise of the scenario, checked rather than assumed: every home is bare.
 for home in "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME"; do
-  if [ -e "$home/nvime" ]; then
-    echo "not a cold start: $home/nvime already exists"
+  if [ -n "$(ls -A "$home")" ]; then
+    echo "not a cold start: $home already has something in it"
     exit 1
   fi
 done
@@ -58,17 +57,19 @@ printf '== cold start: dashboard, sidecar, one small build\n'
 nvim --clean --headless -l "$here/cold-start.lua"
 
 cat "$NVIME_E2E_OUT"
-for marker in PING DASHBOARD BUILT DIFF; do
+for marker in PING DASHBOARD BUILT DIFF SESSION BIGSTORE; do
   grep -q "^$marker" "$NVIME_E2E_OUT" || { echo "missing: $marker"; exit 1; }
 done
 
-# The store the sidecar reported must be the scratch one — a cold start that
-# wrote into the developer's real data directory is the bug this guards.
-store="$(awk '/^STORE /{print $2}' "$NVIME_E2E_OUT")"
+# Where the change actually landed — a cold start that wrote into the
+# developer's real data directory is the bug this guards.
+store="$(awk '/^BIGSTORE /{print $2}' "$NVIME_E2E_OUT")"
+session="$(awk '/^SESSION /{print $2}' "$NVIME_E2E_OUT")"
 case "$store" in
   "$XDG_DATA_HOME"/*) ;;
-  *) echo "the sidecar stored sessions outside the scratch home: $store"; exit 1 ;;
+  *) echo "the build stored its session outside the scratch home: $store"; exit 1 ;;
 esac
-[ -d "$XDG_DATA_HOME/nvime" ] || { echo 'the cold start left no session store behind'; exit 1; }
+[ -n "$(find "$store" -maxdepth 2 -name "$session" 2>/dev/null)" ] ||
+  { echo "the cold start left no session record under $store"; exit 1; }
 
 printf 'PASS — nvime came up on an empty machine and built a change (%s)\n' "$work"

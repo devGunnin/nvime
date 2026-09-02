@@ -12,7 +12,10 @@ local lib = dofile(vim.fs.dirname(debug.getinfo(1, 'S').source:sub(2)) .. '/lib.
 
 local repo = assert(vim.env.NVIME_E2E_REPO, 'NVIME_E2E_REPO names the scratch repo')
 
-require('nvime').setup({})
+-- The panel path takes its model from the config, not from the request the
+-- other drivers build by hand, so the scenario's model is set here.
+local model = vim.env.NVIME_E2E_MODEL
+require('nvime').setup({ models = { big_intake = { model = model } } })
 vim.cmd.cd(repo)
 vim.cmd.edit(repo .. '/greet.py')
 
@@ -72,13 +75,21 @@ if big.state().request_id == nil then
 end
 lib.say('SUBMITTED request=' .. tostring(big.state().request_id))
 
--- The run must really be under way before it is cancelled, or "cancel" proves
--- nothing: wait for the sidecar to start streaming the spec back.
-vim.wait(180000, function()
-  return box.stream ~= nil or big.state().session ~= nil
-end, 200)
+-- 2. i_<C-c> stops it — and the proof is the sidecar's own answer. `M.cancel`
+-- says "it had already finished" when there was nothing live to stop, so a
+-- cancel that hit a real, running turn is one that never says it.
+local notices = {}
+local real_notify = vim.notify
+vim.notify = function(message, level)
+  notices[#notices + 1] = tostring(message)
+  return real_notify(message, level)
+end
 
--- 2. i_<C-c> stops it.
+-- Let the turn get properly under way first: cancelling the same millisecond
+-- it was sent would prove the wire, not the run.
+vim.wait(10000, function()
+  return false
+end, 500)
 type_into_prompt('i<C-c>')
 local stopped = vim.wait(180000, function()
   return big.state().request_id == nil
@@ -86,7 +97,16 @@ end, 200)
 if not stopped then
   lib.die('i_<C-c> did not stop the run')
 end
-lib.say('CANCELLED')
+for _, message in ipairs(notices) do
+  if message:find('already finished', 1, true) ~= nil then
+    lib.die('i_<C-c> found no running turn to stop')
+  end
+  if message:find('nvime: error', 1, true) ~= nil then
+    lib.die('the cancel failed: ' .. message)
+  end
+end
+lib.say('CANCELLED after a live turn, ' .. #notices .. ' notice(s)')
+vim.notify = real_notify
 
 -- 3. i_<C-r> on an empty box opens the history picker.
 local function floats()
