@@ -863,13 +863,15 @@ real, and the diff capture and triage fallback run over what it actually wrote.
 
 ### The screenshots
 
-Every image in this README is a real terminal, running the shipped plugin
-against a real repository — captured from `tmux capture-pane` and rendered to
-PNG; nothing is mocked up or drawn. Most are the full loop, driven by the real
-`claude` CLI: the review, the grades and the merge commit in them come from
-one actual big change that was built, defended and landed. The edit shots are
-the real plugin's real rendering fed a scripted instruction rather than a live
-CLI turn. The full set, dark and light, is under [`assets/`](assets/).
+Every image in this README is a real terminal running the shipped plugin and is
+captured from the compositor; nothing is mocked up or drawn. The review pair
+uses a deterministic reviewed-session fixture against a real file so the dark
+and light evidence stays reproducible while still exercising the shipped
+thread, review-buffer, annotation and palette paths. The remaining Big Change
+images came from an actual change built, defended and landed through the local
+`claude` CLI; edit uses a scripted instruction through the real rendering path.
+The full set is under [`assets/`](assets/), and
+`tests/e2e/review-buffers.sh` drives the real CLI proof for the review buffer.
 
 ## Layout
 
