@@ -59,6 +59,17 @@ export class SessionStore {
     this.#persist(root);
   }
 
+  /** Drops one deleted session id, clearing `current` if it was the pointer. */
+  forget(root: string, sessionId: string): void {
+    const entry = this.#file.projects[root];
+    if (entry === undefined) return;
+    const known = entry.known.filter((id) => id !== sessionId);
+    const current = entry.current === sessionId ? null : entry.current;
+    if (known.length === entry.known.length && current === entry.current) return;
+    this.#file.projects[root] = { current, known };
+    this.#persist(root);
+  }
+
   /** Drops ids the SDK no longer knows about, so the picker stays truthful. */
   retain(root: string, liveIds: ReadonlySet<string>): void {
     const entry = this.#file.projects[root];

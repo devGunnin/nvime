@@ -86,6 +86,17 @@ local function win_valid(win)
   return win ~= nil and vim.api.nvim_win_is_valid(win)
 end
 
+local function buf_valid(buf)
+  return buf ~= nil and vim.api.nvim_buf_is_valid(buf)
+end
+
+--- The panel's live windows, as a dense list. `tbl_filter` iterates with
+--- `pairs`, so a prompt-less panel's nil is skipped rather than truncating
+--- the list the way `ipairs` over the literal would.
+local function live_wins(self)
+  return vim.tbl_filter(win_valid, { self.win, self.prompt_win })
+end
+
 --- How far from the last line still counts as "reading the tail".
 local FOLLOW_SLACK = 2
 
@@ -238,6 +249,26 @@ local function take_prompt(self)
   return text
 end
 
+--- Hands an unsent prompt back to the box — `take_prompt`'s counterpart, for a
+--- prompt that was taken but never delivered.
+--- Only when the box is empty: the user may have typed something else since,
+--- and that must win.
+--- @param text string
+--- @return boolean whether the text is now in the box
+function Panel:restore_prompt(text)
+  assert(type(text) == 'string', 'panel:restore_prompt needs text')
+  if self.prompt_buf == nil or not vim.api.nvim_buf_is_valid(self.prompt_buf) then
+    return false
+  end
+  local current = vim.trim(table.concat(vim.api.nvim_buf_get_lines(self.prompt_buf, 0, -1, false), '\n'))
+  if current ~= '' then
+    return false
+  end
+  write_lines(self.prompt_buf, 0, -1, vim.split(text, '\n', { plain = true }))
+  vim.bo[self.prompt_buf].modifiable = true
+  return true
+end
+
 --- One space of left gutter, and a wrapped line that keeps its own indent —
 --- the difference between a wall of text and something laid out.
 ---
@@ -300,8 +331,8 @@ local function ensure_windows(self)
     return
   end
   local stale = nil
-  for _, win in ipairs({ self.prompt_win, self.win }) do
-    if win_valid(win) and not pcall(vim.api.nvim_win_close, win, true) then
+  for _, win in ipairs(live_wins(self)) do
+    if not pcall(vim.api.nvim_win_close, win, true) then
       stale = win
     end
   end
@@ -473,15 +504,11 @@ function Panel:close()
     self.on_close()
   end
   self:stop_activity()
-  for _, win in ipairs({ self.prompt_win, self.win }) do
-    if win_valid(win) then
-      pcall(vim.api.nvim_win_close, win, true)
-    end
+  for _, win in ipairs(live_wins(self)) do
+    pcall(vim.api.nvim_win_close, win, true)
   end
-  for _, buf in ipairs({ self.prompt_buf, self.buf }) do
-    if buf ~= nil and vim.api.nvim_buf_is_valid(buf) then
-      pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    end
+  for _, buf in ipairs(vim.tbl_filter(buf_valid, { self.buf, self.prompt_buf })) do
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
   end
 end
 

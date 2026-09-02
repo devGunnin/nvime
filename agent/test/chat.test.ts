@@ -86,6 +86,7 @@ function harness(
     },
     listSessions: async () => [],
     getSessionMessages: async () => [],
+    deleteSession: async () => {},
     ...overrides,
   };
   const store = new SessionStore(storePath);
@@ -251,6 +252,26 @@ describe('ChatService.send', () => {
     assert.equal(second.calls[0]?.options?.resume, SESSION);
   });
 
+  it('ignores the stored session when new:true, even with one on record', async () => {
+    const seed = harness([frames.init(), frames.success('one')], storePath);
+    await seed.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    assert.equal(seed.store.get(ROOT).current, SESSION, 'a session is now on record for this project');
+
+    const fresh = 'ffffffff-1111-2222-3333-444444444444';
+    const h = harness([frames.init(fresh), frames.success('two', fresh)], storePath);
+    await h.service.send(2, { root: ROOT, prompt: 'b', context: [], new: true });
+    assert.equal(h.calls[0]?.options?.resume, undefined, 'new:true must not resume the stored session');
+  });
+
+  it('honors an explicit sessionId even when new:true is also set', async () => {
+    const seed = harness([frames.init(), frames.success('one')], storePath);
+    await seed.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+
+    const h = harness([frames.init(), frames.success('two')], storePath);
+    await h.service.send(2, { root: ROOT, prompt: 'b', context: [], sessionId: SESSION, new: true });
+    assert.equal(h.calls[0]?.options?.resume, SESSION, 'an explicit sessionId always wins over new:true');
+  });
+
   it('prefers an explicitly picked session over the stored one', async () => {
     const seed = harness([frames.init(), frames.success('one')], storePath);
     await seed.service.send(1, { root: ROOT, prompt: 'a', context: [] });
@@ -392,6 +413,34 @@ describe('ChatService.list', () => {
     assert.deepEqual(listed.sessions, [{ sessionId: SESSION, title: 'say ping', lastModified: 42 }]);
   });
 
+  it('titles a session with no prompt yet "(new)" plus its short id, not the raw id', async () => {
+    const live = [
+      { sessionId: SESSION, lastModified: 42 },
+    ] as unknown as SDKSessionInfo[];
+    const h = harness([frames.init(), frames.success('ok')], storePath, {
+      listSessions: async () => live,
+    });
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    const listed = await h.service.list(ROOT, 25);
+    assert.equal(listed.sessions[0]?.title, `(new) ${SESSION.slice(0, 8)}`);
+  });
+
+  it('keeps two prompt-less sessions tellable apart, and a blank title from blanking a row', async () => {
+    const other = 'cccccccc-dddd-eeee-ffff-000000000000';
+    const live = [
+      { sessionId: SESSION, firstPrompt: '   ', lastModified: 42 },
+      { sessionId: other, lastModified: 43 },
+    ] as unknown as SDKSessionInfo[];
+    const h = harness([frames.init(), frames.success('ok')], storePath, {
+      listSessions: async () => live,
+    });
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    h.store.remember(ROOT, other);
+    const titles = (await h.service.list(ROOT, 25)).sessions.map((s) => s.title);
+    assert.deepEqual(titles.slice().sort(), [`(new) ${SESSION.slice(0, 8)}`, `(new) ${other.slice(0, 8)}`].sort());
+    assert.equal(new Set(titles).size, 2, 'two blank sessions must not render identically');
+  });
+
   it('forgets a session the SDK dropped from a complete listing', async () => {
     const other = 'cccccccc-dddd-eeee-ffff-000000000000';
     const live = [{ sessionId: other, summary: 'Other', lastModified: 7 }] as unknown as SDKSessionInfo[];
@@ -422,6 +471,63 @@ describe('ChatService.list', () => {
     const listed = await h.service.list(ROOT, 25);
     assert.equal(listed.current, SESSION, 'a full page is truncated, so absence proves nothing');
     assert.deepEqual(h.store.get(ROOT).known, [SESSION]);
+  });
+});
+
+describe('ChatService.forget', () => {
+  let dir = '';
+  let storePath = '';
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'nvime-forget-'));
+    storePath = join(dir, 'sessions.json');
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('deletes the SDK session and drops it from the project store', async () => {
+    const deleted: Array<{ sessionId: string; dir: string | undefined }> = [];
+    const h = harness([frames.init(), frames.success('ok')], storePath, {
+      deleteSession: async (sessionId, options) => {
+        deleted.push({ sessionId, dir: options?.dir });
+      },
+    });
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    assert.equal(h.store.get(ROOT).current, SESSION);
+
+    await h.service.forget(ROOT, SESSION);
+    assert.deepEqual(deleted, [{ sessionId: SESSION, dir: ROOT }]);
+    assert.deepEqual(h.store.get(ROOT), { current: null, known: [] });
+  });
+
+  it('propagates a delete failure instead of silently keeping the pointer', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath, {
+      deleteSession: async () => {
+        throw new Error('the transcript directory is read-only');
+      },
+    });
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    await assert.rejects(h.service.forget(ROOT, SESSION), /read-only/);
+    assert.equal(h.store.get(ROOT).current, SESSION, 'a failed delete leaves the store untouched');
+  });
+
+  it('treats a session the SDK no longer knows as already gone, and still drops it', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath, {
+      deleteSession: async () => {
+        throw new Error(`Session ${SESSION} not found in project directory for ${ROOT}`);
+      },
+    });
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    assert.equal(await h.service.forget(ROOT, SESSION), false, 'the SDK did not have it to delete');
+    assert.deepEqual(
+      h.store.get(ROOT),
+      { current: null, known: [] },
+      'the local entry still goes, so the row can never be stranded',
+    );
+  });
+
+  it('reports that the SDK still had the session it deleted', async () => {
+    const h = harness([frames.init(), frames.success('ok')], storePath);
+    await h.service.send(1, { root: ROOT, prompt: 'a', context: [] });
+    assert.equal(await h.service.forget(ROOT, SESSION), true);
   });
 });
 

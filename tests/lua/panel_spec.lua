@@ -187,10 +187,20 @@ describe('panel', function()
     local self = open()
     self:start_activity()
     ok(self.spinner ~= nil, 'the probe needs a running timer')
+    local win, prompt_win = self.win, self.prompt_win
     vim.api.nvim_buf_delete(self.buf, { force = true })
     eq(nil, panel.get(NAME), 'the husk is dropped')
     eq(nil, self.spinner, 'and its timer with it — nothing else can reach it afterwards')
+    -- `panel.close` no-ops here: the registry entry is already gone, and
+    -- deleting the buffer only emptied the split windows, it did not close
+    -- them — left open they linger as real (non-floating) windows for every
+    -- spec that runs after this one.
     panel.close(NAME)
+    for _, leftover in ipairs({ win, prompt_win }) do
+      if vim.api.nvim_win_is_valid(leftover) then
+        vim.api.nvim_win_close(leftover, true)
+      end
+    end
   end)
 
   it('renders streamed deltas token by token', function()
@@ -348,6 +358,21 @@ describe('panel', function()
     eq(nil, current())
     panel.close(NAME)
     eq(nil, current())
+  end)
+
+  it('closes both windows and both buffers, with or without a prompt', function()
+    for _, opts in ipairs({ panel_opts(), { name = NAME, width = 40, position = 'right', prompt = false } }) do
+      panel.close(NAME)
+      local self = panel.open(opts)
+      local win, prompt_win, buf, prompt_buf = self.win, self.prompt_win, self.buf, self.prompt_buf
+      panel.close(NAME)
+      ok(not vim.api.nvim_win_is_valid(win), 'the scrollback window survived the close')
+      ok(not vim.api.nvim_buf_is_valid(buf), 'the scrollback buffer survived the close')
+      if prompt_win ~= nil then
+        ok(not vim.api.nvim_win_is_valid(prompt_win), 'the prompt window survived the close')
+        ok(not vim.api.nvim_buf_is_valid(prompt_buf), 'the prompt buffer survived the close')
+      end
+    end
   end)
 
   it('keeps two named panels open side by side', function()

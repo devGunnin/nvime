@@ -46,6 +46,25 @@ describe('SessionStore', () => {
     assert.equal(known[0], `s${MAX_KNOWN_PER_PROJECT + 5}`);
   });
 
+  it('forgets one session, clearing current only when it was the pointer', () => {
+    const store = new SessionStore(path);
+    store.remember('/proj', 'a');
+    store.remember('/proj', 'b');
+    // 'b' is now current (most recently remembered); forgetting 'a' must leave it alone.
+    store.forget('/proj', 'a');
+    assert.deepEqual(store.get('/proj'), { current: 'b', known: ['b'] }, 'a non-current id is just dropped');
+    store.forget('/proj', 'b');
+    assert.deepEqual(store.get('/proj'), { current: null, known: [] }, 'forgetting current clears the pointer too');
+  });
+
+  it('forgetting an unknown project or id is a no-op', () => {
+    const store = new SessionStore(path);
+    store.remember('/proj', 'a');
+    store.forget('/proj', 'nope');
+    store.forget('/other', 'a');
+    assert.deepEqual(store.get('/proj'), { current: 'a', known: ['a'] });
+  });
+
   it('drops ids the SDK no longer knows, clearing a dead current pointer', () => {
     const store = new SessionStore(path);
     store.remember('/proj', 'a');

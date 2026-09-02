@@ -5,6 +5,7 @@ import type {
   SDKMessage,
   SDKSessionInfo,
   SessionMessage,
+  SessionMutationOptions,
 } from '@anthropic-ai/claude-agent-sdk';
 import {
   composePrompt,
@@ -46,6 +47,7 @@ export interface SdkBindings {
     sessionId: string,
     options?: GetSessionMessagesOptions,
   ) => Promise<SessionMessage[]>;
+  deleteSession: (sessionId: string, options?: SessionMutationOptions) => Promise<void>;
 }
 
 export type EmitEvent = (event: string, params: Record<string, unknown>) => void;
@@ -55,6 +57,10 @@ export interface SendParams extends Dial {
   prompt: string;
   context: ContextBlock[];
   sessionId?: string | undefined;
+  /** Skips the stored "current" session fallback below — a deliberate fresh
+   *  start even when this project has one on record. An explicit `sessionId`
+   *  still wins over this: it only changes what an absent one falls back to. */
+  new?: boolean | undefined;
   /** The project's CLAUDE.md/AGENTS.md/.nvime/instructions.md, or null when
    *  none was found or the feature is off. */
   projectInstructions?: ProjectInstructions | null | undefined;
@@ -116,7 +122,7 @@ export class ChatService {
     if (this.#runningByRoot.has(params.root)) {
       throw new ProtocolError('busy', 'a chat run is already in flight for this project');
     }
-    const resume = params.sessionId ?? this.#store.get(params.root).current ?? undefined;
+    const resume = params.sessionId ?? (params.new === true ? undefined : this.#store.get(params.root).current ?? undefined);
     const abort = new AbortController();
     this.#running.set(requestId, abort);
     this.#runningByRoot.set(params.root, requestId);
@@ -153,6 +159,25 @@ export class ChatService {
       .slice(0, limit)
       .map(toSummary);
     return { current: entry.current, sessions };
+  }
+
+  /**
+   * Deletes a stored session and its transcript, and drops it from the
+   * project's list. A session the SDK no longer knows is already gone: the
+   * user's intent is satisfied, so the local entry still goes.
+   * @returns whether the SDK still had it to delete
+   */
+  async forget(root: string, sessionId: string): Promise<boolean> {
+    let existed = true;
+    try {
+      await this.#sdk.deleteSession(sessionId, { dir: root });
+    } catch (error) {
+      // Another editor deleted it, or the SDK pruned it between list and now.
+      if (!isMissingSession(error)) throw error;
+      existed = false;
+    }
+    this.#store.forget(root, sessionId);
+    return existed;
   }
 
   async history(root: string, sessionId: string, limit: number): Promise<
@@ -278,9 +303,29 @@ export class ChatService {
   }
 }
 
+/** A session with no title yet (created, but no prompt has landed) reads as
+ *  "(new) <short id>" — the full id is meaningless to a reader, but two
+ *  prompt-less sessions still have to be tellable apart before a delete. */
 function toSummary(info: SDKSessionInfo): SessionSummary {
-  const title = info.customTitle ?? info.firstPrompt ?? info.summary ?? info.sessionId;
+  const named = nonEmpty(info.customTitle) ?? nonEmpty(info.firstPrompt) ?? nonEmpty(info.summary);
+  const title = named ?? `(new) ${info.sessionId.slice(0, 8)}`;
   return { sessionId: info.sessionId, title, lastModified: info.lastModified };
+}
+
+/**
+ * Whether a `deleteSession` rejection means the session simply is not there.
+ * Matched on the message: the SDK throws a plain Error with no code, and the
+ * only not-found it can raise for this call is the session's own.
+ */
+function isMissingSession(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /not found/i.test(message);
+}
+
+/** `??` alone would let a blank title through as a blank picker row. */
+function nonEmpty(value: string | undefined | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed !== undefined && trimmed !== '' ? trimmed : undefined;
 }
 
 /** Best-effort text of a stored transcript message; shapes vary by producer. */

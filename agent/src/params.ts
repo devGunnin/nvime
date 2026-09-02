@@ -20,6 +20,16 @@ export function optionalString(params: Record<string, unknown>, key: string): st
   return value;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Session ids are SDK-issued UUIDs. Checked here rather than trusting the
+ *  SDK's own guard, so a destructive call cannot reach it with a path. */
+export function requireUuid(params: Record<string, unknown>, key: string): string {
+  const value = requireString(params, key);
+  if (!UUID.test(value)) reject(`params.${key} must be a session id (UUID)`);
+  return value;
+}
+
 export function requireAbsolutePath(params: Record<string, unknown>, key: string): string {
   const value = requireString(params, key);
   if (!isAbsolute(value)) reject(`params.${key} must be an absolute path`);
@@ -41,6 +51,13 @@ export function optionalPositiveInt(
 
 export function requireBoolean(params: Record<string, unknown>, key: string): boolean {
   const value = params[key];
+  if (typeof value !== 'boolean') reject(`params.${key} must be a boolean`);
+  return value;
+}
+
+export function optionalBoolean(params: Record<string, unknown>, key: string): boolean | undefined {
+  const value = params[key];
+  if (value === undefined || value === null) return undefined;
   if (typeof value !== 'boolean') reject(`params.${key} must be a boolean`);
   return value;
 }

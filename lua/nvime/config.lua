@@ -14,6 +14,10 @@ M.EFFORTS = { 'low', 'medium', 'high' }
 --- The per-mode dials `models.*` covers, and the lanes `:Nvime model` offers.
 M.MODEL_LANES = { 'chat', 'edit', 'big_build', 'big_intake', 'big_triage', 'big_grade', 'explain' }
 
+--- What opening chat with no prior selection does: start clean, or pick this
+--- project's last conversation back up.
+M.CHAT_DEFAULTS = { 'new', 'resume-last' }
+
 --- Lanes whose output the comprehension gate depends on: they may never run
 --- at effort 'low', and their configured effort never falls back to nil —
 --- see `validate()` and the `models` defaults below.
@@ -39,6 +43,12 @@ local defaults = {
     edit = '<leader>ne',
     changeset = '<leader>nd',
     big = '<leader>nB',
+  },
+  chat = {
+    -- 'new': opening chat always starts a fresh conversation; past ones are
+    -- still reachable through <C-r>. 'resume-last': pick this project's most
+    -- recent conversation back up on open.
+    default = 'new',
   },
   edit = {
     -- How long a fresh hunk stays brightly highlighted before it dims.
@@ -158,6 +168,10 @@ local function validate(opts)
   check_type(opts.keymaps.edit, 'string', 'keymaps.edit')
   check_type(opts.keymaps.changeset, 'string', 'keymaps.changeset')
   check_type(opts.keymaps.big, 'string', 'keymaps.big')
+  check_type(opts.chat.default, 'string', 'chat.default')
+  if not vim.tbl_contains(M.CHAT_DEFAULTS, opts.chat.default) then
+    fail('chat.default must be one of: ' .. table.concat(M.CHAT_DEFAULTS, ', '))
+  end
   check_type(opts.edit.fade_ms, 'number', 'edit.fade_ms')
   if opts.edit.fade_ms < 100 then
     fail('edit.fade_ms must be at least 100')

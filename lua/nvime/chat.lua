@@ -26,9 +26,18 @@ local function surface()
   return panel.get(PANEL) or NOOP
 end
 
+--- The session picker's "start a fresh conversation" row. A table, not a
+--- string, so it can never collide with a real (SDK-issued) session id.
+local NEW_SESSION = {}
+
 local state = {
   root = nil,
   session_id = nil,
+  -- True when the next `chat.send` must not fall back to this project's
+  -- stored session even though `session_id` is nil — set on every path that
+  -- means "start clean" (a fresh open, <C-n>, the picker's new-conversation
+  -- row) and cleared once a real session (fresh or resumed) is established.
+  explicit_new = true,
   request_id = nil,
   subscribed = false,
   -- False until the project's stored session and its history have both
@@ -36,9 +45,17 @@ local state = {
   -- live stream and, worse, start a new session before the old one is known.
   restored = false,
   -- A send that arrived while restore was still in flight; replayed once
-  -- `restored` goes true. At most one: a second send while still restoring
-  -- replaces it, since only the latest prompt matters.
+  -- `restored` goes true, and only into the conversation it was written for —
+  -- it carries the `restore_token` it was queued under. At most one: a second
+  -- send while still restoring replaces it, since only the latest matters.
   pending_send = nil,
+  -- Sessions deleted from this editor, by id. A turn that was already in
+  -- flight must not install one of these as the panel's conversation.
+  deleted = {},
+  -- Bumped whenever the panel walks away from a restore (reopen, <C-n>,
+  -- deleting the live session). A reply carrying an older token is dropped
+  -- instead of splicing a dead transcript into the current panel.
+  restore_token = 0,
   -- The choice the last reply offered, while it is still unanswered:
   -- { block, handle }. At most one — a new turn retires the old question.
   offer = nil,
@@ -99,12 +116,36 @@ local function subscribe_once()
   state.subscribed = true
 end
 
+--- Gives an undelivered prompt back to the user rather than losing or
+--- misdelivering it: into the prompt box when there is one and it is empty,
+--- otherwise as a notice. Never sent.
+local function return_prompt(pending)
+  local live = panel.get(PANEL)
+  if live ~= nil and live:restore_prompt(pending.text) then
+    return
+  end
+  vim.notify('nvime: your queued prompt was not sent: ' .. pending.text, vim.log.levels.WARN)
+end
+
+--- Drops a queued send without delivering it. For every path that walks away
+--- from the conversation the prompt was written for.
+local function abandon_pending_send()
+  local pending = state.pending_send
+  state.pending_send = nil
+  if pending ~= nil then
+    return_prompt(pending)
+  end
+end
+
 --- Panel closed with a turn still running: nobody will read the reply, and the
 --- subscription pays for it either way, so stop it.
 local function on_panel_close()
   -- The choice's keys are bound to a buffer that is going away; a handle left
   -- behind would answer the next panel's question with the old one's block.
   retire_offer()
+  -- A prompt still queued behind a restore has nowhere to land now: sending it
+  -- would bill a turn into a surface nobody can read.
+  abandon_pending_send()
   local target = state.request_id
   if target == nil then
     return
@@ -123,16 +164,33 @@ end
 local function finish_restore()
   state.restored = true
   local pending = state.pending_send
+  state.pending_send = nil
   if pending == nil then
     return
   end
-  state.pending_send = nil
+  if pending.token ~= state.restore_token then
+    -- The panel walked away from the restore this was queued behind: sending
+    -- it now would deliver it to a conversation the user never addressed.
+    return_prompt(pending)
+    return
+  end
   M.send(pending.text, pending.extra, pending.echo)
 end
 
+--- Abandons whatever restore is in flight: its reply is dropped rather than
+--- replayed into a panel that has moved on. A send queued behind it survives —
+--- only the paths that really discard the user's prompt clear `pending_send`.
+local function abandon_restore()
+  state.restore_token = state.restore_token + 1
+end
+
 --- Renders the resumed transcript so a reopened panel is not mysteriously empty.
-local function load_history(session_id)
+--- @param token integer the restore generation this reply belongs to
+local function load_history(session_id, token)
   agent.request('chat.history', { root = state.root, sessionId = session_id, limit = 40 }, function(err, result)
+    if token ~= state.restore_token then
+      return
+    end
     if err ~= nil then
       -- A missing transcript is not fatal: the session still resumes.
       surface():append('  could not load the earlier turns: ' .. (err.message or '?'), 'NvimeDim')
@@ -153,8 +211,60 @@ end
 local function render_fresh_start()
   surface():append('new conversation', 'NvimeSession')
   surface():append('Ask about the project, reference @files, or select code and send it here.', 'NvimeDim')
-  surface():append('<C-r> resumes earlier conversations. <C-n> always starts clean.', 'NvimeDim')
+  surface():append('<C-r> lists past conversations: resume, delete, or start fresh.', 'NvimeDim')
+  surface():append('<C-n> always starts clean.', 'NvimeDim')
   surface():blank()
+end
+
+--- Puts the panel in the clean "nothing resumed" state and releases a send
+--- that queued behind the restore this abandons.
+local function begin_fresh_start()
+  state.explicit_new = true
+  refresh_status(nil)
+  render_fresh_start()
+  finish_restore()
+end
+
+--- Loads `session_id` as the panel's current conversation and replays its
+--- transcript. Shared by the picker's resume choice and `chat.default =
+--- 'resume-last'`'s open path — the only two places a specific past session
+--- becomes the live one.
+--- The caller owns the restore generation: a caller switching AWAY from the
+--- restore in flight must `abandon_restore()` first, so a prompt queued behind
+--- it is not replayed into this session. The `resume-last` open path does not
+--- — landing on its own session continues the restore the user typed into.
+--- @param session_id string
+--- @param note string|nil status suffix; nil for a plain resume on open
+local function resume(session_id, note)
+  state.session_id = session_id
+  state.explicit_new = false
+  state.restored = false
+  refresh_status(note)
+  load_history(session_id, state.restore_token)
+end
+
+--- `chat.default = 'resume-last'`: looks up this project's stored session and
+--- resumes it; falls back to a fresh start when there is none.
+--- @param token integer the restore generation this lookup belongs to
+local function open_resume_last(token)
+  agent.request('chat.list', { root = state.root, limit = 1 }, function(err, result)
+    if token ~= state.restore_token then
+      return
+    end
+    if err ~= nil then
+      -- Never downgrade a failed lookup into "this project has no history":
+      -- the user opted into resuming and has to know it did not happen.
+      show_error(err)
+      begin_fresh_start()
+      return
+    end
+    local current = result ~= nil and result.current or nil
+    if current == nil then
+      begin_fresh_start()
+      return
+    end
+    resume(current, nil)
+  end)
 end
 
 --- Opens (or focuses) a fresh chat panel for this project.
@@ -174,7 +284,7 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'prompt · <CR> send · <C-n> new · <C-r> resume · <C-c> stop',
+    prompt_hint = 'prompt · <CR> send · <C-n> new · <C-r> sessions · <C-c> stop',
     root = state.root,
     on_submit = M.send,
     on_close = on_panel_close,
@@ -186,11 +296,23 @@ function M.open()
     },
   })
   if not existed then
+    abandon_restore()
     state.session_id = nil
     state.pending_send = nil
-    state.restored = true
-    refresh_status(nil)
-    render_fresh_start()
+    if opts.chat.default == 'resume-last' then
+      -- The lookup is async and `state` outlives the panel: without resetting
+      -- these here, a send in the gap escapes the gate on stale flags and goes
+      -- out as a brand-new conversation the resume then lands on top of.
+      state.explicit_new = false
+      state.restored = false
+      refresh_status(nil)
+      open_resume_last(state.restore_token)
+    else
+      state.explicit_new = true
+      state.restored = true
+      refresh_status(nil)
+      render_fresh_start()
+    end
   end
 end
 
@@ -213,7 +335,7 @@ function M.send(text, extra, echo)
   if not state.restored then
     -- Restore (session lookup + history) is still running: sending now would
     -- guess at the session and let the resumed transcript land mid-stream.
-    state.pending_send = { text = text, extra = extra, echo = echo }
+    state.pending_send = { text = text, extra = extra, echo = echo, token = state.restore_token }
     return
   end
   if state.request_id ~= nil then
@@ -235,11 +357,16 @@ function M.send(text, extra, echo)
   surface():start_activity()
 
   local dial = models.dial('chat')
+  -- The reply decides which conversation the panel is in. If the panel has
+  -- walked away since (reopen, <C-n>, a picked session, a delete), this turn
+  -- is no longer the one on screen and must not name it.
+  local token = state.restore_token
   agent.request('chat.send', {
     root = state.root,
     prompt = text,
     context = blocks,
     sessionId = state.session_id,
+    new = state.explicit_new,
     projectInstructions = context.project_instructions(state.root),
     model = dial.model,
     effort = dial.effort,
@@ -251,7 +378,11 @@ function M.send(text, extra, echo)
       show_error(err)
       return
     end
+    if token ~= state.restore_token or state.deleted[result.sessionId] then
+      return
+    end
     state.session_id = result.sessionId
+    state.explicit_new = false
     refresh_status(string.format('%d out · $%.4f', result.usage.output, result.costUsd))
     M.offer(result.options)
   end, {
@@ -333,7 +464,60 @@ local function age(ms)
   return string.format('%dd ago', math.floor(seconds / 86400))
 end
 
---- `<C-r>`: pick a past session for this project and continue it.
+--- Drops the panel back to fresh after the conversation it was showing was
+--- deleted. Its transcript is gone, so nothing here could still resume it.
+local function reset_after_delete()
+  abandon_restore()
+  state.session_id = nil
+  state.explicit_new = true
+  state.restored = true
+  abandon_pending_send()
+  surface():replace({}, {})
+  surface():append('— that conversation was deleted —', 'NvimeDim')
+  surface():blank()
+  refresh_status(nil)
+  render_fresh_start()
+end
+
+--- Deletes a stored session and its history. Called from the picker's `d`,
+--- after its own y/n confirm. Drops the panel back to fresh if the deleted
+--- session is the one currently live — its transcript is gone, so nothing
+--- here could still resume it.
+--- @param session_id string
+--- @param done fun(ok: boolean) picker.open's on_delete callback
+local function delete_session(session_id, done)
+  if state.session_id == session_id and state.request_id ~= nil then
+    -- Same reason `M.new_session` refuses: the reset below calls
+    -- `surface():replace`, which cannot run into an open stream.
+    vim.notify('nvime: stop the running turn before deleting this conversation', vim.log.levels.WARN)
+    done(false)
+    return
+  end
+  agent.request('chat.forget', { root = state.root, sessionId = session_id }, function(err, result)
+    if err ~= nil then
+      show_error(err)
+      done(false)
+      return
+    end
+    if result ~= nil and result.alreadyGone then
+      vim.notify('nvime: that conversation was already gone', vim.log.levels.INFO)
+    end
+    state.deleted[session_id] = true
+    -- The picker row must be released even if the surface work throws, or it
+    -- stays dimmed and unusable for the life of the picker. The failure is
+    -- re-raised after, never swallowed.
+    local reset_ok, reset_err = true, nil
+    if state.session_id == session_id then
+      reset_ok, reset_err = pcall(reset_after_delete)
+    end
+    done(true)
+    if not reset_ok then
+      error(reset_err, 0)
+    end
+  end)
+end
+
+--- `<C-r>`: start fresh, or pick a past session for this project and continue it.
 function M.pick_session()
   -- Only reachable from a panel keybind, so the panel's root is already captured.
   assert(type(state.root) == 'string', 'chat.pick_session needs an open panel')
@@ -346,7 +530,7 @@ function M.pick_session()
       show_error(err)
       return
     end
-    local items = {}
+    local items = { { label = 'new conversation', value = NEW_SESSION, deletable = false } }
     for _, session in ipairs(result.sessions or {}) do
       items[#items + 1] = {
         -- The age is metadata, the prompt is the thing being chosen: the
@@ -360,15 +544,20 @@ function M.pick_session()
     picker.open(items, {
       title = ' sessions ',
       on_choice = function(session_id)
+        if session_id == NEW_SESSION then
+          M.new_session()
+          return
+        end
+        -- The user switched conversations: the restore in flight is theirs no
+        -- longer, and a prompt queued behind it was not written for this one.
+        abandon_restore()
+        abandon_pending_send()
         surface():replace({}, {})
-        state.session_id = session_id
-        state.pending_send = nil
-        state.restored = false
-        refresh_status('switched')
         surface():append('— switched to ' .. short(session_id) .. ' —', 'NvimeDim')
         surface():blank()
-        load_history(session_id)
+        resume(session_id, 'switched')
       end,
+      on_delete = delete_session,
     })
   end)
 end
@@ -381,9 +570,11 @@ function M.new_session()
     return
   end
   surface():replace({}, {})
+  abandon_restore()
   state.session_id = nil
-  state.pending_send = nil
+  state.explicit_new = true
   state.restored = true
+  abandon_pending_send()
   refresh_status('fresh')
   render_fresh_start()
 end

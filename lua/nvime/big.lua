@@ -31,6 +31,10 @@ local function surface()
   return panel.get(PANEL) or NOOP
 end
 
+--- The picker's "start a fresh change" row. A table, not a string, so it can
+--- never collide with a real (sidecar-issued) session id.
+local NEW_CHANGE = {}
+
 local state = {
   root = nil,
   --- The last SessionView the sidecar returned, or nil when none is selected.
@@ -735,7 +739,8 @@ local function attach_busy()
   return false
 end
 
---- `<C-r>`: pick one of this project's big changes and load it into the panel.
+--- `<C-r>`: start a fresh change, or pick one of this project's existing
+--- changes and load it into the panel.
 function M.pick_session()
   assert(type(state.root) == 'string', 'big.pick_session needs an open panel')
   if attach_busy() then
@@ -746,7 +751,7 @@ function M.pick_session()
       show_error(err)
       return
     end
-    local items = {}
+    local items = { { label = 'start a new change', value = NEW_CHANGE, deletable = false } }
     for _, session in ipairs(result.sessions or {}) do
       items[#items + 1] = {
         label = string.format('%-14s %s', M.describe(session):sub(1, 14), session.title),
@@ -754,13 +759,13 @@ function M.pick_session()
         value = session.id,
       }
     end
-    if #items == 0 then
-      vim.notify('nvime: no big changes yet — describe one in the prompt', vim.log.levels.INFO)
-      return
-    end
     picker.open(items, {
       title = ' big changes ',
       on_choice = function(id)
+        if id == NEW_CHANGE then
+          M.new_change()
+          return
+        end
         M.select(id)
       end,
     })
@@ -841,7 +846,7 @@ function M.open()
     width = opts.panel.width,
     prompt_height = opts.panel.prompt_height,
     position = opts.panel.position,
-    prompt_hint = 'describe · <CR> send · <C-n> new · <C-r> resume · <C-t> review · <C-c> stop',
+    prompt_hint = 'describe · <CR> send · <C-n> new · <C-r> changes · <C-t> review · <C-c> stop',
     on_submit = M.send,
     on_close = on_panel_close,
     keys = {
